@@ -14,11 +14,6 @@
     "resolveJsonModule": true,
     "sourceMap": true,
     "declaration": true,
-    "declarationMap": true,
-    "paths": {
-      "@pos/config": ["./packages/config/src/index.ts"],
-      "@pos/contracts": ["./packages/contracts/src/index.ts"],
-      "@pos/domain": ["./packages/domain/src/index.ts"]
-    }
+    "declarationMap": true
   }
 }

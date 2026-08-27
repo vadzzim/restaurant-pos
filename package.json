@@ -8,18 +8,18 @@
     "node": ">=24"
   },
   "scripts": {
-    "build:packages": "pnpm --filter @pos/config --filter @pos/contracts --filter @pos/domain run build",
+    "build:packages": "pnpm --filter @pos/config --filter @pos/contracts --filter @pos/domain --filter @pos/db run build",
     "dev": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker --parallel run dev",
     "lint": "eslint . && prettier --check --ignore-unknown .",
     "typecheck": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker run typecheck",
-    "test": "pnpm --recursive --if-present run test",
+    "test": "pnpm run build:packages && pnpm --recursive --workspace-concurrency=1 --if-present run test",
     "build": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker run build",
-    "db:migrate": "pnpm run build:packages && pnpm --filter @pos/api run db:migrate",
-    "db:seed": "pnpm run build:packages && pnpm --filter @pos/api run db:seed",
+    "db:migrate": "pnpm run build:packages && pnpm --filter @pos/db run db:migrate",
+    "db:seed": "pnpm run build:packages && pnpm --filter @pos/db run db:seed",
     "format": "prettier --write --ignore-unknown .",
     "format:check": "prettier --check --ignore-unknown .",
-    "db:generate": "pnpm run build:packages && pnpm --filter @pos/api run db:generate",
-    "db:check": "pnpm run build:packages && pnpm --filter @pos/api run db:check"
+    "db:generate": "pnpm run build:packages && pnpm --filter @pos/db run db:generate",
+    "db:check": "pnpm run build:packages && pnpm --filter @pos/db run db:check"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

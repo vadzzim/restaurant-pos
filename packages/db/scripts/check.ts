@@ -1,6 +1,8 @@
 import { sql } from 'drizzle-orm';
 
-import { closeDb, db } from './client.js';
+import { loadConfig } from '@pos/config';
+
+import { createDb } from '../src/client.js';
 
 /**
  * Proves the schema is really there: every table is selectable, the outbox partial index exists,
@@ -35,6 +37,8 @@ type ColumnRow = {
 type IndexRow = { indexdef: string } & Record<string, unknown>;
 
 let failed = false;
+
+const { db, close } = createDb(loadConfig().DATABASE_URL);
 
 try {
   const counts: Record<string, number> = {};
@@ -83,7 +87,7 @@ try {
   failed = true;
   console.error('Schema check failed:', error);
 } finally {
-  await closeDb();
+  await close();
 }
 
 if (failed) {

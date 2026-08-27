@@ -23,8 +23,8 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M0 | Scaffolding and planning | S | Sonnet | no | done |
 | M1 | Baseline commit + monorepo + Compose | M | Sonnet | no | done |
 | M2 | Full schema + migrations + seed | M | **Opus** | no | done |
-| M3 | Vertical slice, backend | **L** | **Opus** | no | next |
-| M4 | Vertical slice, frontend | **L** | Sonnet | **yes** | |
+| M3 | Vertical slice, backend | **L** | **Opus** | no | done |
+| M4 | Vertical slice, frontend | **L** | Sonnet | **yes** | next |
 | M5 | All remaining commands + conflict rules | **L** | **Opus** | yes | |
 | M6 | Error model + logging + split health + CI | M | Sonnet | yes | |
 | M7 | Dexie / IndexedDB persistence | M | Sonnet | yes | |
@@ -41,7 +41,7 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M18 | Playwright E2E | M | Sonnet | yes | |
 | M19 | All documentation + final smoke | **L** | **Opus** | yes | |
 
-**Twenty milestones, M0 through M19 — seventeen still to run.** The scope grew from the review's
+**Twenty milestones, M0 through M19 — sixteen still to run.** The scope grew from the review's
 additions and nothing was cut; that was a deliberate call, recorded in `docs/PROGRESS.md`.
 
 If the interview date closes in, drop in this order: **M10** (the print job — an invented

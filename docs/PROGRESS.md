@@ -5,44 +5,54 @@
 
 ## Current state
 
-**Last completed milestone:** M2 — database schema, migrations, and seed data.
-**Next:** M3 — the vertical slice through the backend. Recommended model: Opus.
+**Last completed milestone:** M3 — the backend vertical slice: HTTP -> transaction -> outbox ->
+Redpanda -> kitchen consumer -> projection, for `CREATE_ORDER`, `ADD_ITEM` and `SEND_TO_KITCHEN`.
+**Next:** M4 — the frontend vertical slice and Socket.IO. Recommended model: Sonnet.
+**This is the milestone that makes M4 demoable.**
 
-M0 is `9a87b86`, M1 is `3b498e8`. M2 passes typecheck, lint, build, `db:migrate` (twice),
-`db:seed` (twice, same counts) and `db:check` (13/13 tables selectable, partial outbox index
-present). PostgreSQL, Redis, Redpanda and the Console are up and were left running.
+M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`. M3 passes typecheck, lint, build and 27
+tests (9 domain, 10 api, 8 worker) against a real PostgreSQL. The seven mandatory tests §21.1,
+21.2, 21.3, 21.5, 21.6, 21.11 and 21.15 are present and named by their spec number.
 
 ## What exists
 
-- `CLAUDE.md` — project conventions and context-budget rules.
-- `docs/spec.md` — the canonical spec, distilled from both source prompts and revised.
-- `docs/MILESTONES.md` — twenty milestones M0–M19 with briefs, a recommended model, and whether
-  the project is demoable after each.
-- `docs/milestones/M01.md`, `docs/milestones/M02.md` — the completed implementation briefs.
-- `docs/build-log.md` plus accepted ADRs 001 and 007.
-- M1 workspace skeleton: `apps/{api,web,worker}`, `packages/{config,contracts,domain}`, Compose,
-  root tooling, a short README.
-- M2 persistence: `apps/api/src/db/{schema,client,migrate,seed,check}.ts`, `drizzle.config.ts`,
-  the committed migration in `apps/api/drizzle/`, and the scripts `db:generate db:migrate db:seed
-  db:check` at both the api and root level. `packages/contracts` now exports the `ORDER_STATUSES`
-  and `MUTATION_TYPES` value tuples, so the `order_status` PostgreSQL enum cannot drift from
-  `OrderStatus`.
+- `CLAUDE.md`, `docs/spec.md`, `docs/MILESTONES.md`, `docs/build-log.md`.
+- `docs/milestones/M01.md`, `M02.md`, `M03.md` — the completed briefs.
+- ADRs 001, 003, 004, 007, 009 accepted.
+- `packages/config` — zod environment, now including `TEST_DATABASE_URL`, the Kafka topic settings
+  and the outbox tuning knobs.
+- `packages/contracts` — statuses, mutation types, event types, order and event payload DTOs, the
+  §5 request/response shapes and `ConflictReason`.
+- `packages/domain` — `calculateTotalCents`, `isValidTransition`, and `decide()`: the one place
+  that answers whether a mutation may apply to an order as it stands. No database, no HTTP.
+- `packages/db` — schema, migrations, seed, `db:check`, and `@pos/db/testing` (creates `pos_test`,
+  migrates, seeds, truncates between tests). **Moved here from `apps/api/src/db` in M3**, because
+  the worker needs the same tables and one app cannot import another app's source.
+- `apps/api` — `POST /api/orders/:orderId/mutations` (the only write path), zod validation, the
+  §7 transaction, the §17 error model, `buildApp()` so tests can `inject`.
+- `apps/worker` — the §10 three-step outbox publisher with lease, backoff and dead-lettering; the
+  Kafka producer and topic bootstrap; the kitchen consumer and its transactional projection.
+- `apps/web` — still the M1 placeholder.
 
-## Schema facts M3 depends on
+## Facts M4 depends on
 
-- Slug text ids for `restaurants`, `terminals`, `products` (`demo-restaurant`, `pos-1`, `burger`);
-  `uuid` for everything generated at runtime, including the client-generated `orders.id`.
-- `outbox_events.id` **is** the `eventId` of the §11 envelope, and the row also carries
-  `restaurant_id` and `trace_id` so the publisher can build the envelope without joining `orders`.
-- `order_items` has `unique(order_id, product_id)`: one product is one line whose quantity
-  changes, so `ADD_ITEM` is an upsert.
-- `payments.mutation_id` is unique; `processed_mutations.mutation_id` is the primary key;
-  `processed_events` is keyed by `(event_id, consumer_name)`.
-- `outbox_events.aggregate_id`, `conflict_log.order_id` and `processed_mutations.order_id` are
-  deliberately **not** foreign keys — the log, the audit record and the idempotency record must
-  outlive the row that produced them.
-- Only the intentional indexes exist, including the partial
-  `outbox_events(next_attempt_at) where published_at is null and dead_lettered_at is null`.
+- **One write path.** `POST /api/orders/:orderId/mutations`. There is no `POST /api/orders`: the
+  client generates the `orderId` (uuid) and sends `CREATE_ORDER` with `baseVersion: 0`.
+- The client must send `mutationId` (uuid v4), `terminalId`, `restaurantId`, `baseVersion`, `type`
+  and `payload`; responses are exactly the §5 shapes, typed in `@pos/contracts` as
+  `MutationResponse`. Validation failures use the §17 `{ code, message, details }` envelope.
+- **There is no read endpoint yet.** M4 needs `GET /api/orders/:id` and `GET /api/menu`, and it
+  should add them — the mutation response already carries the full `OrderSnapshot`, so a POS can
+  work from it, but the kitchen screen cannot.
+- The kitchen projection is `kitchen_tickets`, written only from `OrderSentToKitchen`, with
+  `state = 'SENT_TO_KITCHEN'` and `source_event_version`. M4's kitchen screen reads this table.
+- Events on `restaurant.order.events` are keyed by `orderId`; the envelope is `DomainEvent`.
+- Test databases: `TEST_DATABASE_URL` (`pos_test`), created and migrated automatically by
+  `@pos/db/testing`. The demo database is never truncated by a test run.
+- Workspace packages resolve through their `exports` to `dist`, so `pnpm run build:packages` runs
+  before dev, typecheck, build, test and the db scripts. Vitest aliases the sources instead.
+- Root `pnpm test` runs the workspace suites with `--workspace-concurrency=1`, because they share
+  one test database.
 
 ## Decisions already made
 
@@ -115,17 +125,18 @@ present). PostgreSQL, Redis, Redpanda and the Console are up and were left runni
   independently flagged it as an invented responsibility, and it is first on the drop list.
 - Infrastructure URLs intentionally have development defaults. M14 production images must require
   explicit values rather than inheriting localhost defaults.
-- Shared packages build once when `pnpm dev` starts. Add watch mode or project references only if
-  editing shared packages during a running dev session becomes a real source of friction.
-- **There is still no test runner.** M3 introduces Vitest and the integration tests, and it will
-  need a decision on how tests get a database: reuse the running Compose PostgreSQL with a
-  per-suite truncation, or a separate database. `pnpm verify:integration` (M6) scripts whatever
-  M3 chooses.
-- `db:check` is a script, not a test. It proves the schema exists; it asserts nothing about
-  behaviour. That is deliberate at M2 and is superseded once M3 has real tests.
+- **Kafka is not in the test path.** The publisher is tested against a fake transport and the
+  consumer's projection is tested by calling it directly. The real broker round trip was verified
+  by hand at the end of M3 and is automated in M6 by `pnpm verify:integration`. §21.12 (crash
+  after publish) and §21.16 (lease expiry, two workers) belong to M9.
+- The worker connects to Redpanda at startup and will exit if the broker is down. That is
+  acceptable for a demo but is the opposite of the API's readiness rule (§17): M6 should decide
+  whether the worker retries its connection instead.
+- `outbox_events` and `processed_mutations` grow without bound. Archiving is out of scope and
+  worth saying out loud in the interview rather than pretending otherwise.
 
 ## First command of the next session
 
 ```
-Read docs/PROGRESS.md. Expand M3 from docs/MILESTONES.md into docs/milestones/M03.md, then implement M3 only. Stop when the Verification block passes.
+Read docs/PROGRESS.md. Expand M4 from docs/MILESTONES.md into docs/milestones/M04.md, then implement M4 only. Stop when the Verification block passes.
 ```

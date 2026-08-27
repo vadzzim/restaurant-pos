@@ -8,20 +8,20 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "tsup src/index.ts --format esm --sourcemap --clean",
     "start": "node --env-file-if-exists=../../.env dist/index.js",
-    "db:migrate": "tsx --env-file-if-exists=../../.env src/db/migrate.ts",
-    "db:seed": "tsx --env-file-if-exists=../../.env src/db/seed.ts",
-    "db:generate": "drizzle-kit generate",
-    "db:check": "tsx --env-file-if-exists=../../.env src/db/check.ts"
+    "test": "vitest run"
   },
   "dependencies": {
     "@pos/config": "workspace:*",
     "@pos/contracts": "workspace:*",
+    "@pos/db": "workspace:*",
+    "@pos/domain": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "fastify": "^5.12.1",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1",
-    "drizzle-kit": "^0.31.10"
+    "vitest": "^4.1.11"
   }
 }

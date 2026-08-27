@@ -1,21 +1,16 @@
-import Fastify from 'fastify';
-
 import { loadConfig } from '@pos/config';
+import { closeDb, getDb } from '@pos/db';
+
+import { buildApp } from './app.js';
 
 const config = loadConfig();
-const app = Fastify({
-  logger: {
-    level: config.LOG_LEVEL,
-  },
-});
-
-app.get('/api/health/live', async () => ({ status: 'ok' }));
-app.get('/api/health/ready', async () => ({ status: 'ok' }));
+const app = buildApp({ db: getDb().db, logLevel: config.LOG_LEVEL });
 
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
   app.log.info({ signal }, 'Shutting down API');
   try {
     await app.close();
+    await closeDb();
   } catch (error) {
     app.log.error({ error, signal }, 'Failed to shut down API cleanly');
     process.exitCode = 1;

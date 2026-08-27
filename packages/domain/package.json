@@ -10,6 +10,13 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.11"
+  },
+  "dependencies": {
+    "@pos/contracts": "workspace:*"
   }
 }
