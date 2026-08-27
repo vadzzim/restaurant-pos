@@ -14,12 +14,12 @@
     "typecheck": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker run typecheck",
     "test": "pnpm --recursive --if-present run test",
     "build": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker run build",
-    "db:migrate": "pnpm --filter @pos/api run db:migrate",
-    "db:seed": "pnpm --filter @pos/api run db:seed",
+    "db:migrate": "pnpm run build:packages && pnpm --filter @pos/api run db:migrate",
+    "db:seed": "pnpm run build:packages && pnpm --filter @pos/api run db:seed",
     "format": "prettier --write --ignore-unknown .",
     "format:check": "prettier --check --ignore-unknown .",
-    "db:generate": "pnpm --filter @pos/api run db:generate",
-    "db:check": "pnpm --filter @pos/api run db:check"
+    "db:generate": "pnpm run build:packages && pnpm --filter @pos/api run db:generate",
+    "db:check": "pnpm run build:packages && pnpm --filter @pos/api run db:check"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
