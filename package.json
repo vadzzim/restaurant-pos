@@ -17,7 +17,9 @@
     "db:migrate": "pnpm --filter @pos/api run db:migrate",
     "db:seed": "pnpm --filter @pos/api run db:seed",
     "format": "prettier --write --ignore-unknown .",
-    "format:check": "prettier --check --ignore-unknown ."
+    "format:check": "prettier --check --ignore-unknown .",
+    "db:generate": "pnpm --filter @pos/api run db:generate",
+    "db:check": "pnpm --filter @pos/api run db:check"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

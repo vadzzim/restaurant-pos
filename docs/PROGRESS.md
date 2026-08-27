@@ -5,12 +5,12 @@
 
 ## Current state
 
-**Last completed milestone:** M1 — monorepo, Docker Compose, and three runnable app processes.
-**Next:** M2 — database schema, migrations, and seed data. Recommended model: Opus.
+**Last completed milestone:** M2 — database schema, migrations, and seed data.
+**Next:** M3 — the vertical slice through the backend. Recommended model: Opus.
 
-The M0 documents are committed as `9a87b86`. M1 passes install, typecheck, lint, test, build,
-local API/worker startup, and Compose config validation. PostgreSQL, Redis, Redpanda, and Redpanda
-Console all report healthy under Docker Compose.
+M0 is `9a87b86`, M1 is `3b498e8`. M2 passes typecheck, lint, build, `db:migrate` (twice),
+`db:seed` (twice, same counts) and `db:check` (13/13 tables selectable, partial outbox index
+present). PostgreSQL, Redis, Redpanda and the Console are up and were left running.
 
 ## What exists
 
@@ -18,15 +18,36 @@ Console all report healthy under Docker Compose.
 - `docs/spec.md` — the canonical spec, distilled from both source prompts and revised.
 - `docs/MILESTONES.md` — twenty milestones M0–M19 with briefs, a recommended model, and whether
   the project is demoable after each.
-- `docs/milestones/M01.md` — the completed M1 implementation brief.
+- `docs/milestones/M01.md`, `docs/milestones/M02.md` — the completed implementation briefs.
 - `docs/build-log.md` plus accepted ADRs 001 and 007.
 - M1 workspace skeleton: `apps/{api,web,worker}`, `packages/{config,contracts,domain}`, Compose,
-  root tooling, a short README, and ADRs 001 and 007.
+  root tooling, a short README.
+- M2 persistence: `apps/api/src/db/{schema,client,migrate,seed,check}.ts`, `drizzle.config.ts`,
+  the committed migration in `apps/api/drizzle/`, and the scripts `db:generate db:migrate db:seed
+  db:check` at both the api and root level. `packages/contracts` now exports the `ORDER_STATUSES`
+  and `MUTATION_TYPES` value tuples, so the `order_status` PostgreSQL enum cannot drift from
+  `OrderStatus`.
+
+## Schema facts M3 depends on
+
+- Slug text ids for `restaurants`, `terminals`, `products` (`demo-restaurant`, `pos-1`, `burger`);
+  `uuid` for everything generated at runtime, including the client-generated `orders.id`.
+- `outbox_events.id` **is** the `eventId` of the §11 envelope, and the row also carries
+  `restaurant_id` and `trace_id` so the publisher can build the envelope without joining `orders`.
+- `order_items` has `unique(order_id, product_id)`: one product is one line whose quantity
+  changes, so `ADD_ITEM` is an upsert.
+- `payments.mutation_id` is unique; `processed_mutations.mutation_id` is the primary key;
+  `processed_events` is keyed by `(event_id, consumer_name)`.
+- `outbox_events.aggregate_id`, `conflict_log.order_id` and `processed_mutations.order_id` are
+  deliberately **not** foreign keys — the log, the audit record and the idempotency record must
+  outlive the row that produced them.
+- Only the intentional indexes exist, including the partial
+  `outbox_events(next_attempt_at) where published_at is null and dead_lettered_at is null`.
 
 ## Decisions already made
 
 - Fastify over NestJS, Drizzle over Prisma.
-- Full scope, nothing cut. **Twenty milestones total, eighteen still to run.**
+- Full scope, nothing cut. **Twenty milestones total, seventeen still to run.**
 - **A demoable vertical slice lands at M4**, not M11. The original ordering finished the backend
   first, which risked reaching the usage limit with green tests and nothing to show.
 - **The user starts the infrastructure.** Claude never runs `docker compose` and never reads
@@ -96,9 +117,15 @@ Console all report healthy under Docker Compose.
   explicit values rather than inheriting localhost defaults.
 - Shared packages build once when `pnpm dev` starts. Add watch mode or project references only if
   editing shared packages during a running dev session becomes a real source of friction.
+- **There is still no test runner.** M3 introduces Vitest and the integration tests, and it will
+  need a decision on how tests get a database: reuse the running Compose PostgreSQL with a
+  per-suite truncation, or a separate database. `pnpm verify:integration` (M6) scripts whatever
+  M3 chooses.
+- `db:check` is a script, not a test. It proves the schema exists; it asserts nothing about
+  behaviour. That is deliberate at M2 and is superseded once M3 has real tests.
 
 ## First command of the next session
 
 ```
-Read docs/PROGRESS.md. Expand M2 from docs/MILESTONES.md into docs/milestones/M02.md, then implement M2 only. Stop when the Verification block passes.
+Read docs/PROGRESS.md. Expand M3 from docs/MILESTONES.md into docs/milestones/M03.md, then implement M3 only. Stop when the Verification block passes.
 ```

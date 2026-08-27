@@ -8,11 +8,20 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "tsup src/index.ts --format esm --sourcemap --clean",
     "start": "node --env-file-if-exists=../../.env dist/index.js",
-    "db:migrate": "node -e \"console.error('M2 not implemented'); process.exit(1)\"",
-    "db:seed": "node -e \"console.error('M2 not implemented'); process.exit(1)\""
+    "db:migrate": "tsx --env-file-if-exists=../../.env src/db/migrate.ts",
+    "db:seed": "tsx --env-file-if-exists=../../.env src/db/seed.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:check": "tsx --env-file-if-exists=../../.env src/db/check.ts"
   },
   "dependencies": {
     "@pos/config": "workspace:*",
-    "fastify": "^5.12.1"
+    "@pos/contracts": "workspace:*",
+    "drizzle-orm": "^0.45.2",
+    "fastify": "^5.12.1",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.10"
   }
 }

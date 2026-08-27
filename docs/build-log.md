@@ -21,3 +21,14 @@ packages, uses a service-aware proxy, treats `.env` as optional, and checks Cons
 Redpanda started successfully but stayed unhealthy because `rpk cluster health` in the pinned
 image no longer accepts `--brokers`. The healthcheck now uses the supported
 `--exit-when-healthy` flag; a direct `rpk cluster info` confirmed the broker itself was running.
+
+## M2 — schema, migrations, seed
+
+Nothing broke at the database level: the generated migration applied to the clean database on the
+first attempt, and the seed was idempotent from the start.
+
+Two small friction points. Drizzle's `db.execute<T>` constrains `T` to `Record<string, unknown>`,
+so the row shapes in `db:check` are intersection types rather than plain interfaces — an interface
+has no index signature and is rejected. And Prettier tried to reformat the generated
+`drizzle/meta/*.json` snapshots, which would put the repository permanently at odds with
+`drizzle-kit generate`; `apps/api/drizzle/` is now in `.prettierignore`.
