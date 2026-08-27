@@ -1,0 +1,16 @@
+{
+  "name": "@pos/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file=../../.env src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsup src/index.ts --format esm --sourcemap --clean",
+    "start": "node --env-file-if-exists=../../.env dist/index.js"
+  },
+  "dependencies": {
+    "@pos/config": "workspace:*",
+    "pino": "^10.3.1"
+  }
+}

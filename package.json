@@ -1,0 +1,44 @@
+{
+  "name": "restaurant-pos-demo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build:packages": "pnpm --filter @pos/config --filter @pos/contracts --filter @pos/domain run build",
+    "dev": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker --parallel run dev",
+    "lint": "eslint . && prettier --check --ignore-unknown .",
+    "typecheck": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker run typecheck",
+    "test": "pnpm --recursive --if-present run test",
+    "build": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker run build",
+    "db:migrate": "pnpm --filter @pos/api run db:migrate",
+    "db:seed": "pnpm --filter @pos/api run db:seed",
+    "format": "prettier --write --ignore-unknown .",
+    "format:check": "prettier --check --ignore-unknown ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^24.13.3",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "eslint": "^10.9.1",
+    "eslint-plugin-vue": "^10.10.0",
+    "globals": "^17.11.0",
+    "prettier": "^3.9.6",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.12",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.68.0",
+    "vite": "^8.2.2",
+    "vue-tsc": "^3.3.11"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

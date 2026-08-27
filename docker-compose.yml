@@ -1,0 +1,148 @@
+name: restaurant-pos
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pos
+      POSTGRES_USER: pos
+      POSTGRES_PASSWORD: pos
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U pos -d pos']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redpanda:
+    image: redpandadata/redpanda:v25.2.10
+    command:
+      - redpanda
+      - start
+      - --mode
+      - dev-container
+      - --smp
+      - '1'
+      - --kafka-addr
+      - internal://0.0.0.0:29092,external://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - internal://redpanda:29092,external://localhost:9092
+    ports:
+      - '9092:9092'
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ['CMD', 'rpk', 'cluster', 'health', '--exit-when-healthy']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redpanda-console:
+    image: redpandadata/console:v3.2.2
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+    ports:
+      - '8080:8080'
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://localhost:8080/health']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  api:
+    image: node:24-alpine
+    profiles: ['app']
+    working_dir: /workspace
+    command: >-
+      sh -c "corepack enable && pnpm install --frozen-lockfile --config.node-linker=hoisted &&
+      pnpm run build:packages && pnpm --filter @pos/api dev"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      API_HOST: 0.0.0.0
+      DATABASE_URL: postgresql://pos:pos@postgres:5432/pos
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: redpanda:29092
+    ports:
+      - '3000:3000'
+    volumes:
+      - .:/workspace
+      - api_node_modules:/workspace/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  web:
+    image: node:24-alpine
+    profiles: ['app']
+    working_dir: /workspace
+    command: >-
+      sh -c "corepack enable && pnpm install --frozen-lockfile --config.node-linker=hoisted &&
+      pnpm run build:packages && pnpm --filter @pos/web dev"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      API_PROXY_TARGET: http://api:3000
+    ports:
+      - '5173:5173'
+    volumes:
+      - .:/workspace
+      - web_node_modules:/workspace/node_modules
+    depends_on:
+      api:
+        condition: service_started
+
+  worker:
+    image: node:24-alpine
+    profiles: ['app']
+    working_dir: /workspace
+    command: >-
+      sh -c "corepack enable && pnpm install --frozen-lockfile --config.node-linker=hoisted &&
+      pnpm run build:packages && pnpm --filter @pos/worker dev"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://pos:pos@postgres:5432/pos
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: redpanda:29092
+    volumes:
+      - .:/workspace
+      - worker_node_modules:/workspace/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redpanda_data:
+  api_node_modules:
+  web_node_modules:
+  worker_node_modules:

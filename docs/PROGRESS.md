@@ -5,12 +5,12 @@
 
 ## Current state
 
-**Last completed milestone:** M0 — scaffolding and planning, revised twice after external design
-reviews.
-**Next:** M1 — baseline commit, monorepo, Docker Compose. Recommended model: Sonnet.
+**Last completed milestone:** M1 — monorepo, Docker Compose, and three runnable app processes.
+**Next:** M2 — database schema, migrations, and seed data. Recommended model: Opus.
 
-There is no application code yet, only documents. Git is not initialised yet — M1 starts by
-creating the repo and committing these documents as a baseline.
+The M0 documents are committed as `9a87b86`. M1 passes install, typecheck, lint, test, build,
+local API/worker startup, and Compose config validation. PostgreSQL, Redis, Redpanda, and Redpanda
+Console all report healthy under Docker Compose.
 
 ## What exists
 
@@ -18,13 +18,15 @@ creating the repo and committing these documents as a baseline.
 - `docs/spec.md` — the canonical spec, distilled from both source prompts and revised.
 - `docs/MILESTONES.md` — twenty milestones M0–M19 with briefs, a recommended model, and whether
   the project is demoable after each.
-- `docs/milestones/M01.md` — the expanded brief for the next session.
-- `docs/build-log.md` and `docs/adr/` — stubs.
+- `docs/milestones/M01.md` — the completed M1 implementation brief.
+- `docs/build-log.md` plus accepted ADRs 001 and 007.
+- M1 workspace skeleton: `apps/{api,web,worker}`, `packages/{config,contracts,domain}`, Compose,
+  root tooling, a short README, and ADRs 001 and 007.
 
 ## Decisions already made
 
 - Fastify over NestJS, Drizzle over Prisma.
-- Full scope, nothing cut. **Twenty milestones, nineteen still to run.**
+- Full scope, nothing cut. **Twenty milestones total, eighteen still to run.**
 - **A demoable vertical slice lands at M4**, not M11. The original ordering finished the backend
   first, which risked reaching the usage limit with green tests and nothing to show.
 - **The user starts the infrastructure.** Claude never runs `docker compose` and never reads
@@ -90,9 +92,13 @@ creating the repo and committing these documents as a baseline.
   the drop order is recorded above.
 - M10 (print job) survives mainly because BullMQ was wanted as a résumé keyword. Both reviewers
   independently flagged it as an invented responsibility, and it is first on the drop list.
+- Infrastructure URLs intentionally have development defaults. M14 production images must require
+  explicit values rather than inheriting localhost defaults.
+- Shared packages build once when `pnpm dev` starts. Add watch mode or project references only if
+  editing shared packages during a running dev session becomes a real source of friction.
 
 ## First command of the next session
 
 ```
-Read docs/PROGRESS.md and docs/milestones/M01.md. Implement M1 only. Stop when the Verification block passes.
+Read docs/PROGRESS.md. Expand M2 from docs/MILESTONES.md into docs/milestones/M02.md, then implement M2 only. Stop when the Verification block passes.
 ```

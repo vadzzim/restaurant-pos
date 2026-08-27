@@ -1,0 +1,13 @@
+node_modules
+dist
+coverage
+playwright-report
+.verify-output
+pnpm-lock.yaml
+CLAUDE.md
+prompt_*.md
+docs/spec.md
+docs/MILESTONES.md
+docs/PROGRESS.md
+docs/milestones/
+docs/adr/README.md
