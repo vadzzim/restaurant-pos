@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.turbo/
+coverage/
+playwright-report/
+*.log
+.verify-output/
