@@ -429,3 +429,34 @@ every command, retry and discard on every card while any one request was in flig
 deliberately tracks unresolved commands per order, and the view threw that away at the last step. A
 `Set` of busy order ids replaces it. Not unit-tested — there are no component tests in this project
 — but the store-level rule it mirrors is.
+
+## M5 review round 2 — the fix that over-generalised
+
+A second Codex pass, over `b15e56a`, found one P1: the previous round's own fix.
+
+`expectationFor` was written as "wait only for an event that creates a ticket, or for one whose
+ticket this screen already holds". The second clause is wrong. `OrderPreparing` and `OrderReady`
+**necessarily** concern a ticket that exists — `START_PREPARING` requires `SENT_TO_KITCHEN` and
+`MARK_READY` requires `PREPARING` — so an empty local list does not mean "there is no ticket", it
+means _the projection has not been read yet_, which is the one situation the wait was built for.
+Skipping it there skips it exactly when it is needed: the coalesced read can land before the
+transition reaches the projection, the event gate has already spent that event's only hint, and the
+rail sits in the previous column until another event or a reload.
+
+The condition is inverted: skip only for `OrderCancelled` with no ticket on screen, which is the
+one case that is genuinely unsatisfiable, because `CANCEL` is valid on an `OPEN` order. That also
+removes the `OrderSentToKitchen` special case, which the new rule covers.
+
+The test I wrote for the old behaviour passed only because it handed the function a `held` list
+containing the ticket. The case with an _empty_ list — the whole point of the wait — was never
+written down. It is now, for both transitions, and it fails against the previous rule.
+
+**One named residue, recorded rather than fixed:** a cancellation of an order that _was_ sent to
+the kitchen, but whose ticket this screen has not seen yet, still gets no wait. The client cannot
+distinguish it from the `OPEN`-order case; only the event could say, and putting "did this order
+ever reach the kitchen" into `OrderCancelled` would push a display concern into a domain payload
+for a case that the next event or a reload already resolves.
+
+Two rounds, two shapes worth keeping: M5's own fix widened a rule past what justified it, and the
+justification was sitting in the comment above it. Both this round and the last found the same
+thing — a rule stated correctly in prose and then implemented one notch too broadly.

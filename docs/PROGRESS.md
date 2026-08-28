@@ -12,9 +12,10 @@ component, the two §17 kitchen adapters, payments, and the kitchen rail moving 
 Model: Sonnet.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
-four review commits through `50d4ac7`, M5 `f6888e6` plus one review commit at `HEAD`. The tree
-passes typecheck, lint, build and **162 tests**
-(61 domain, 39 api, 16 worker, 46 web) against a real PostgreSQL. Ten of the sixteen mandatory
+four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `HEAD`. The
+tree
+passes typecheck, lint, build and **163 tests**
+(61 domain, 39 api, 16 worker, 47 web) against a real PostgreSQL. Ten of the sixteen mandatory
 §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3, **21.4**, 21.5, 21.6,
 **21.9**, **21.10**, 21.11, 21.15.
 
@@ -92,11 +93,14 @@ passes typecheck, lint, build and **162 tests**
   projection it refers to has been written, so the kitchen store reads until
   `source_event_version >= event.version` on a bounded backoff. A screen reading `orders` does not
   need this, because that row is written by the transaction that wrote the outbox row.
-- **Not every event earns that wait.** `expectationFor` decides: only `OrderSentToKitchen` can
-  create a ticket, so any other event earns an expectation only when the screen already holds a
-  ticket for that order. `OrderCancelled` for an `OPEN` order is the case this exists for — the
-  projection records it and builds nothing, so waiting for a ticket would spend the whole retry
-  budget and raise `PROJECTION LAG` over a fault that does not exist.
+- **Not every event earns that wait, but nearly every one does.** `expectationFor` decides, and the
+  rule is narrow on purpose: **only `OrderCancelled` with no ticket on screen skips the wait**,
+  because `CANCEL` is valid on an `OPEN` order and the projection then records the event without
+  building anything — waiting there burns the retry budget and raises `PROJECTION LAG` over a fault
+  that does not exist. Every other kitchen event concerns a ticket that exists, so an empty local
+  list means the projection is behind, which is the one case the wait is for. **Do not widen the
+  skip to "no ticket held"** — that skips the wait exactly when it is needed, and the event gate
+  has already spent that event's only hint.
 - **The browser filters what the socket delivers**: dedup by `eventId`, ignore `version` not
   greater than what it holds, refetch the snapshot on reconnect. A socket message never carries
   state into the UI — it only triggers a canonical read.
@@ -181,6 +185,11 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   Deliberate for a demo with no auth anywhere, and worth saying out loud.
 - **The projection wait is bounded and can still lose.** The kitchen screen shows `PROJECTION LAG`
   and the ticket appears only when a later event lands or the page is reloaded.
+- **One named residue in `expectationFor`:** a cancellation of an order that *was* sent to the
+  kitchen, but whose ticket this screen has not seen yet, gets no projection wait — the client
+  cannot tell it apart from a cancellation of an `OPEN` order. Bounded by the next event or a
+  reload. Closing it would mean putting "did this order ever reach the kitchen" into the
+  `OrderCancelled` payload: a display concern in a domain event, which is why it was not done.
 - **One pending mutation slot per terminal on the POS, one per order in the kitchen.** Both live in
   memory. M7 and M8 make them durable and give the POS the per-aggregate form the kitchen already
   has.

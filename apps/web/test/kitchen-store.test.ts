@@ -207,6 +207,26 @@ describe('expectationFor (what the projection may be asked to catch up to)', () 
     });
   });
 
+  it('waits for a transition whose ticket has not reached this screen yet', () => {
+    // The case that matters most, and the one the first version of this rule got wrong. A
+    // transition always concerns a ticket that exists — START_PREPARING requires SENT_TO_KITCHEN,
+    // MARK_READY requires PREPARING — so an empty `held` means the projection is behind, which is
+    // exactly what the wait is for. Skipping it here spends the event's only hint and leaves the
+    // rail in the previous column until another event or a reload.
+    expect(expectationFor(event('OrderPreparing', 'order-a', 5), [])).toEqual({
+      orderId: 'order-a',
+      version: 5,
+    });
+    expect(expectationFor(event('OrderReady', 'order-a', 6), [])).toEqual({
+      orderId: 'order-a',
+      version: 6,
+    });
+    // Nor does holding some *other* order's ticket make a difference.
+    expect(
+      expectationFor(event('OrderReady', 'order-a', 6), [ticket('order-b', 'PREPARING', 2)]),
+    ).toEqual({ orderId: 'order-a', version: 6 });
+  });
+
   it('expects nothing from a cancellation for an order the kitchen never saw', () => {
     // CANCEL is valid on an OPEN order, so this event legitimately has no ticket to move. Asking
     // the projection for one would burn the whole retry budget and raise PROJECTION LAG over a

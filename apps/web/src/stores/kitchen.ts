@@ -22,15 +22,23 @@ export type KitchenCommand = 'preparing' | 'ready';
 /**
  * What a socket event entitles the screen to demand of the projection before it gives up waiting.
  *
- * **Only `OrderSentToKitchen` can create a ticket.** Every other kitchen event can merely advance
- * one that already exists — and `OrderCancelled` is routinely broadcast for an order the kitchen
- * never saw, because `CANCEL` is valid on an `OPEN` order and the projection deliberately records
- * that event without building anything (`recorded`, not `applied`). Expecting a ticket for such a
- * cancellation spends the whole retry budget on a row that is never going to be written and ends
- * in a `PROJECTION LAG` banner reporting a fault that does not exist.
+ * **A cancellation is the only kitchen event that can concern an order with no ticket and never
+ * will.** `CANCEL` is valid on an `OPEN` order, and the projection then records the event without
+ * building anything (`recorded`, not `applied`); expecting a ticket for that spends the whole
+ * retry budget on a row nobody is going to write and ends in a `PROJECTION LAG` banner reporting a
+ * fault that does not exist.
  *
- * So: expect a ticket when the event creates one, or when this screen already holds one for that
- * order. Otherwise refresh and believe whatever comes back.
+ * Every other kitchen event necessarily concerns a ticket that exists — `OrderSentToKitchen`
+ * creates one, `START_PREPARING` requires `SENT_TO_KITCHEN` and `MARK_READY` requires `PREPARING`.
+ * So if the screen has not got that ticket yet, the projection is behind, which is precisely the
+ * case the wait exists for. **Skipping the wait because the ticket is not here yet would skip it
+ * exactly when it is needed** — and the event gate has already spent this event's only hint, so
+ * the rail would sit in the previous column until another event or a reload.
+ *
+ * The residue is narrow and named: a cancellation of an order that *was* sent to the kitchen, but
+ * whose ticket this screen has not seen yet, gets no wait either. Closing that would mean telling
+ * the client, in the event, whether the order had ever reached the kitchen — a display concern
+ * pushed into a domain payload, for a case bounded by the next event or a reload.
  */
 export function expectationFor(
   event: DomainEvent,
@@ -38,7 +46,7 @@ export function expectationFor(
 ): ExpectedTicket | undefined {
   const expected: ExpectedTicket = { orderId: event.aggregateId, version: event.version };
 
-  if (event.eventType === 'OrderSentToKitchen') {
+  if (event.eventType !== 'OrderCancelled') {
     return expected;
   }
 
