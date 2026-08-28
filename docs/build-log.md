@@ -671,3 +671,24 @@ round's fix.** Round 1 wired a correct signal to the wrong object, round 2 split
 wrong polarity, round 3 bounded a command without releasing it. All three were in the same forty
 lines — the ones that carry ADR 011's one real claim — which is a fair measure of how much attention
 the load-bearing part of a milestone deserves relative to the rest.
+
+## M6 review round 4 — the leak the disposable connection opened
+
+A fourth Codex pass, over `5c4ae46`, found one thing, and it was again what the previous round's fix
+opened. Round 3 made the Redis probe client disposable: a failed probe disconnects it and opens a
+replacement. `close()` disconnects it too — and if a probe is still in flight when shutdown runs, its
+failure lands in that same `catch` **after** `close()` has finished, and installs a fresh connection
+nobody will ever close. During an outage that client's reconnect timers hold the event loop open, so
+the API would not exit on SIGTERM: `docker compose stop` would hang on it.
+
+The fix is a `closed` flag set at the top of `close()`, checked before installing a replacement. Two
+lines, and it is the shape the whole M6 review turned out to have: a resource whose lifecycle rule
+was stated for the running system and not for the shutting-down one.
+
+**Four rounds, and the finding count fell 4 → 3 → 2 → 1.** Every round's single subject was the same
+forty lines around ADR 011's one real claim, and every finding was opened by the previous round's
+fix. The stopping point was chosen, not reached: the cycle converged, the last defect was small and
+closed, and the remaining budget belongs to M7. The honest summary for the interview is not "the
+code was right" but "the invariant was stated precisely and attached to a mechanism imprecisely four
+times, and an external reviewer caught each one" — which is also why ADR 011 now spells out the
+mechanism and not only the rule.

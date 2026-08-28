@@ -111,7 +111,9 @@ other way costs an order's event.
   client with `enableOfflineQueue: false` and a `commandTimeout` carries the actual `PING`, because
   a half-open socket leaves ioredis reporting `ready` with nothing moving. That client is discarded
   and reopened whenever a probe fails: the timeout rejects the promise, but only closing the socket
-  takes the command out of ioredis's ordered response queue.
+  takes the command out of ioredis's ordered response queue. It is not reopened after `close()`,
+  because a probe still in flight at shutdown fails afterwards and a replacement installed then
+  would hold the event loop open with reconnect timers and stop the API exiting on SIGTERM.
 - Two supervision loops now exist, one in each process, deliberately not shared. They differ in
   logger type, in what a session owns and in why they exist; their only common home would be a new
   runtime package, which is more structure than forty lines of loop earns.

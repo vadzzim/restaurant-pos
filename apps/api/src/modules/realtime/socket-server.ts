@@ -71,6 +71,14 @@ export function createRealtimeServer(
     return client;
   }
 
+  /**
+   * Nothing may open a Redis connection once `close()` has run. A probe that fails *during* shutdown
+   * would otherwise replace the client that was just disconnected, and nobody would ever close the
+   * replacement: during an outage its reconnect timers hold the event loop open, so the API would
+   * not exit on SIGTERM.
+   */
+  let closed = false;
+
   let probe = openProbe();
 
   io.adapter(createAdapter(pub, sub));
@@ -138,11 +146,16 @@ export function createRealtimeServer(
         // timeout alone would therefore leave one more queued PING behind on every health request.
         // The probe connection is cheap and disposable, so a failed probe throws it away.
         probe.disconnect();
-        probe = openProbe();
+        // A probe can still be in flight when shutdown disconnects it, and its failure then lands
+        // here. Replacing the client at that point would leave a connection nobody closes.
+        if (!closed) {
+          probe = openProbe();
+        }
         throw error;
       }
     },
     close: async () => {
+      closed = true;
       await io.close();
       pub.disconnect();
       sub.disconnect();

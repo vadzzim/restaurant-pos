@@ -12,7 +12,7 @@ health split with its ADR, the supervised worker, `pnpm verify:integration` and 
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
-M6 `860b064` plus three review commits through `HEAD`. The tree passes typecheck, lint, build and
+M6 `860b064` plus four review commits through `HEAD`. The tree passes typecheck, lint, build and
 **183 tests** (61 domain, 52 api, 22 worker, 47 web) against a real PostgreSQL, plus **one
 integration test** against a real Redpanda that runs only under `pnpm verify:integration`. Ten of the sixteen
 mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3, **21.4**, 21.5,
@@ -94,7 +94,9 @@ mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3,
   `enableOfflineQueue: false` and a `commandTimeout` carries the actual `PING`, because a half-open
   socket leaves ioredis reporting `ready` with nothing moving. That probe client is **thrown away
   and reopened on every failure**: `commandTimeout` rejects the promise, but only closing the socket
-  takes the command out of ioredis's ordered response queue.
+  takes the command out of ioredis's ordered response queue. It is **not** reopened once `close()`
+  has run — a probe still in flight at shutdown fails afterwards, and a replacement installed then
+  would keep reconnect timers alive and stop the API exiting on SIGTERM.
 - **`decide()` owns §8 and nothing else does.** Nine mutation types, six statuses, one table-driven
   function, one matrix test. A rule added anywhere else is a bug. The order of checks is fixed:
   **domain rule first, version second** — §21.4 fails if that is reversed, because a client at v5
@@ -212,17 +214,19 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   bound in an `onRequest` hook, which runs after Fastify's first log line; the probe race, which
   gives up without cancelling. Each trusted a signal to fire at a moment it does not cover. **Ask
   what the failure actually emits, not what the API has an event named after.**
-- **Rounds 2 and 3 each found what the previous fix opened, exactly as M4 and M5 did.** Round 1
-  wired a correct signal to the wrong object — a liveness flag on the supervisor and one on the
+- **Each of rounds 2, 3 and 4 found what the previous fix opened, exactly as M4 and M5 did.** Round
+  1 wired a correct signal to the wrong object — a liveness flag on the supervisor and one on the
   session read identically at the call site and differ precisely during the failure they exist for.
   Round 2 split a condition with the wrong polarity: a blacklist where only a whitelist is safe,
   because "the broker answered" does not imply "this row is at fault". Round 3 bounded a command
-  without releasing it. **All three were in the same forty lines** — the ones carrying ADR 011's one
-  real claim. Round 3 also caught a test that could not fail: it built a `KafkaJSProtocolError` from
-  a string, so the field it meant to assert on was `undefined`.
-- **Three rounds was the stopping point, chosen deliberately.** The findings had narrowed to
-  conditions this demo cannot reach — no ACLs anywhere, so no `TOPIC_AUTHORIZATION_FAILED` — and
-  the budget belongs to M7.
+  without releasing it. Round 4 made a resource disposable without saying what that means during
+  shutdown. **All four were in the same forty lines** — the ones carrying ADR 011's one real claim.
+  Round 3 also caught a test that could not fail: it built a `KafkaJSProtocolError` from a string,
+  so the field it meant to assert on was `undefined`.
+- **Four rounds, findings 4 → 3 → 2 → 1, and the stop was chosen rather than reached.** The cycle
+  converged, the last defect was small and closed, and the budget belongs to M7. The honest line for
+  the interview is not "the code was right" but "the invariant was stated precisely and attached to
+  a mechanism imprecisely four times, and an external reviewer caught each one".
 
 ## Known problems / open questions
 
