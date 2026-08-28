@@ -787,3 +787,31 @@ that was not enough. The second question is **"for each pair of writes, which or
 crash between them?"** — M7 has three such pairs (cache/delete, snapshot/pointer, memory/disk) and
 got one of them wrong. M8's sync engine is the third writer of this state and the first that runs
 without a screen asking it to, so it will have more pairs, not fewer.
+
+## M7 review round 2 — one finding, left open on purpose
+
+A second Codex pass over `2666d4a` found one thing, and it was opened by round 1's fix, which is
+now the fifth consecutive milestone where that sentence is true.
+
+**P2 — the cache write is not monotonic.** Round 1 moved persistence out of `adopt` and into
+`send` and `refetch`, for a good reason: the cache is keyed by the terminal that asked, and only
+those two callers know which terminal that was. But it moved the _write_ and left the _rule_.
+`acceptsSnapshot` still guards `order.value` and no longer guards anything on disk, so two
+overlapping refetches answering v5 then v4 leave the screen at v5 and `orders` at v4.
+
+What it costs is worth stating precisely, because it is smaller than it first looks and not zero.
+A reload does not show v4 for long: `hydrate` now ends with a canonical read. But it shows it until
+that read answers, and a command sent in that window carries `baseVersion: 4` and comes back
+`409` — a conflict the client invented, presented to the operator with the same banner as a real
+one. That is the failure mode: not lost data, a manufactured conflict.
+
+**It is deliberately not fixed in this session**, and the fix is specified in `PROGRESS.md` as the
+next session's first commit: the comparison goes inside one Dexie `readwrite` transaction over
+`orders` in the repository, reusing `acceptsSnapshot` rather than restating it. Putting it in the
+store — read the stored version, compare, then write — would reproduce the same race one level
+down, which is the whole shape of the finding a second time.
+
+**The habit to carry forward is narrower than "state has an owner".** Splitting a function into two
+responsibilities means asking which of its invariants belonged to which half. `adopt` held two: a
+display rule and a durability rule that happened to be the same check. I moved the code and did not
+ask, and the check stayed with the half that no longer needed it.

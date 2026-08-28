@@ -9,11 +9,13 @@
 hydration at startup under the ownership rules M4's review established.
 **The entire order lifecycle is demoable end to end, a broker outage is demoable, and now so is
 reloading the tab mid-order.**
-**Next:** M8 — offline queue, sequential sync, §14.1 halt-on-conflict. Model: **Opus**. Size: **L**.
+**Next:** one open P2 from the M7 review's second round — the cache write is not monotonic — and
+then M8: offline queue, sequential sync, §14.1 halt-on-conflict. Model: **Opus**. Size: **L**.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
-M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its review at `HEAD`. The tree passes typecheck, lint,
+M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
+`2666d4a`. The tree passes typecheck, lint,
 build and **216 tests** (61 domain, 52 api, 22 worker, **80 web**) against a real PostgreSQL, plus
 **one integration test** against a real Redpanda that runs only under `pnpm verify:integration`.
 Ten of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3,
@@ -175,6 +177,10 @@ Ten of the sixteen mandatory §21 tests exist and are named by their spec number
   writes are not atomic. Deleting first leaves the one state that loses money: a `CREATE_ORDER`
   with no row, no snapshot and no pointer, so the reload shows an empty till and the operator rings
   the order up twice. **Do not reorder these two writes.**
+- **The cache write is not yet monotonic, and that is the one open defect in the tree.** Round 2 of
+  the M7 review: `acceptsSnapshot` guards memory, and pulling the write out of `adopt` left the
+  disk unguarded. Two overlapping refetches returning v5 then v4 leave `order.value` at v5 and
+  `orders` at v4. See Known problems for what it costs and how it must be fixed.
 - **`hydrate` ends with a canonical read, and that belongs to the store, not the view.** The
   socket's `onConnected` refetch does not run when `realtime.websocket_push` is off or
   `GET /api/config` fails, so a view-level refresh would leave the cache on screen indefinitely on
@@ -278,6 +284,10 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   next milestone's brief: for each pair of writes, which order survives a crash between them?**
   That is the M8 question exactly: the sync engine is the *third* writer of this state, and it is
   the first that runs without a screen asking it to.
+- **Round 2 found one, and it was opened by round 1's fix — the fifth milestone running.** Pulling
+  the persist out of `adopt` moved the write and left the rule behind: `acceptsSnapshot` still
+  guards memory and no longer guards the disk. Splitting a function into two responsibilities means
+  asking which of its invariants belonged to which half, and I moved the code without asking.
 
 ## Known problems / open questions
 
@@ -343,6 +353,16 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **A cached snapshot is briefly stale after a reload**, between hydration and the first refetch.
   That is what the cache is for, and it is visibly wrong for a moment against a server that moved
   on while the tab was closed.
+- **OPEN P2 — `localStore.saveOrder` overwrites unconditionally, so the cache is not monotonic.**
+  `adopt` refuses a snapshot older than the one held; the two callers that persist —
+  `send` and `refetch` — do not. Two socket-triggered refetches in flight, v5 answering before v4,
+  leave the screen right and the disk at v4. A mutation response racing a newer refetch is the same
+  shape. **What it actually costs:** not the screen after a reload, because `hydrate` now ends with
+  a canonical read — but in the window between hydration and that read's answer, the screen shows
+  v4, and a command sent in that window carries `baseVersion: 4` and comes back `409`. A conflict
+  the client invented, presented to the operator as a real one. **How to fix it:** the comparison
+  belongs in the repository, inside one `readwrite` transaction over `orders` — a caller that reads
+  the stored version and then writes in two calls reproduces the same race one level down.
 - **A poison message on the realtime topic is lost to that consumer group permanently.** A
   consumer-side dead-letter topic is the real answer and is not built. The publish side already
   dead-letters through `outbox_events`.
@@ -354,7 +374,35 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 ## First command of the next session
 
 ```
-Read docs/PROGRESS.md. Expand M8 from docs/MILESTONES.md into docs/milestones/M08.md, then
+Read docs/PROGRESS.md. Two commits this session, in this order.
+
+**Commit 1 — close the open P2 from the M7 review's second round.** Do this first, before
+reading anything about M8: it is roughly twenty lines, it is in the code M8 is about to build
+on, and leaving it open means M8's sync engine inherits a cache that can move backwards.
+
+`localStore.saveOrder` overwrites unconditionally. `adopt` refuses a snapshot older than the
+one held; the two callers that persist — `send` and `refetch` in `apps/web/src/stores/order.ts`
+— do not, because pulling the write out of `adopt` in the first review round moved the write
+and left the rule behind. Two overlapping refetches answering v5 then v4 leave the screen at v5
+and IndexedDB at v4; a mutation response racing a newer refetch is the same shape.
+
+Three things about the fix:
+
+- **The comparison goes in the repository, not the store.** A caller that reads the stored
+  version and then writes in two calls reproduces the race one level down. It must be one
+  Dexie `readwrite` transaction over `orders` that reads, compares and writes.
+- **The rule is `acceptsSnapshot`'s, and there must be exactly one of it.** Import it rather
+  than writing a second version — a rule stated twice is a rule that will disagree with itself.
+  Note the asymmetry it already encodes: a *different* order id is always accepted.
+- **The pointer is a separate question from the snapshot.** `saveOrder` writes both. Decide
+  explicitly whether a rejected snapshot should still move `syncMetadata.currentOrderId`, and
+  say why in the comment. (It should: the pointer is about which order this device is on, not
+  about which version of it is newest.)
+
+Test it against a real out-of-order pair, and check the test fails without the fix. Then
+commit on its own: `M7 review 2: the cache write that was not monotonic`.
+
+**Commit 2 — M8.** Expand M8 from docs/MILESTONES.md into docs/milestones/M08.md, then
 implement M8 only. Stop when the M08 Verification block passes.
 
 Seven things worth knowing before you plan, so the session does not rediscover them:
@@ -364,21 +412,26 @@ Seven things worth knowing before you plan, so the session does not rediscover t
    `SYNCING` before a request goes out and `PENDING` back when no answer came. `CONFLICT`,
    `BLOCKED` and `SYNCED` are in the union, unwritten, waiting for you. If you need a new index,
    that is a Dexie version 2 — do not edit version 1's store definition.
-2. The sync engine is the **third** writer of state that already has two. `adopt`, `refetch`,
-   `pendingByTerminal`, `connection.start/stop` and `createCoalescingLoader` each have a rule;
-   M7's `hydrate` and `hydrateCommands` re-check their claim after every await and fill only
-   empty slots. A writer that runs on a timer, across aggregates, is where those rules break.
-   Read the ownership table at the top of `docs/milestones/M07.md` before touching a store.
-3. A `mutationId` is never regenerated — **except by a rebase, which is the one place §14.1 says
-   it must be.** A rebase re-issues a blocked mutation with a *new* id at a *fresh* baseVersion,
-   sequentially, one at a time, each subject to §8. Everything else — retry, hydration, a
-   reconnect — reuses the stored id so §9 answers `ALREADY_APPLIED`.
-4. The halt is per aggregate, and the POS still has one slot per terminal. Giving the POS the
+2. The sync engine is the **third** writer of state that already has two, and the first that
+   runs without a screen asking it to. `adopt`, `refetch`, `pendingByTerminal`,
+   `connection.start/stop` and `createCoalescingLoader` each have a rule; M7's `hydrate` and
+   `hydrateCommands` claim a generation and fill only empty slots. Read the ownership table at
+   the top of `docs/milestones/M07.md` before touching a store.
+3. **Ask the second question this time.** M7's brief tabulated "who may write this?" and all
+   four review findings still landed — three of them "the right writer at the wrong moment",
+   the fourth "the write moved and the rule did not". So for every pair of writes M8 adds, put
+   in the brief: *which order survives a crash between them, and which invariant guards each
+   half?*
+4. A `mutationId` is never regenerated — **except by a rebase, which is the one place §14.1
+   says it must be.** A rebase re-issues a blocked mutation with a *new* id at a *fresh*
+   baseVersion, sequentially, one at a time, each subject to §8. Everything else — retry,
+   hydration, a reconnect — reuses the stored id so §9 answers `ALREADY_APPLIED`.
+5. The halt is per aggregate, and the POS still has one slot per terminal. Giving the POS the
    per-order queue the kitchen already has is part of M8, not a refactor to skip.
-5. `Simulate Offline` intercepts at the API-client layer (`apps/web/src/api/client.ts`), not in
-   the stores and not via DevTools — the demo has to be deterministic.
-6. Nothing auto-resolves. A conflict surfaces the server's canonical state next to the local
-   intent and waits for discard or rebase. Silent auto-rebase is last-write-wins in disguise.
+6. `Simulate Offline` intercepts at the API-client layer (`apps/web/src/api/client.ts`), not in
+   the stores and not via DevTools — the demo has to be deterministic. Nothing auto-resolves: a
+   conflict surfaces the canonical state next to the local intent and waits for discard or
+   rebase, because silent auto-rebase is last-write-wins in disguise.
 7. Verification runs `pnpm -F @pos/web test` plus lint/typecheck/build, and §21.7 and §21.8 are
    named tests. `pnpm verify:integration` must stay green; M8 should not need server changes,
    and if it seems to, say so before making one.
@@ -390,5 +443,5 @@ mutation at a time per aggregate, other aggregates unaffected, and a conflict th
 without stopping the client.
 
 The class of bug to watch for is unchanged and now has a third instance waiting: client state with
-an owner, and a new writer that does not honour it. M7 added the second writer and kept the rules;
-the sync engine is the first one that runs without a screen asking it to.
+an owner, and a new writer that does not honour it. M7 added the second writer; the review found
+four ways it was added at the wrong moment. The sync engine is the third.
