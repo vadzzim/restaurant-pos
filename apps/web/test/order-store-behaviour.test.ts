@@ -143,6 +143,59 @@ describe('a refetch that outlives its question', () => {
   });
 });
 
+describe('a failed canonical read', () => {
+  it('is not reported on a screen that has moved on', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    let reject: (error: Error) => void = () => undefined;
+    fetchOrderMock.mockReturnValueOnce(
+      new Promise((_resolve, r) => {
+        reject = r;
+      }),
+    );
+
+    const inFlight = orders.refetch();
+
+    orders.adopt(snapshot('order-b', 1));
+    reject(new Error('offline'));
+    await inFlight;
+
+    // An error about the order the operator already left belongs to nobody.
+    expect(orders.readError).toBeUndefined();
+  });
+
+  it('is cleared by the next successful read of the same order', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    fetchOrderMock.mockRejectedValueOnce(new Error('offline'));
+    await orders.refetch();
+    expect(orders.readError).toBe('offline');
+
+    fetchOrderMock.mockResolvedValueOnce(snapshot('order-a', 4));
+    await orders.refetch();
+
+    expect(orders.readError).toBeUndefined();
+    expect(orders.version).toBe(4);
+  });
+
+  it('does not survive as a mutation error, nor swallow one', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    fetchOrderMock.mockRejectedValueOnce(new Error('offline'));
+    await orders.refetch();
+
+    // The two failures are separate facts with separate lifetimes.
+    expect(orders.readError).toBe('offline');
+    expect(orders.lastError).toBeUndefined();
+  });
+});
+
 describe('a pending mutation belongs to the terminal that sent it', () => {
   it('is neither shown nor retried from another terminal', async () => {
     const orders = useOrderStore();

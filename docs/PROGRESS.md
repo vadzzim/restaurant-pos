@@ -11,8 +11,8 @@ kitchen screen in Vue. **The project is demoable from here on.**
 **Next:** M5 — the remaining six mutation types and the full §8 conflict matrix. Model: Sonnet.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` + the
-review fixes. The tree passes typecheck, lint, build and 79 tests (9 domain, 27 api, 11 worker,
-32 web) against a real PostgreSQL. The seven mandatory M3 tests §21.1, 21.2, 21.3, 21.5, 21.6,
+review fixes. The tree passes typecheck, lint, build and 82 tests (9 domain, 27 api, 11 worker,
+35 web) against a real PostgreSQL. The seven mandatory M3 tests §21.1, 21.2, 21.3, 21.5, 21.6,
 21.11 and 21.15 are still present and named by their spec number.
 
 ## What exists
@@ -219,6 +219,19 @@ An independent Codex pass over `091406f`; both findings were opened by that comm
   `drain` catches, reports through `onError`, and carries on.
 
 Full reasoning in `build-log.md`. Five regression tests were added.
+
+## M4 review round 4 — accepted
+
+A second Codex pass over `56d8c94`, one P2, again opened by the round it followed.
+
+- **A failed canonical read has its own field and its own owner.** `refetch`'s `catch` lacked the
+  staleness guard its success path had, so an error about the order the operator had left appeared
+  under whatever replaced it, and a later successful read never cleared it. `readError` is set only
+  while that order is still on screen and cleared when it reads successfully.
+
+Across four rounds, three findings were the same mistake: state outliving the screen that created
+it with no explicit owner. The pending mutation now belongs to its terminal, the read failure to
+its order.
 
 ## Known problems / open questions
 

@@ -80,6 +80,13 @@ export const useOrderStore = defineStore('order', () => {
   const order = ref<OrderSnapshot | undefined>();
   const conflict = ref<ConflictBanner | undefined>();
   const lastError = ref<string | undefined>();
+  /**
+   * A failed canonical read, kept apart from `lastError`. A refresh that could not be made and a
+   * mutation that was refused are different facts with different lifetimes: one is cleared by the
+   * next successful read of the same order, the other by the next answered mutation. Sharing one
+   * field made a stale read failure outlive its cause and sit under an unrelated screen.
+   */
+  const readError = ref<string | undefined>();
   const inFlight = ref(0);
   /**
    * Mutations whose fate is unknown: they left this client and no answer came back. Each is kept so
@@ -143,7 +150,12 @@ export const useOrderStore = defineStore('order', () => {
     try {
       snapshot = await fetchOrder(id);
     } catch (error) {
-      lastError.value = error instanceof Error ? error.message : 'The order could not be read.';
+      // Reported only if the screen is still asking this question. The success path below has to
+      // check that, and a failure is no different: an error about the order the operator has
+      // already left belongs to nobody, least of all to whatever replaced it.
+      if (order.value?.id === id) {
+        readError.value = error instanceof Error ? error.message : 'The order could not be read.';
+      }
       return;
     }
 
@@ -151,6 +163,7 @@ export const useOrderStore = defineStore('order', () => {
     // this check a slow read of the previous order would reinstall it over its successor, because
     // `adopt` cannot see that this snapshot answers a question nobody is asking any more.
     if (snapshot !== undefined && order.value?.id === id) {
+      readError.value = undefined;
       adopt(snapshot);
     }
   }
@@ -342,12 +355,14 @@ export const useOrderStore = defineStore('order', () => {
     order.value = undefined;
     conflict.value = undefined;
     lastError.value = undefined;
+    readError.value = undefined;
   }
 
   return {
     order,
     conflict,
     lastError,
+    readError,
     pending,
     blocked,
     useTerminal,

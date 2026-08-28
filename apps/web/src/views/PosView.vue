@@ -124,6 +124,7 @@ watch(terminalId, async () => {
       />
       <StateBadge v-if="orders.syncing" label="SYNCING" tone="warn" />
       <StateBadge v-if="orders.pending" label="PENDING" tone="warn" />
+      <StateBadge v-if="orders.readError" label="READ FAILED" tone="bad" />
     </header>
 
     <p
@@ -166,6 +167,14 @@ watch(terminalId, async () => {
       Sent at v{{ orders.conflict.clientBaseVersion }}, the server is at v{{
         orders.conflict.serverVersion
       }}. The canonical order is shown below.
+    </p>
+
+    <p
+      v-if="orders.readError"
+      class="rounded border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+    >
+      The order could not be re-read: {{ orders.readError }}. What is shown is the last good read;
+      the next event or a reconnect retries.
     </p>
 
     <p

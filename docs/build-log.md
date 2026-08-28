@@ -285,3 +285,26 @@ when a projection never catches up — and carries on with what is waiting. The 
 an unhandled promise rejection and nowhere else.
 
 Five regression tests were added. Three were run against the pre-fix sources and fail there.
+
+## M4 review round 4 — a read failure with no owner
+
+A second Codex pass over `56d8c94` found one P2, again in what the previous round had just added.
+
+**A failed refetch was reported on whatever screen happened to be showing.** Round 3 gave `refetch`
+a `catch` so a socket-triggered read could not surface as an unhandled rejection — but wrote the
+message without the staleness guard its own success path had two lines below. A read of order A
+failing after the operator moved to order B put A's error under B. It also never cleared: a later
+successful read left the message standing, so a transient blip looked permanent.
+
+The message now goes to its own `readError`, set only while the order it concerns is still on
+screen and cleared by the next successful read of that order. Splitting it from `lastError` is the
+real fix rather than a second guard: a refresh that could not be made and a mutation that was
+refused are different facts with different lifetimes, and sharing one field is what let one outlive
+its cause. `clear()` resets both.
+
+Three regression tests; two fail against the pre-fix sources.
+
+The pattern across four rounds is worth naming: every round's findings were opened by the previous
+round's fix, and three of the four were the same mistake — state that outlives the screen that
+created it, without an explicit owner. Round 3 gave the pending mutation an owner (its terminal).
+This one gives the read failure one (its order).
