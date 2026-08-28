@@ -1051,3 +1051,50 @@ runs while A holds every row, and `claimed: 0` is a proof rather than a race tha
 which has never existed in this repo; `drizzle-kit generate` had been failing since M1 and the 0000
 migration was the only one anyone had needed. Fixing the path produced exactly the expected diff
 against the stored snapshot, which is the reassuring outcome.
+
+## M9 review round 1 — the guard that bounded the wrong half
+
+A Codex pass over `ed9a0b7` found four things: one P1 and three P2s. All four are fixed here, and
+the P1 is the interesting one, because it is a case of the code and the prose agreeing with each
+other and both being wrong.
+
+**The P1: the lease bounded what came _before_ a send, and not the send.** M9's new guard refused
+to _start_ a publish that would not finish inside the remaining lease — but it computed "would not
+finish" from the artificial `publish_delay_ms` alone. The send itself was unbounded. KafkaJS
+defaults to retrying with backoff and a 30 s request timeout, so a `send()` can comfortably outlive
+a 30 s lease, and then the worker marks published a row another worker has already reclaimed.
+`sendWithinLease` now races the publish against what is left of the lease.
+
+**And the claim in the brief was too strong.** The M9 brief said publishing under a stale lease
+"is the one way this design produces a _reordered_ duplicate rather than a plain one". Working out
+how to bound the send properly showed that the reorder it feared cannot actually happen, for a
+reason already in the design: a successor event is unclaimable until its predecessor is published,
+so the only record a slow worker can land late is a **duplicate of an event already on the topic**,
+carrying an `event_id` both consumers have in `processed_events`. What the guard really buys is
+narrower and still worth having — this worker stops publishing, and stops writing `published_at`,
+under a claim it no longer holds, and a hung producer stops holding the publish loop. The brief and
+the code comment now say that instead. KafkaJS cannot cancel a request in flight, so the abandoned
+send _may still land_; `onLeaseOverrun` tears the broker session down, which closes the socket and
+is the nearest thing to cancellation on offer.
+
+**P2: a pause thrown during the delay arrived a delay late.** The controls were read once per row,
+before the wait. With `delay 3000` and a poll interval of 500 ms, "pause takes effect between rows"
+was true only in the sense that it took effect three seconds later. The switch is now re-read after
+the sleep, and the row that was waiting is released unsent. The test does not race a timer for
+this: the fake control getter answers "running" on its first call and "paused" from the second, so
+the assertion is about _how many times the value is read_, which is the actual behaviour under test.
+
+**P2: `delay` accepted values that were a permanent pause in disguise.** With the shipped 30 s
+lease, any delay of 27 s or more consumes the whole lease budget before the first send, so every
+pass claims rows, waits, releases them and publishes nothing — for ever, silently.
+`maxPublishDelayMs` is half the budget (13.5 s at the default lease), the switch refuses anything
+larger and says why, and the worker logs a warning if a pass ever spends its lease without
+publishing, because the row can still be written by hand.
+
+**P2: `setInterval` is a metronome, not a gap between reads.** A control read slower than
+`OUTBOX_POLL_MS` overlapped the next one — during exactly the database trouble the "keep the last
+known value" rule exists for. Overlapping reads pile onto the pool and can settle out of order,
+which would let an older snapshot overwrite a newer pause. The watcher now schedules the next read
+only when the current one settles. It also takes a reader function rather than a `Db`, which is
+what makes all of this testable without a database that can be made slow to order — the four new
+control tests came with that change.

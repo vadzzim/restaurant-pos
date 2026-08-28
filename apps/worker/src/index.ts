@@ -4,8 +4,8 @@ import { loadConfig } from '@pos/config';
 import { closeDb, getDb } from '@pos/db';
 import pino from 'pino';
 
-import { watchOutboxControls } from './modules/events/outbox-controls.js';
-import { publishOnce } from './modules/events/outbox-publisher.js';
+import { readOutboxControls, watchOutboxControls } from './modules/events/outbox-controls.js';
+import { maxPublishDelayMs, publishOnce } from './modules/events/outbox-publisher.js';
 import { connectBroker } from './shared/broker-session.js';
 import { supervise } from './shared/broker-supervisor.js';
 import { createKafka } from './shared/kafka.js';
@@ -28,7 +28,11 @@ const kafka = createKafka(config);
 
 // Awaited before the loop starts, so a worker that boots while the publisher is paused honours the
 // pause on its very first pass instead of draining a backlog a human deliberately stopped.
-const controls = await watchOutboxControls(db, config.OUTBOX_POLL_MS, logger);
+const controls = await watchOutboxControls(
+  async () => readOutboxControls(db),
+  config.OUTBOX_POLL_MS,
+  logger,
+);
 
 const broker = supervise({
   name: 'redpanda',
@@ -68,9 +72,23 @@ const publisherLoop = (async () => {
         ...publisherOptions,
         isTransportAlive: connection.isAlive,
         controls: controls.current,
+        onLeaseOverrun: connection.endSession,
       });
       if (result.claimed > 0) {
         logger.info({ workerId, ...result }, 'outbox batch processed');
+      }
+      if (result.stoppedBecause === 'lease' && result.published === 0) {
+        // The pass claimed rows, spent its whole lease budget and published nothing. With a sane
+        // delay that means the broker is slow; with a delay someone wrote straight into the table
+        // it means the switch is a permanent pause, and the loop would spin claiming and releasing.
+        logger.warn(
+          {
+            workerId,
+            publishDelayMs: controls.current().publishDelayMs,
+            maxPublishDelayMs: maxPublishDelayMs(config.OUTBOX_LEASE_MS),
+          },
+          'a pass spent its lease without publishing: the broker is slow, or the delay is too large',
+        );
       }
       if (result.reclaimed > 0) {
         // Somebody's worker died holding these rows. It is not an error here — the lease did its

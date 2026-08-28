@@ -69,18 +69,38 @@ export async function setOutboxControls(db: Db, patch: Partial<OutboxControls>):
  * discover that a switch is not sticky. The publisher cannot do anything without PostgreSQL anyway,
  * so a stale snapshot costs nothing.
  *
+ * **One read at a time.** The interval is the gap *between* reads, not a metronome: `setInterval`
+ * would start a second read while the first was still outstanding, and during exactly the database
+ * degradation this has to survive, those reads would pile onto the pool and could settle out of
+ * order — an older snapshot overwriting a newer pause. Review round 1 found that.
+ *
+ * Takes a reader rather than a `Db` so the loop above can be tested without a database that can be
+ * made slow to order.
+ *
  * Resolves only after the first read, so a worker never runs a pass against a guess.
  */
 export async function watchOutboxControls(
-  db: Db,
+  read: () => Promise<OutboxControls>,
   intervalMs: number,
   logger: Logger,
 ): Promise<OutboxControlWatcher> {
-  let value = await readOutboxControls(db);
+  let value = await read();
   logger.info({ ...value }, 'outbox controls loaded');
 
-  const timer = setInterval(() => {
-    void readOutboxControls(db)
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
+
+  const scheduleNext = (): void => {
+    if (stopped) {
+      return;
+    }
+    timer = setTimeout(poll, intervalMs);
+    // Nothing should hold the process open for a switch nobody is waiting on.
+    timer.unref?.();
+  };
+
+  function poll(): void {
+    void read()
       .then((fresh) => {
         if (fresh.paused !== value.paused || fresh.publishDelayMs !== value.publishDelayMs) {
           logger.warn({ from: value, to: fresh }, 'outbox controls changed');
@@ -89,16 +109,17 @@ export async function watchOutboxControls(
       })
       .catch((error: unknown) => {
         logger.warn({ err: error, keeping: value }, 'outbox controls unreadable; keeping the last');
-      });
-  }, intervalMs);
+      })
+      .finally(scheduleNext);
+  }
 
-  // Nothing should hold the process open for a switch nobody is waiting on.
-  timer.unref?.();
+  scheduleNext();
 
   return {
     current: () => value,
     stop: () => {
-      clearInterval(timer);
+      stopped = true;
+      clearTimeout(timer);
     },
   };
 }

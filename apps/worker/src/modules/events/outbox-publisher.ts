@@ -19,6 +19,18 @@ export interface EventTransport {
  */
 const LEASE_SAFETY_FRACTION = 0.1;
 
+/**
+ * The largest `publish_delay_ms` a publisher can honour and still publish anything.
+ *
+ * A delay that eats the whole lease budget before the first send turns every pass into claim,
+ * wait, release, publish nothing — a pause wearing a delay's clothes, and an undocumented one.
+ * Half the budget is the ceiling: the other half has to cover the claim's round trip and the send
+ * itself, which is the thing the delay exists to make visible. Review round 1 found this.
+ */
+export function maxPublishDelayMs(leaseMs: number): number {
+  return Math.floor((leaseMs * (1 - LEASE_SAFETY_FRACTION)) / 2);
+}
+
 export interface PublisherOptions {
   workerId: string;
   batchSize: number;
@@ -40,6 +52,12 @@ export interface PublisherOptions {
    * costs no query per row.
    */
   controls?: (() => OutboxControls) | undefined;
+  /**
+   * Called when a send is still outstanding at the end of the lease. A producer that slow is not
+   * usable, and ending its session is the nearest thing to cancelling the request that KafkaJS
+   * offers — `stop()` closes the socket, and the supervisor builds a fresh connection.
+   */
+  onLeaseOverrun?: (() => void) | undefined;
 }
 
 /** Why a pass stopped before working through everything it claimed. */
@@ -99,6 +117,17 @@ interface ClaimedRow extends Record<string, unknown> {
  * the lease is nearly up — and in all three it **releases the claims it will not use**. Leaving
  * them to expire would stall the next pass, and any other worker, for up to `OUTBOX_LEASE_MS` for
  * rows nobody is working on.
+ *
+ * The lease is bounded at both ends of a send, not just before it: `sendWithinLease` gives up on a
+ * publish still outstanding when the lease runs out. What that buys is precise, and review round 1
+ * was right that the first version of this claimed more than it delivered. A record already handed
+ * to the broker cannot be recalled, so a send abandoned here **may still land**, late. What it
+ * cannot do is land out of order against a *different* version of the same order: a successor
+ * event is unclaimable until its predecessor is published (`claimBatch`), so the only record that
+ * can arrive late is a duplicate of one already on the topic, carrying an `event_id` both consumers
+ * have recorded in `processed_events`. The guard's real job is to stop this worker publishing —
+ * and then marking published — under a claim another worker now holds, and to stop a hung producer
+ * holding the whole loop.
  */
 export async function publishOnce(
   db: Db,
@@ -120,32 +149,59 @@ export async function publishOnce(
   // of the same lease, and a slow one is exactly when this guard matters.
   const leaseDeadline = claimedAt + options.leaseMs * (1 - LEASE_SAFETY_FRACTION);
 
+  /** Hands back everything from `index` on, and records why. The caller breaks out of the loop. */
+  const giveUpFrom = async (index: number, reason: PublishStopReason): Promise<void> => {
+    const abandoned = claimed.slice(index);
+    result.abandoned = abandoned.length;
+    result.stoppedBecause = reason;
+    await releaseClaims(
+      db,
+      abandoned.map((abandonedRow) => abandonedRow.id),
+      options.workerId,
+    );
+  };
+
   for (const [index, row] of claimed.entries()) {
     const controls = options.controls?.() ?? DEFAULT_OUTBOX_CONTROLS;
-    const stopReason = reasonToStop(options, controls, leaseDeadline);
+    const stopReason = reasonToStop(options, controls, leaseDeadline, controls.publishDelayMs);
 
     if (stopReason !== undefined) {
-      const abandoned = claimed.slice(index);
-      result.abandoned = abandoned.length;
-      result.stoppedBecause = stopReason;
-      await releaseClaims(
-        db,
-        abandoned.map((abandonedRow) => abandonedRow.id),
-        options.workerId,
-      );
+      await giveUpFrom(index, stopReason);
       break;
     }
 
     if (controls.publishDelayMs > 0) {
       await sleep(controls.publishDelayMs);
+
+      // The delay is measured in seconds and the controls are polled in half-seconds, so the switch
+      // can move while this row waits. Re-reading is what makes "pause takes effect between rows"
+      // true when a delay is set — without it the promised pause arrives a delay late. Nothing more
+      // is coming after the sleep, so no further delay is budgeted against the lease.
+      const stopAfterDelay = reasonToStop(
+        options,
+        options.controls?.() ?? DEFAULT_OUTBOX_CONTROLS,
+        leaseDeadline,
+        0,
+      );
+
+      if (stopAfterDelay !== undefined) {
+        await giveUpFrom(index, stopAfterDelay);
+        break;
+      }
     }
 
-    const event = toDomainEvent(row);
+    const outcome = await sendWithinLease(transport, toDomainEvent(row), row, leaseDeadline);
 
-    try {
-      await transport.publish(event, row.aggregate_id);
-    } catch (error) {
-      const deadLettered = await recordFailure(db, row, error, options);
+    if (outcome.kind === 'overran') {
+      // No `attempt_count`: a send that outlived the lease says the broker is slow, not that the
+      // event is bad (ADR 010). The row goes back and is republished by whoever claims it next.
+      options.onLeaseOverrun?.();
+      await giveUpFrom(index, 'lease');
+      break;
+    }
+
+    if (outcome.kind === 'failed') {
+      const deadLettered = await recordFailure(db, row, outcome.error, options);
       result.failed += 1;
       if (deadLettered) {
         result.deadLettered += 1;
@@ -160,15 +216,61 @@ export async function publishOnce(
   return result;
 }
 
+type SendOutcome =
+  | { kind: 'published' }
+  | { kind: 'failed'; error: unknown }
+  /** Still outstanding when the lease ran out. See `publishOnce` for what this does and does not buy. */
+  | { kind: 'overran' };
+
 /**
- * The three ways a pass gives up on rows it already holds. The lease check counts the delay it is
- * about to incur, because a `publish_delay_ms` large enough to matter is large enough to be the
- * thing that overruns the lease.
+ * A send bounded by what is left of the lease.
+ *
+ * KafkaJS offers no way to cancel a `send` in flight, so this races it rather than aborting it: the
+ * abandoned promise is given its own handlers up front so a late rejection is never unhandled, and
+ * the caller ends the broker session, which closes the socket the request is waiting on. That is
+ * the nearest thing to cancellation available, and the comment on `publishOnce` says plainly what
+ * remains possible afterwards.
+ */
+async function sendWithinLease(
+  transport: EventTransport,
+  event: DomainEvent,
+  row: ClaimedRow,
+  leaseDeadline: number,
+): Promise<SendOutcome> {
+  const sending: Promise<SendOutcome> = transport.publish(event, row.aggregate_id).then(
+    (): SendOutcome => ({ kind: 'published' }),
+    (error: unknown): SendOutcome => ({ kind: 'failed', error }),
+  );
+
+  const remainingMs = leaseDeadline - Date.now();
+  let timer: NodeJS.Timeout | undefined;
+  const overrun = new Promise<SendOutcome>((resolve) => {
+    timer = setTimeout(
+      () => {
+        resolve({ kind: 'overran' });
+      },
+      Math.max(remainingMs, 0),
+    );
+  });
+
+  try {
+    return await Promise.race([sending, overrun]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The three ways a pass gives up on rows it already holds. `delayAheadMs` is the wait this row is
+ * about to incur before its send — the whole `publish_delay_ms` when asked before the sleep, and
+ * zero when asked after it — because a delay large enough to matter is large enough to be the thing
+ * that overruns the lease.
  */
 function reasonToStop(
   options: PublisherOptions,
   controls: OutboxControls,
   leaseDeadline: number,
+  delayAheadMs: number,
 ): PublishStopReason | undefined {
   // Every remaining send would fail for the same reason and charge every remaining row for it.
   if (options.isTransportAlive?.() === false) {
@@ -177,7 +279,7 @@ function reasonToStop(
   if (controls.paused) {
     return 'paused';
   }
-  if (Date.now() + controls.publishDelayMs >= leaseDeadline) {
+  if (Date.now() + delayAheadMs >= leaseDeadline) {
     return 'lease';
   }
   return undefined;

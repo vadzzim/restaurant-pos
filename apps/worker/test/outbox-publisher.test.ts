@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { OutboxControls } from '../src/modules/events/outbox-controls.js';
 import {
+  maxPublishDelayMs,
   publishOnce,
   type EventTransport,
   type PublisherOptions,
@@ -520,5 +521,90 @@ describe('the outbox controls', () => {
       stoppedBecause: 'lease',
     });
     expect(transport.sent).toHaveLength(1);
+  });
+});
+
+/**
+ * Review round 1's P1 and P2, both about the lease and the switch being checked at the wrong
+ * moment: the first version budgeted the *artificial delay* against the lease and then let the send
+ * itself run unbounded, and it read the controls once per row rather than once per wait.
+ */
+describe('the review found: the lease bounded only what came before the send', () => {
+  it('gives up on a send still outstanding when the lease runs out, and spends no attempt', async () => {
+    const { eventId } = await seedOrderWithEvent();
+
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let sessionEnded = 0;
+
+    try {
+      const result = await publishOnce(
+        db(),
+        { publish: async () => gate },
+        {
+          ...options,
+          leaseMs: 300,
+          onLeaseOverrun: () => {
+            sessionEnded += 1;
+          },
+        },
+      );
+
+      expect(result).toMatchObject({
+        claimed: 1,
+        published: 0,
+        failed: 0,
+        abandoned: 1,
+        stoppedBecause: 'lease',
+      });
+      // A producer that slow is not usable: the session is torn down and rebuilt, which is also the
+      // nearest thing to cancelling the request that KafkaJS offers.
+      expect(sessionEnded).toBe(1);
+
+      const row = await eventRow(eventId);
+      // The broker was slow; the event was not bad. No attempt, no dead letter, and the claim goes
+      // back so whoever picks the row up next is not waiting out a lease nobody is using.
+      expect(row?.attemptCount).toBe(0);
+      expect(row?.publishedAt).toBeNull();
+      expect(row?.claimedBy).toBeNull();
+    } finally {
+      release();
+    }
+  });
+
+  it('re-reads the switch after the delay, so a pause lands within a poll and not a delay', async () => {
+    await seedOrderWithEvent();
+    const transport = recordingTransport();
+
+    // The switch is read once before the wait and once after it. Answering "running" first and
+    // "paused" from then on is a pause thrown *during* the delay, with no timer to race.
+    let reads = 0;
+    const controls = (): OutboxControls => {
+      reads += 1;
+      return { paused: reads > 1, publishDelayMs: 10 };
+    };
+
+    const result = await publishOnce(db(), transport, { ...options, controls });
+
+    expect(reads).toBeGreaterThan(1);
+    expect(result).toMatchObject({
+      claimed: 1,
+      published: 0,
+      abandoned: 1,
+      stoppedBecause: 'paused',
+    });
+    // The row waited out its delay and was then not sent, which is what a pause has to mean.
+    expect(transport.sent).toHaveLength(0);
+  });
+
+  it('refuses a publish delay that cannot fit inside the lease', () => {
+    // Half the lease budget, so a send and the claim's round trip still have room. With the
+    // shipped 30 s lease that is 13.5 s — well past anything a demo needs to make visible.
+    expect(maxPublishDelayMs(30_000)).toBe(13_500);
+    // The ceiling has to stay under the budget the pass actually enforces, or accepting a delay
+    // would still produce a pass that claims rows and publishes nothing.
+    expect(maxPublishDelayMs(30_000)).toBeLessThan(30_000 * 0.9);
   });
 });

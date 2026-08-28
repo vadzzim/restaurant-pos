@@ -5,9 +5,9 @@
 
 ## Current state
 
-**Last completed milestone:** M9 — outbox hardening: the lease is now bounded from both ends, an
+**Last completed milestone:** M9 — outbox hardening: the lease now bounds the send itself, an
 abandoned claim is handed back instead of expiring, a reclaim is counted, and §18's two publisher
-switches are real operational state.
+switches are real operational state. Plus review round 1 (one P1, three P2s, all fixed).
 **The entire order lifecycle is demoable end to end, a broker outage is demoable, reloading the tab
 mid-order is demoable, §19.2 and §19.3 are demoable, and now the publisher can be paused, delayed
 and watched from a terminal — the buttons for it are M12's.**
@@ -20,9 +20,9 @@ M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, 
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
 `2666d4a` and its second at `6349dce`, M8 `8f72739` plus two review rounds through `5414676`,
-M9 this commit.
+M9 `ed9a0b7` plus its review round in this commit.
 The tree passes typecheck, lint,
-build and **254 tests** (61 domain, 52 api, **28 worker**, 113 web) against a real PostgreSQL, plus
+build and **262 tests** (61 domain, 52 api, **36 worker**, 113 web) against a real PostgreSQL, plus
 **two integration tests** against a real Redpanda that run only under `pnpm verify:integration`
 (both green at the end of M9; the second one is §21.13 and is new).
 **Fifteen** of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1,
@@ -53,10 +53,10 @@ build and **254 tests** (61 domain, 52 api, **28 worker**, 113 web) against a re
   Kafka producer and topic bootstrap; the kitchen consumer and its transactional projection, which
   now **advances** `state` from `OrderPreparing`, `OrderReady` and `OrderCancelled`.
 - **The hardened publisher (M9):** `modules/events/outbox-controls.ts` — the singleton
-  `outbox_controls` row, its writer and the poller the loop reads; `publishOnce` releases abandoned
-  claims, stops before its lease runs out, honours a pause between rows and a delay before each
-  send, and counts reclaims; `apps/worker/scripts/outbox-control.ts` behind
-  `pnpm -F @pos/worker outbox`. ADR 010.
+  `outbox_controls` row, its writer and the serialized poller the loop reads; `publishOnce` releases
+  abandoned claims, bounds each send by what is left of its lease (`sendWithinLease`), honours a
+  pause between rows *and* across a delay, and counts reclaims; `apps/worker/scripts/
+  outbox-control.ts` behind `pnpm -F @pos/worker outbox`. ADR 010.
 - `apps/web` — a POS screen with all six of its commands (add, ±quantity, remove, send, pay,
   cancel) and a kitchen screen with four columns and two command buttons. Pinia stores for menu,
   order, kitchen and connection. `/debug` and `/demo` are still the M1 placeholder (M11, M16).
@@ -283,11 +283,17 @@ build and **254 tests** (61 domain, 52 api, **28 worker**, 113 web) against a re
   at a time. The rule: an expectation may only be judged by a read *issued after* it was raised.
 - **The publisher claims only an order's earliest unpublished event**, so that order's events reach
   Redpanda in version order regardless of retries or worker count.
-- **A pass never publishes under a lease it may no longer hold.** The lease budget is measured from
-  *before* the claim — the claim's own round trip is spent out of it — a tenth of it is deliberately
-  never used, and the check counts the `publish_delay_ms` the next send is about to incur. Removing
-  this reintroduces the one failure mode worse than a duplicate: two workers publishing the same
-  order's consecutive events at once, which can reorder them on the topic.
+- **The lease bounds the send, not just the wait before it.** The budget is measured from *before*
+  the claim — the claim's own round trip is spent out of it — a tenth is deliberately never used,
+  the pre-send check counts the `publish_delay_ms` about to be incurred, and `sendWithinLease` races
+  the publish itself against what is left. Review round 1 found the version that bounded only the
+  delay. **Be precise about what this buys**, because the first version of this line was not: a
+  record already handed to KafkaJS cannot be recalled and may still land late. What the guard
+  prevents is this worker publishing — and writing `published_at` — under a claim another worker now
+  holds, and a hung producer holding the whole loop. A late record can only ever be a *duplicate* of
+  an event already on the topic, because a successor is unclaimable until its predecessor is
+  published, and `processed_events` absorbs it. `onLeaseOverrun` ends the broker session, which
+  closes the socket: the nearest thing to cancellation KafkaJS offers.
 - **Three things end a pass early, and all three release the claims they will not use**: the
   transport died, a human paused the publisher, or the lease is nearly up. The release is guarded on
   `claimed_by = :workerId` so a lease that expired and was re-taken by another worker is never
@@ -306,8 +312,12 @@ build and **254 tests** (61 domain, 52 api, **28 worker**, 113 web) against a re
   `OUTBOX_POLL_MS`. The process that flips them is not the process that obeys them, and a switch a
   human threw must survive a worker restart — so not an environment variable and not Redis. **A
   failed read keeps the last known value**: reverting to the defaults would un-pause a paused
-  publisher exactly when the database is unhealthy. `pnpm -F @pos/worker outbox status|pause|resume|
-  delay <ms>` is the writer until M12.
+  publisher exactly when the database is unhealthy. **One read at a time** — the interval is the gap
+  between reads, not a metronome, or a slow database gets overlapping reads that can settle out of
+  order and overwrite a newer pause with an older snapshot. The watcher takes a *reader function*,
+  not a `Db`, which is what makes that testable. `pnpm -F @pos/worker outbox status|pause|resume|
+  delay <ms>` is the writer until M12, and it **refuses a delay above `maxPublishDelayMs`** — half
+  the lease budget — because a larger one is a permanent pause that does not say so.
 - Test databases: `TEST_DATABASE_URL` (`pos_test`), created and migrated by `@pos/db/testing`. The
   demo database is never truncated by a test run.
 - **`pnpm test` must stay runnable with PostgreSQL alone.** A suite needing a live broker is named
@@ -424,10 +434,18 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **The publish delay is per send, so a large one shrinks the batch.** With `publish_delay_ms` set
   high, the lease guard stops each pass after a row or two and the rest of the claim is released and
   re-claimed next pass. That is correct and it is also wasteful; it only happens while a human has
-  deliberately slowed the publisher down for a demo.
+  deliberately slowed the publisher down for a demo. The switch refuses a delay large enough to stop
+  publication altogether, and the worker warns when a pass spends its lease publishing nothing — but
+  a row written straight into `outbox_controls` by SQL bypasses the first of those.
+- **A send abandoned at the end of its lease may still reach the broker.** KafkaJS cannot cancel a
+  request; ending the session closes the socket and that is all. The residue is a duplicate of an
+  event already on the topic, which both consumers deduplicate — but "the publisher gave up on it"
+  and "the broker never got it" are not the same statement, and `/debug` will not be able to tell
+  them apart either.
 - **A pause is observed within one `OUTBOX_POLL_MS`, not instantly**, and the worker keeps polling
-  the control row while paused. Both are the cost of the control living in PostgreSQL rather than in
-  the process that flips it.
+  the control row while paused. A pause thrown while a row is serving its `publish_delay_ms` is seen
+  when that delay ends, which can be seconds. Both are the cost of the control living in PostgreSQL
+  rather than in the process that flips it.
 - **`outbox_controls` is fleet-wide.** Two workers cannot be paused independently, and nothing
   records *who* paused the publisher or when — only `updated_at`. §18 asks for a demo switch, not an
   audit trail.

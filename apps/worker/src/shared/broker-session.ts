@@ -17,6 +17,12 @@ import { createKafkaTransport, ensureOrderEventsTopic } from './kafka.js';
 export interface BrokerConnection {
   transport: EventTransport;
   isAlive: () => boolean;
+  /**
+   * Ends this session deliberately, from outside a failed send. The publisher uses it when a send
+   * is still outstanding at the end of its lease: KafkaJS cannot cancel a request, but tearing the
+   * session down closes the socket it is waiting on, and the supervisor builds a fresh one.
+   */
+  endSession: () => void;
 }
 
 /**
@@ -123,7 +129,7 @@ export async function connectBroker(
   );
 
   return {
-    value: { transport, isAlive: () => alive },
+    value: { transport, isAlive: () => alive, endSession: die },
     whenDead,
     stop: async () => {
       // Before awaiting anything: a publish racing this teardown must not be told the session is

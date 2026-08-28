@@ -1,6 +1,8 @@
+import { loadConfig } from '@pos/config';
 import { closeDb, getDb } from '@pos/db';
 
 import { readOutboxControls, setOutboxControls } from '../src/modules/events/outbox-controls.js';
+import { maxPublishDelayMs } from '../src/modules/events/outbox-publisher.js';
 
 /**
  * The §18 switches `Pause Outbox Publisher` and `Delay Outbox Publishing`, until M12 gives them
@@ -31,6 +33,15 @@ async function main(): Promise<void> {
       const ms = Number(argument);
       if (!Number.isInteger(ms) || ms < 0) {
         throw new Error(`delay takes a whole number of milliseconds; got ${String(argument)}`);
+      }
+      // A delay that cannot fit inside the lease is a pause that does not say so: the publisher
+      // would claim rows, wait, release them and publish nothing, for ever.
+      const ceiling = maxPublishDelayMs(loadConfig().OUTBOX_LEASE_MS);
+      if (ms > ceiling) {
+        throw new Error(
+          `delay ${ms}ms does not fit inside OUTBOX_LEASE_MS; the publisher would claim rows and ` +
+            `publish nothing. The ceiling is ${ceiling}ms — raise the lease, or use "pause".`,
+        );
       }
       await setOutboxControls(db, { publishDelayMs: ms });
       break;
