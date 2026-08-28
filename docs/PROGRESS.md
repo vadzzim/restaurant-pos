@@ -292,11 +292,38 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 ## First command of the next session
 
 ```
-Read docs/PROGRESS.md. Expand M7 from docs/MILESTONES.md into docs/milestones/M07.md, then implement M7 only. Stop when the Verification block passes.
+Read docs/PROGRESS.md. Expand M7 from docs/MILESTONES.md into docs/milestones/M07.md, then
+implement M7 only. Stop when the M07 Verification block passes.
+
+Six things worth knowing before you plan, so the session does not rediscover them:
+
+1. M7 is persistence only. The Dexie tables `pendingMutations` and `syncMetadata` are written
+   in M7 and *read by a sync engine* only in M8, together with the whole §14.1 halt-on-conflict
+   rule. M8 is an L milestone on Opus for a reason; taking any of it here spends that budget
+   early and produces a dirty commit.
+2. The state that has to survive a reload already has explicit owners, and those rules are the
+   milestone's real work: `pendingByTerminal` is keyed by terminal on the POS and per order in
+   the kitchen; `adopt` refuses a snapshot older than the one held; `refetch` re-checks that the
+   order it asked about is still current; `connection.start/stop` claim a generation;
+   `createCoalescingLoader` runs one read at a time. Hydration is a **new writer** for every one
+   of them, so each rule has to hold across a reload, not only across a screen.
+3. A rehydrated pending mutation keeps its `mutationId`. That is the entire point: Retry sends the
+   same id and §9 answers `ALREADY_APPLIED`. A hydration path that mints a fresh id turns a retry
+   into a second order — the one bug in this milestone that loses money.
+4. Do not reach for a Pinia persistence plugin. It serialises whole-store state to localStorage,
+   which is neither IndexedDB nor selective, and §7/§14 need the three real tables.
+5. Dexie and an IndexedDB for the test environment (`fake-indexeddb`) are new dependencies, so the
+   lockfile changes — CI installs with `--frozen-lockfile`. No test in this repo opens a browser;
+   `apps/web` tests are vitest over the store modules.
+6. Verification runs `pnpm -F @pos/web test` plus the usual lint/typecheck/build.
+   `pnpm verify:integration` is unaffected by a browser-only milestone but must stay green.
 ```
 
 M7 is persistence only — the Dexie schema `orders / pendingMutations / syncMetadata`, local writes
-on every action, hydration at startup. **No sync engine**: that is M8, and the §14.1 halt-on-conflict
-rule with it. The class of bug to watch for is the one three of the four M4 review rounds found —
-client state that outlives the screen that created it, with no explicit owner — because M7 is where
-that state stops being in memory and starts surviving a reload.
+on every action, hydration at startup. The class of bug to watch for is the one three of the four M4
+review rounds found — client state that outlives the screen that created it, with no explicit
+owner — because M7 is where that state stops being in memory and starts surviving a reload.
+
+One correction to carry forward: the M6 review ran a **fifth** round after the four recorded above,
+and it came back with nothing. The line about stopping being "chosen rather than reached" was
+written before that round; the cycle did converge to a clean report, 4 → 3 → 2 → 1 → 0.
