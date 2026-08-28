@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 
-import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { IncomingMessage } from 'node:http';
+import type { FastifyInstance, FastifyRequest, FastifyServerOptions } from 'fastify';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -49,14 +49,43 @@ export function generateRequestId(request: IncomingMessage): string {
  * With no `x-trace-id` the trace **is** the request, and the requestId is reused rather than a
  * second uuid generated — a distinct id there would be a field that correlates with nothing.
  *
- * Both are bound onto the request's own child logger, so the lines Fastify emits for itself carry
- * them too, not only the lines this codebase writes.
+ * A pure function of the headers and the request id, so the logger factory and the request
+ * decorator below cannot disagree about what this request's trace is.
+ */
+export function resolveTraceId(headers: IncomingHttpHeaders, requestId: string): string {
+  return sanitizeId(headers[TRACE_ID_HEADER]) ?? requestId;
+}
+
+type ChildLoggerFactory = NonNullable<FastifyServerOptions['childLoggerFactory']>;
+
+/**
+ * The correlation fields are bound where the request's logger is *built*, not in an `onRequest`
+ * hook. Fastify emits its own `incoming request` line before any hook runs, so a hook that replaces
+ * `request.log` leaves that first line — the one that records the method and the url — without
+ * either field, which is the line you most want when following a trace.
+ */
+export const correlatedChildLogger: ChildLoggerFactory = function (
+  logger,
+  bindings,
+  childLoggerOpts,
+  rawReq,
+) {
+  const requestId = typeof bindings.reqId === 'string' ? bindings.reqId : '';
+
+  return logger.child(
+    { ...bindings, requestId, traceId: resolveTraceId(rawReq.headers, requestId) },
+    childLoggerOpts,
+  );
+};
+
+/**
+ * The same trace id, on the request itself, for the code that has to put it somewhere other than a
+ * log line — `executeMutation` writes it to `outbox_events.trace_id`.
  */
 export function registerRequestContext(app: FastifyInstance): void {
   app.decorateRequest('traceId', '');
 
   app.addHook('onRequest', async (request: FastifyRequest) => {
-    request.traceId = sanitizeId(request.headers[TRACE_ID_HEADER]) ?? request.id;
-    request.log = request.log.child({ requestId: request.id, traceId: request.traceId });
+    request.traceId = resolveTraceId(request.headers, request.id);
   });
 }

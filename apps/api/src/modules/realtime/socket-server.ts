@@ -22,6 +22,7 @@ export interface RealtimeServer {
   /**
    * Reaches Redis over the adapter's own publisher client, so `/api/debug/dependencies` reports
    * the connection the broadcasts actually travel on rather than a second one that might differ.
+   * Rejects immediately when that client is not ready rather than queueing behind the outage.
    */
   ping: () => Promise<void>;
   close: () => Promise<void>;
@@ -102,6 +103,13 @@ export function createRealtimeServer(
     io,
     emitter,
     ping: async () => {
+      // The adapter's clients run with `maxRetriesPerRequest: null`, which is right for broadcasts
+      // — a command issued while Redis is away is retried rather than lost — and wrong for a
+      // probe: every health request during an outage would leave another command queued forever.
+      // The client's own state answers the question without issuing one.
+      if (pub.status !== 'ready') {
+        throw new Error(`redis client is ${pub.status}`);
+      }
       await pub.ping();
     },
     close: async () => {

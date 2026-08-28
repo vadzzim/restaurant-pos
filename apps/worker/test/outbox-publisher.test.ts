@@ -98,7 +98,7 @@ describe('the outbox publisher', () => {
 
     const result = await publishOnce(db(), transport, options);
 
-    expect(result).toEqual({ claimed: 1, published: 1, failed: 0, deadLettered: 0 });
+    expect(result).toEqual({ claimed: 1, published: 1, failed: 0, deadLettered: 0, abandoned: 0 });
     expect(transport.sent[0]?.eventId).toBe(eventId);
     // The message key is the order id, which is what keeps one order's events in one partition.
     expect(transport.keys).toEqual([orderId]);
@@ -126,7 +126,7 @@ describe('the outbox publisher', () => {
 
     const result = await publishOnce(db(), failingTransport, options);
 
-    expect(result).toEqual({ claimed: 1, published: 0, failed: 1, deadLettered: 0 });
+    expect(result).toEqual({ claimed: 1, published: 0, failed: 1, deadLettered: 0, abandoned: 0 });
 
     const row = await eventRow(eventId);
     expect(row?.publishedAt).toBeNull();
@@ -200,5 +200,41 @@ describe('per-order ordering', () => {
 
     expect(pass.claimed).toBe(2);
     expect(pass.published).toBe(2);
+  });
+});
+
+/**
+ * The M6 review's P1, from the other end. The supervisor kills the session on the first failed
+ * send, and this is what stops the rest of that batch being charged an `attempt_count` for the same
+ * outage — otherwise a full batch would burn fifty attempts on one broker blip, and dead-lettering
+ * would stop meaning "this event is bad".
+ */
+describe('a batch interrupted by the broker going away', () => {
+  it('spends one attempt and abandons the rest of the claim untouched', async () => {
+    const first = await seedOrderWithEvent();
+    const second = await seedOrderWithEvent();
+    const third = await seedOrderWithEvent();
+
+    let alive = true;
+    const dyingTransport: EventTransport = {
+      publish: async () => {
+        alive = false;
+        throw new Error('broker unreachable');
+      },
+    };
+
+    const result = await publishOnce(db(), dyingTransport, {
+      ...options,
+      isTransportAlive: () => alive,
+    });
+
+    expect(result).toMatchObject({ claimed: 3, published: 0, failed: 1, abandoned: 2 });
+
+    const attempts = await Promise.all(
+      [first, second, third].map(async ({ eventId }) => (await eventRow(eventId))?.attemptCount),
+    );
+    // Exactly one row learned anything; the other two are untouched and keep their lease.
+    expect(attempts.filter((count) => count === 1)).toHaveLength(1);
+    expect(attempts.filter((count) => count === 0)).toHaveLength(2);
   });
 });

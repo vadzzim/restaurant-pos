@@ -55,6 +55,13 @@ built on that meaning. So the worker stays alive, retries the connection with ba
 publisher loop while `broker.current()` is undefined. The backlog waits untouched and drains on
 recovery.
 
+**The session dies on a failed send.** KafkaJS emits the producer's `DISCONNECT` instrumentation
+event for an explicit disconnect, not for the broker vanishing under an open socket — which is the
+one case all of this exists for, so that event alone would leave the publisher running through
+exactly the outage it is meant to sit out. A send failure is the signal the worker is guaranteed to
+receive, so it is the one the session hangs on, and `publishOnce` breaks out of the rest of its
+batch rather than charging every remaining row an attempt for the same outage.
+
 ## Consequences
 
 - A broker outage is now demonstrable rather than asserted: stop Redpanda, `/api/health/ready` stays
@@ -71,6 +78,15 @@ recovery.
 - The worker no longer fails fast. A misconfigured broker address now produces a warning every five
   seconds instead of an immediate exit, which is quieter than a crash and easier to miss. The
   heartbeat carries `brokerConnected` for exactly that reason.
+- **One attempt is still spent at the moment the broker drops**, by the event whose send discovers
+  it. That is the honest reading of "we tried and it did not work", and the outbox's own
+  `next_attempt_at` backoff paces everything after it. The rows abandoned behind it keep their lease
+  for `OUTBOX_LEASE_MS`, so a recovery inside that window waits the lease out before republishing;
+  releasing the claim eagerly belongs with M9's lease hardening.
+- **A probe timeout gives up on a check, it cannot cancel one.** Each check is therefore bounded at
+  its own client — the pool's `connectionTimeoutMillis`, the Redis probe refusing to issue a command
+  unless the adapter's client is `ready`, the probe broker's disabled retries. Without that, a long
+  outage would leave one abandoned operation behind per health request.
 - Two supervision loops now exist, one in each process, deliberately not shared. They differ in
   logger type, in what a session owns and in why they exist; their only common home would be a new
   runtime package, which is more structure than forty lines of loop earns.

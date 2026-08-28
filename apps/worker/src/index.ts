@@ -22,6 +22,9 @@ const publisherOptions = {
   maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
   backoffBaseMs: config.OUTBOX_BACKOFF_BASE_MS,
   backoffMaxMs: config.OUTBOX_BACKOFF_MAX_MS,
+  // The session below dies on the first failed send; this stops the rest of the batch being
+  // charged an attempt for the same outage.
+  isTransportAlive: () => broker.current() !== undefined,
 };
 
 const kafka = createKafka(config);
@@ -45,8 +48,7 @@ async function connectBroker(
   });
 
   const producer = broker.producer();
-  // A producer that has given up is as dead as a crashed consumer, and the publisher must stop
-  // rather than burn `attempt_count` against it.
+  // An explicit disconnect is one way a producer dies, and the cheapest to observe.
   producer.on(producer.events.DISCONNECT, () => {
     died();
   });
@@ -60,8 +62,33 @@ async function connectBroker(
     },
   );
 
+  const kafkaTransport = createKafkaTransport(producer, settings.KAFKA_ORDER_EVENTS_TOPIC);
+
+  /**
+   * **A failed send ends the session.** KafkaJS emits `DISCONNECT` for an explicit disconnect, not
+   * for the ordinary case of the broker going away under an open socket — so the instrumentation
+   * event alone would leave `broker.current()` defined through an outage, the publisher would keep
+   * calling `publishOnce`, and `attempt_count` would climb until good events dead-lettered. That is
+   * the exact outcome this supervision exists to prevent (ADR 011). A send failure is the one
+   * signal the worker is guaranteed to receive, so it is the one this hangs the session on.
+   *
+   * The cost is one spent attempt per reconnect that succeeds and then fails again, which is the
+   * honest reading of "we tried and it did not work" — and the outbox's own `next_attempt_at`
+   * backoff, not the reconnect interval, is what paces the retries after the first couple.
+   */
+  const transport: EventTransport = {
+    publish: async (event, key) => {
+      try {
+        await kafkaTransport.publish(event, key);
+      } catch (error) {
+        died();
+        throw error;
+      }
+    },
+  };
+
   return {
-    value: createKafkaTransport(producer, settings.KAFKA_ORDER_EVENTS_TOPIC),
+    value: transport,
     whenDead,
     stop: async () => {
       await kitchen.stop().catch(() => undefined);

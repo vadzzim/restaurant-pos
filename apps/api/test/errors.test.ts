@@ -5,6 +5,7 @@ import { outboxEvents } from '@pos/db';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 
+import { buildApp } from '../src/app.js';
 import { DEMO_RESTAURANT, db, testApp, useTestDatabase } from './helpers.js';
 
 useTestDatabase();
@@ -133,6 +134,42 @@ describe('§20 correlation', () => {
       .from(outboxEvents)
       .where(eq(outboxEvents.aggregateId, orderId));
     expect(row?.traceId).toBe('req-42');
+
+    await app.close();
+  });
+});
+
+/**
+ * The M6 review's P2. Fastify writes `incoming request` — the line carrying the method and the url,
+ * the one you reach for first when following a trace — before any `onRequest` hook runs, so binding
+ * the correlation fields in a hook left exactly that line without them.
+ */
+describe('correlation on every line, including the first', () => {
+  it('binds requestId and traceId before Fastify logs the incoming request', async () => {
+    const lines: Record<string, unknown>[] = [];
+    const app = buildApp({
+      db: db(),
+      logLevel: 'info',
+      logDestination: {
+        write: (line) => {
+          lines.push(JSON.parse(line) as Record<string, unknown>);
+        },
+      },
+    });
+
+    await app.inject({
+      method: 'GET',
+      url: '/api/health/live',
+      headers: { 'x-request-id': 'req-7', 'x-trace-id': 'trace-7' },
+    });
+
+    const incoming = lines.find((line) => line.msg === 'incoming request');
+    expect(incoming).toMatchObject({ requestId: 'req-7', traceId: 'trace-7' });
+    // And every other line of that request, not just the first.
+    expect(lines.filter((line) => line.reqId === 'req-7').length).toBeGreaterThan(1);
+    for (const line of lines.filter((entry) => entry.reqId === 'req-7')) {
+      expect(line).toMatchObject({ requestId: 'req-7', traceId: 'trace-7' });
+    }
 
     await app.close();
   });

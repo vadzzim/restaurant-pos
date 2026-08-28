@@ -12,9 +12,9 @@ health split with its ADR, the supervised worker, `pnpm verify:integration` and 
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
-M6 at `HEAD`. The tree passes typecheck, lint, build and **176 tests**
-(61 domain, 51 api, 16 worker, 47 web) against a real PostgreSQL, plus **one integration test**
-against a real Redpanda that runs only under `pnpm verify:integration`. Ten of the sixteen
+M6 `860b064` plus one review commit at `HEAD`. The tree passes typecheck, lint, build and
+**178 tests** (61 domain, 52 api, 17 worker, 47 web) against a real PostgreSQL, plus **one
+integration test** against a real Redpanda that runs only under `pnpm verify:integration`. Ten of the sixteen
 mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3, **21.4**, 21.5,
 21.6, **21.9**, **21.10**, 21.11, 21.15.
 
@@ -69,6 +69,15 @@ mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3,
 - **The worker never publishes while its broker is disconnected** (ADR 011). A failed publish costs
   an `attempt_count`, so publishing through an outage would dead-letter events that were never bad.
   `broker.current()` is `undefined` while disconnected and the publisher loop idles.
+- **The session dies on a failed send, not on `DISCONNECT`.** KafkaJS emits that instrumentation
+  event for an explicit disconnect only, never for the broker vanishing under an open socket — the
+  one case the supervision exists for. `publishOnce` also breaks out of a batch through
+  `isTransportAlive`, so a blip costs one attempt rather than one per claimed row. **Do not move
+  the death signal back onto a KafkaJS event**; the M6 review found exactly that.
+- **A probe timeout gives up, it does not cancel.** Anything a probe calls has to be bounded at its
+  own client — the pool's `connectionTimeoutMillis`, the Redis probe's `status === 'ready'` gate,
+  the probe broker's disabled retries — or a long outage accumulates one abandoned operation per
+  health request.
 - **`decide()` owns §8 and nothing else does.** Nine mutation types, six statuses, one table-driven
   function, one matrix test. A rule added anywhere else is a bug. The order of checks is fixed:
   **domain rule first, version second** — §21.4 fails if that is reversed, because a client at v5
@@ -139,7 +148,8 @@ mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3,
   and consumer group, suffixed per run: on `restaurant.order.events` the worker the user keeps
   running for the demo would consume the test's events into the demo database.
 - **`pnpm verify:integration` tears down only what it started** and never touches volumes, so it
-  cannot destroy a demo that is already up. CI runs that same command with no `services:` block.
+  cannot destroy a demo that is already up. A failed teardown fails the run: the script promised to
+  leave the machine as it found it. CI runs that same command with no `services:` block.
 - Workspace packages resolve through their `exports` to `dist`, so `pnpm run build:packages` runs
   before dev, typecheck, build, test and the db scripts. Vitest aliases the sources instead.
 - Root `pnpm test` runs the suites with `--workspace-concurrency=1`; they share one test database.
@@ -180,6 +190,11 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   wrong since M3 — a malformed body answered 500, an unknown route answered Fastify's own shape —
   and neither had a test, because the handler was written for the errors the code raises rather than
   for the errors that reach it. Ask what arrives at a handler, not what is thrown at it.
+- **The M6 review is that lesson one layer down, and it caught three instances of it.** The broker
+  session hung on `DISCONNECT`, which does not fire when the broker vanishes; the correlation fields
+  bound in an `onRequest` hook, which runs after Fastify's first log line; the probe race, which
+  gives up without cancelling. Each trusted a signal to fire at a moment it does not cover. **Ask
+  what the failure actually emits, not what the API has an event named after.**
 
 ## Known problems / open questions
 
@@ -213,6 +228,9 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   seconds rather than an exit, which is easier to miss than a crash. The heartbeat carries
   `brokerConnected` for exactly that reason. Two supervision loops now exist, one per process,
   deliberately not shared (ADR 011).
+- **Abandoned outbox rows stay leased for `OUTBOX_LEASE_MS`.** When a batch is cut short by the
+  broker dying, the untouched rows keep their claim and are only republished once the lease expires
+  — up to 30 s after recovery. Releasing the claim eagerly belongs with M9's lease hardening.
 - **`GET /api/config` is the M4 stub of an M13 feature.** It reads `feature_flags` directly: no
   Redis cache, no percentage rollout, and the client fetches it once at bootstrap instead of every
   15 s. With the flag off the screens are correct but receive no live updates, because the polling

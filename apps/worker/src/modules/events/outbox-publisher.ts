@@ -17,6 +17,14 @@ export interface PublisherOptions {
   maxAttempts: number;
   backoffBaseMs: number;
   backoffMaxMs: number;
+  /**
+   * Ends the pass early when the transport is no longer usable. Without it, the broker dropping
+   * mid-batch costs one `attempt_count` on every remaining row for a reason that has nothing to do
+   * with those rows — `attempt_count` has to keep meaning "this event failed", not "the broker
+   * went away while it was in the queue" (ADR 011). Defaults to always alive, which is what the
+   * tests with a fake transport want.
+   */
+  isTransportAlive?: (() => boolean) | undefined;
 }
 
 export interface PublishRunResult {
@@ -24,6 +32,11 @@ export interface PublishRunResult {
   published: number;
   failed: number;
   deadLettered: number;
+  /**
+   * Claimed but never attempted, because the transport died first. These keep their lease and are
+   * republished when it expires; they spend no attempt, which is the whole point.
+   */
+  abandoned: number;
 }
 
 interface ClaimedRow extends Record<string, unknown> {
@@ -64,9 +77,16 @@ export async function publishOnce(
     published: 0,
     failed: 0,
     deadLettered: 0,
+    abandoned: 0,
   };
 
   for (const row of claimed) {
+    // Every remaining send would fail for the same reason and charge every remaining row for it.
+    if (options.isTransportAlive?.() === false) {
+      result.abandoned = claimed.length - result.published - result.failed;
+      break;
+    }
+
     const event = toDomainEvent(row);
 
     try {

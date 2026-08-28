@@ -38,6 +38,12 @@ function errorMessage(error: unknown): string {
  * its own timeout. The losing promise is left to settle on its own — a rejection after the race is
  * swallowed deliberately, because an unhandled rejection here would take down the process that is
  * trying to describe the outage.
+ *
+ * **This race is a backstop, not the bound.** It cannot cancel the work it gave up on, so a check
+ * that could hang forever would leave one more pending command or pool waiter behind on every
+ * health request for the length of the outage. Each check is therefore bounded at its own client —
+ * the pool's `connectionTimeoutMillis`, the Redis probe's readiness gate, the probe broker's
+ * disabled retries — and this timeout only decides when to stop waiting for a slow one.
  */
 export async function runProbe(
   probe: DependencyProbe,

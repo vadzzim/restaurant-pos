@@ -529,3 +529,57 @@ set of containers than anyone runs locally.
 One thing deliberately left alone: `GET /api/config` is still the M4 stub. M6's brief lists it
 because §17 lists it, and it exists; the Redis cache, the percentage rollout and the 15-second poll
 are M13's, together with the polling transport that is the flag's other branch.
+
+## M6 review — the signal the supervisor was not listening for
+
+A Codex pass over `860b064` found one P1 and three P2s. The P1 is the interesting one, and it is the
+same shape as both M5 findings: a rule argued correctly in an ADR and wired to the wrong signal.
+
+**P1 — `DISCONNECT` is not how a broker goes away.** The whole claim of ADR 011 is that the worker
+stops publishing during an outage so that `attempt_count` cannot dead-letter good events. The
+session was hung on the producer's `DISCONNECT` instrumentation event — which KafkaJS emits for an
+_explicit_ disconnect, not for the ordinary case of the broker vanishing under an open socket. So in
+the exact scenario the supervision exists for, `died()` was never called, `broker.current()` stayed
+defined, and the publisher kept calling `publishOnce`. The protection worked at startup and on a
+clean shutdown, and not during an outage.
+
+The fix hangs the session on the one signal the worker is guaranteed to receive: **a failed send**.
+The transport handed to the publisher is wrapped so that any publish error resolves `whenDead` and
+rethrows.
+
+That alone was not enough. `publishOnce` catches per-event failures and continues to the next row,
+so one dead session still charged an attempt to every remaining row of a claimed batch — up to fifty
+on a single blip. `PublisherOptions` grew an `isTransportAlive` predicate and the loop breaks on it,
+with the untouched rows reported as `abandoned`. They keep their lease and are republished when it
+expires, having spent nothing. The regression test asserts exactly that: three claimed rows, one
+attempt spent, two at `attempt_count = 0`.
+
+The residue, recorded rather than fixed: abandoned rows stay leased for `OUTBOX_LEASE_MS` (30 s), so
+a recovery inside that window waits out the lease before republishing. Releasing the claim eagerly
+belongs with M9's lease-reclaim hardening.
+
+**P2 — the first log line had no correlation on it.** Fastify writes `incoming request` — the line
+carrying the method and the url — _before_ any `onRequest` hook runs, so replacing `request.log` in
+a hook left the one line you reach for first without `requestId` or `traceId`. The fields now bind
+in `childLoggerFactory`, which is where the request's logger is built. `resolveTraceId` is a pure
+function of the headers and the request id, so the factory and the request decorator cannot
+disagree. Testing it needed a seam: `buildApp` takes an optional `logDestination`, and the test
+collects the real lines and asserts on `incoming request` itself.
+
+**P2 — a probe timeout is not a bound.** `Promise.race` gives up on a check but cannot cancel it, so
+anything that could hang forever left one more pending operation behind per health request for the
+length of an outage. Two real cases: the Redis probe used the adapter's client, which runs
+`maxRetriesPerRequest: null` — right for broadcasts, wrong for a probe — and `pg` waits forever to
+hand out a connection by default. Both are now bounded at the client: the Redis probe refuses to
+issue a command unless `pub.status === 'ready'`, and the pool has a `connectionTimeoutMillis`. The
+race is a backstop for a slow check, not the mechanism.
+
+**P2 — teardown failure reported PASS.** The script promises to leave the machine as it found it, so
+`docker compose rm -sf` failing after green tests is a failed run: it hands the next run, or CI,
+containers nobody expects. Its exit code is checked and summarised separately from a test failure,
+because the cause is unrelated.
+
+The lesson generalises the one M6 already had. That one was "ask what arrives at a handler, not what
+is thrown at it". This one is its twin one layer down: **ask what the failure actually emits, not
+what the API has an event named after.** Three of the four findings are the same mistake — trusting
+a signal (`DISCONNECT`, an `onRequest` hook, a race timeout) to fire at a moment it does not cover.

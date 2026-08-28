@@ -127,6 +127,9 @@ async function main() {
 }
 
 async function finish(code, alreadyRunning, summary) {
+  let exitCode = code;
+  let result = summary;
+
   if (keep) {
     banner('Teardown skipped (--keep)');
   } else {
@@ -137,15 +140,28 @@ async function finish(code, alreadyRunning, summary) {
       banner('Teardown');
       // `rm -sf`, never `down -v`: it removes only the containers this run started and never
       // touches the named volumes, so the demo database survives either way.
-      await run('docker', ['compose', 'rm', '-sf', ...toRemove]);
+      const removed = await run('docker', ['compose', 'rm', '-sf', ...toRemove]);
+
+      // The script promises to leave the machine as it found it, so a teardown that failed is a
+      // failure of the run: reporting PASS would hand the next run — or CI — containers nobody
+      // expects. It is summarised separately from a test failure because the cause is unrelated.
+      if (removed.code !== 0) {
+        write(`\ncould not remove: ${toRemove.join(', ')}\n`);
+        if (exitCode === 0) {
+          exitCode = removed.code;
+          result = 'checks passed but teardown failed; containers may still be running';
+        } else {
+          result = `${result}; teardown also failed`;
+        }
+      }
     }
   }
 
-  write(`\n=== RESULT: ${code === 0 ? 'PASS' : 'FAIL'} — ${summary} ===\n`);
+  write(`\n=== RESULT: ${exitCode === 0 ? 'PASS' : 'FAIL'} — ${result} ===\n`);
   write(`full output: ${outputFile}\n`);
 
   await new Promise((resolve) => log.end(resolve));
-  process.exit(code);
+  process.exit(exitCode);
 }
 
 await main();

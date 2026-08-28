@@ -11,11 +11,21 @@ import { registerMenuRoutes } from './modules/menu/api/menu-routes.js';
 import { registerMutationRoutes } from './modules/orders/api/mutation-routes.js';
 import { registerOrderReadRoutes } from './modules/orders/api/order-read-routes.js';
 import { ApiError, asClientError } from './shared/errors.js';
-import { generateRequestId, registerRequestContext } from './shared/request-context.js';
+import {
+  correlatedChildLogger,
+  generateRequestId,
+  registerRequestContext,
+} from './shared/request-context.js';
 
 export interface BuildAppOptions {
   db: Db;
   logLevel?: string;
+  /**
+   * Where the logs go. Process stdout by default; a test passes a collector, which is the only way
+   * to assert on the lines Fastify writes for itself — `incoming request` above all, since that is
+   * the one the correlation fields are easiest to miss on.
+   */
+  logDestination?: { write: (line: string) => void } | undefined;
   /** The complete dependency list for the health routes; see `HealthRouteOptions`. */
   probes?: DependencyProbe[];
   healthTimeoutMs?: number;
@@ -28,12 +38,19 @@ export interface BuildAppOptions {
 export function buildApp({
   db,
   logLevel = 'info',
+  logDestination,
   probes,
   healthTimeoutMs,
 }: BuildAppOptions): FastifyInstance {
   const app = Fastify({
-    logger: { level: logLevel },
+    logger: {
+      level: logLevel,
+      ...(logDestination === undefined ? {} : { stream: logDestination }),
+    },
     genReqId: generateRequestId,
+    // Binds `requestId` and `traceId` before Fastify logs `incoming request`, so the first line of
+    // a request carries them too. A hook cannot: it runs after that line is written.
+    childLoggerFactory: correlatedChildLogger,
   });
 
   registerRequestContext(app);
