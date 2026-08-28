@@ -1,3 +1,4 @@
+import { TERMINALS } from '@pos/contracts';
 import { sql } from 'drizzle-orm';
 
 import type { Db } from './client.js';
@@ -8,13 +9,9 @@ export const RESTAURANTS = [
   { id: 'second-restaurant', name: 'Second Restaurant' },
 ] as const;
 
-/** POS-3 lives in the second restaurant: it is what makes §21.11 and the §15 rollout showable. */
-export const TERMINALS = [
-  { id: 'pos-1', restaurantId: 'demo-restaurant', label: 'POS-1' },
-  { id: 'pos-2', restaurantId: 'demo-restaurant', label: 'POS-2' },
-  { id: 'bar-1', restaurantId: 'demo-restaurant', label: 'BAR-1' },
-  { id: 'pos-3', restaurantId: 'second-restaurant', label: 'POS-3' },
-] as const;
+// The terminal list itself lives in @pos/contracts: the browser resolves a terminal's restaurant
+// from the URL and must read the same list this seed writes.
+export { TERMINALS };
 
 export const PRODUCTS = [
   { id: 'burger', name: 'Burger', priceCents: 1200 },

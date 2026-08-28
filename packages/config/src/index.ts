@@ -20,6 +20,9 @@ const environmentSchema = z.object({
   KAFKA_ORDER_EVENTS_TOPIC: z.string().min(1).default('restaurant.order.events'),
   KAFKA_ORDER_EVENTS_PARTITIONS: z.coerce.number().int().positive().default(3),
   KITCHEN_CONSUMER_GROUP: z.string().min(1).default('kitchen'),
+  /** Shared across every api instance on purpose: see ADR 006. */
+  REALTIME_CONSUMER_GROUP: z.string().min(1).default('realtime'),
+  REALTIME_CONSUMER_RETRY_MS: z.coerce.number().int().positive().default(5_000),
   OUTBOX_POLL_MS: z.coerce.number().int().positive().default(500),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().default(50),
   OUTBOX_LEASE_MS: z.coerce.number().int().positive().default(30_000),

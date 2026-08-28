@@ -166,3 +166,72 @@ export interface ApiErrorResponse {
   message: string;
   details?: unknown;
 }
+
+export interface MenuItem {
+  id: string;
+  name: string;
+  priceCents: number;
+}
+
+/** One row of the kitchen projection (§12.1), as the kitchen screen reads it. */
+export interface KitchenTicket {
+  orderId: string;
+  restaurantId: string;
+  tableNumber: string;
+  items: OrderItemSnapshot[];
+  state: string;
+  sourceEventVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const FEATURE_FLAG_KEYS = ['realtime.websocket_push'] as const;
+
+export type FeatureFlagKey = (typeof FEATURE_FLAG_KEYS)[number];
+
+/** `GET /api/config`: the flag state resolved for one restaurant (§15, §17). */
+export interface ConfigResponse {
+  restaurantId: string;
+  flags: Record<FeatureFlagKey, boolean>;
+}
+
+/**
+ * One event name carrying one envelope, so the client writes its dedup and version gate once
+ * instead of per event type (§12.2).
+ */
+export const REALTIME_EVENT_NAME = 'order.event';
+
+export const SUBSCRIBE_EVENT_NAME = 'subscribe';
+
+/**
+ * What a client asks to follow. It names its restaurant, its role and its current order — never a
+ * raw room string; the server derives room membership from this (§13).
+ */
+export interface SubscribeRequest {
+  restaurantId: string;
+  role: 'pos' | 'kitchen';
+  orderId?: string | undefined;
+}
+
+export interface TerminalDescriptor {
+  id: string;
+  restaurantId: string;
+  label: string;
+}
+
+/**
+ * The demo terminals. This lives in contracts rather than in the seed alone because both sides
+ * need it: the database seeds these rows, and the client resolves the restaurant it belongs to
+ * from the terminal id in the URL. `pos-3` sits in the second restaurant on purpose — it is what
+ * makes the tenant boundary and the §15 rollout visible on screen.
+ */
+export const TERMINALS: readonly TerminalDescriptor[] = [
+  { id: 'pos-1', restaurantId: 'demo-restaurant', label: 'POS-1' },
+  { id: 'pos-2', restaurantId: 'demo-restaurant', label: 'POS-2' },
+  { id: 'bar-1', restaurantId: 'demo-restaurant', label: 'BAR-1' },
+  { id: 'pos-3', restaurantId: 'second-restaurant', label: 'POS-3' },
+];
+
+export function findTerminal(terminalId: string): TerminalDescriptor | undefined {
+  return TERMINALS.find((terminal) => terminal.id === terminalId);
+}

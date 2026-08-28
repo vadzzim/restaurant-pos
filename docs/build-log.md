@@ -94,3 +94,40 @@ poll interval before the next one; otherwise a three-event order would take seco
 kitchen.
 
 Five regression tests were added, and all five fail against the pre-fix sources.
+
+## M4 — vertical slice, frontend
+
+**Fastify's logger is not `pino.Logger`.** The realtime modules were written against
+`import type { Logger } from 'pino'` and handed `app.log`, which is a `FastifyBaseLogger`. The two
+are pino-compatible at runtime but not assignable at the type level. Both modules now take
+`FastifyBaseLogger`, which is also the honest signature: these things log through the API's logger,
+they do not own one.
+
+**`socket.io` had to be kept out of `buildApp()`.** Attaching it there would have made every
+`fastify.inject` test open a Redis connection and a Kafka client. `buildApp()` stayed routes-only
+and the socket server plus the consumer moved into `index.ts`; the 23 API tests still run with no
+broker and no Redis, which is what keeps them fast enough to run narrowly.
+
+**TypeScript would not narrow the mutation response through `||`.** `if (status === 'APPLIED' ||
+status === 'ALREADY_APPLIED')` narrows the true branch but leaves `MutationAppliedResponse` in the
+false branch, because its discriminant is itself a union of the two literals. A `switch` with both
+cases falling through narrows correctly. Worth remembering: the four §5 responses will be matched
+on in several more places before M8.
+
+**An endpoint the spec's §17 list does not have.** The kitchen screen reads `kitchen_tickets`
+(§12.1, §16) and no listed endpoint returns that projection —
+`GET /api/restaurants/:restaurantId/orders` reads the `orders` aggregate. Added
+`GET /api/kitchen/tickets?restaurantId=…`, under the `/api/kitchen` prefix §17 already establishes
+for the two command endpoints. The alternative was to have the kitchen read `orders`, which would
+have made the consumer's idempotency invisible on the one screen it exists to serve.
+
+**`TERMINALS` moved from `@pos/db` to `@pos/contracts`.** The POS resolves its restaurant from the
+terminal id in the URL, and there is no endpoint that maps one to the other. Rather than add one or
+duplicate the list in the browser, the list became shared vocabulary and the seed imports it.
+
+**`vue/html-self-closing` disagrees with Prettier** on `<input />`. Turned off, alongside the two
+template rules that were already off for the same reason.
+
+**Vite had to proxy the WebSocket upgrade.** Socket.IO shares the API's HTTP server, so
+`'/socket.io': { target, ws: true }` sits next to the `/api` proxy; without it the client falls
+back to polling against the Vite dev server and never connects.

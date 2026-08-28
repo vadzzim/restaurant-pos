@@ -47,7 +47,9 @@ export default tseslint.config(
           message: 'Read environment variables through @pos/config.',
         },
       ],
+      // Prettier owns template formatting; these three rules disagree with it.
       'vue/max-attributes-per-line': 'off',
+      'vue/html-self-closing': 'off',
       'vue/singleline-html-element-content-newline': 'off',
     },
   },

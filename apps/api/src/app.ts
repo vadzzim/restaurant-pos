@@ -1,7 +1,11 @@
 import type { Db } from '@pos/db';
 import Fastify, { type FastifyInstance } from 'fastify';
 
+import { registerConfigRoutes } from './modules/config/api/config-routes.js';
+import { registerKitchenReadRoutes } from './modules/kitchen/api/kitchen-read-routes.js';
+import { registerMenuRoutes } from './modules/menu/api/menu-routes.js';
 import { registerMutationRoutes } from './modules/orders/api/mutation-routes.js';
+import { registerOrderReadRoutes } from './modules/orders/api/order-read-routes.js';
 import { ApiError } from './shared/errors.js';
 
 export interface BuildAppOptions {
@@ -9,6 +13,10 @@ export interface BuildAppOptions {
   logLevel?: string;
 }
 
+/**
+ * Routes and the error handler, and nothing else. Socket.IO and the realtime consumer are wired in
+ * `index.ts` instead, so `fastify.inject` tests need neither a broker nor Redis.
+ */
 export function buildApp({ db, logLevel = 'info' }: BuildAppOptions): FastifyInstance {
   const app = Fastify({ logger: { level: logLevel } });
 
@@ -28,6 +36,10 @@ export function buildApp({ db, logLevel = 'info' }: BuildAppOptions): FastifyIns
   app.get('/api/health/live', async () => ({ status: 'ok' }));
   app.get('/api/health/ready', async () => ({ status: 'ok' }));
 
+  registerConfigRoutes(app, db);
+  registerMenuRoutes(app, db);
+  registerOrderReadRoutes(app, db);
+  registerKitchenReadRoutes(app, db);
   registerMutationRoutes(app, db);
 
   return app;
