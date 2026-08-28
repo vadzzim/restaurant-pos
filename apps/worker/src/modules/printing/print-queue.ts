@@ -1,5 +1,7 @@
-import { Queue, type ConnectionOptions } from 'bullmq';
+import { Queue } from 'bullmq';
+import type { Redis } from 'ioredis';
 
+import { settleWithin } from '../../shared/timeout.js';
 import { ticketHash, type PrintableTicket } from './ticket-hash.js';
 
 /**
@@ -17,7 +19,7 @@ export interface PrintQueueOptions {
   queueName: string;
   maxAttempts: number;
   backoffBaseMs: number;
-  /** The bound on one `add`, and the reason `enqueue` can be called from a consumer at all. */
+  /** The bound on one `enqueue`, and the reason it can be called from a consumer at all. */
   enqueueTimeoutMs: number;
 }
 
@@ -30,11 +32,11 @@ export interface PrintQueueOptions {
  * BullMQ keeps terminal jobs under their id, and a retained one would silently swallow every later
  * `add` for the same ticket — including the sweep's repair and a human's manual retry. The visible
  * record of a failure is the `print_jobs` row (ADR 014), which is where `/debug` will read it.
+ *
+ * Takes the ioredis client rather than BullMQ's `ConnectionOptions` because `enqueue` needs to know
+ * whether it is connected before it starts anything — see below.
  */
-export function createPrintQueue(
-  connection: ConnectionOptions,
-  options: PrintQueueOptions,
-): PrintQueue {
+export function createPrintQueue(connection: Redis, options: PrintQueueOptions): PrintQueue {
   const queue = new Queue<PrintableTicket>(options.queueName, {
     connection,
     defaultJobOptions: {
@@ -47,11 +49,7 @@ export function createPrintQueue(
 
   return {
     enqueue: async (ticket) => {
-      await withinTimeout(
-        queue.add('print-ticket', ticket, { jobId: ticketHash(ticket) }),
-        options.enqueueTimeoutMs,
-        ticket.orderId,
-      );
+      await enqueueWithin(queue, connection, ticket, options.enqueueTimeoutMs);
     },
     close: async () => {
       await queue.close();
@@ -60,56 +58,55 @@ export function createPrintQueue(
 }
 
 /**
- * The bound that makes "best effort" true, added by review round 1.
+ * What makes "best effort" true, in three parts, because a Redis outage can stall an enqueue in
+ * three different places and no single guard reaches all of them. The kitchen consumer awaits this
+ * inside `eachMessage`, so an enqueue that never settles is a consumer that never commits an offset
+ * and never projects another order — the soft dependency taking down the hard path (ADR 014).
  *
- * The kitchen consumer awaits `enqueue` inside `eachMessage`, so an `add` that never settles is a
- * consumer that never commits its offset and never projects another order — a soft dependency
- * taking a hard one down with it, which is precisely the claim ADR 014 makes.
+ * 1. **Refuse before starting an `add` at all while the client is not ready** — the part review
+ *    round 2 added. Waiting *inside* `add` is what retains the job: BullMQ holds the ticket and its
+ *    promise against a readiness that is not coming, once per event, for as long as the outage
+ *    lasts, and timing the caller out releases none of it. Refusing early also keeps the consumer
+ *    at full speed through an outage instead of spending the whole bound on every event. The cost
+ *    is a ticket enqueued in the moment between the client opening and reaching `ready` — the
+ *    connection is built at boot, long before the consumer group has joined, and the sweep repairs
+ *    it if that window is ever hit.
+ * 2. **`commandTimeout` on the connection** (`shared/redis.ts`) bounds an `add` that *was* started:
+ *    once the client has been ready, a later outage leaves the command in ioredis's offline queue,
+ *    where the timeout rejects it.
+ * 3. **The race below** covers the seam between the two — the client is ready when it is checked
+ *    and drops before `add` reads it, leaving BullMQ inside `waitUntilReady` with no command to
+ *    time out. That window is narrow and this is the only thing that closes it.
  *
- * Bounding it needs **two** guards, because there are two ways to wait and the transport only
- * covers one of them. Once the connection has been ready, a later outage leaves commands in
- * ioredis's offline queue, where `commandTimeout` rejects them (see `shared/redis.ts`). But if
- * Redis was never reachable, BullMQ's connection is still inside `waitUntilReady` and has issued no
- * command at all — nothing to time out — and it waits for as long as ioredis keeps reconnecting.
- * That is the case this race covers.
- *
- * Giving up here does **not** cancel the `add`, and it deliberately does not poison the queue: the
- * connection keeps reconnecting, so the same queue works again when Redis comes back. A late `add`
- * that lands after we reported failure is harmless — the `jobId` is the ticket hash — and a genuine
- * loss is what the sweep repairs.
+ * None of the three gives up on the *connection*: it keeps reconnecting, so the queue works again
+ * when Redis comes back. And an abandoned `add` is not a cancelled one — it may still land, which
+ * is harmless, because the `jobId` is the ticket hash and a genuine loss is the sweep's to repair.
  */
-async function withinTimeout(
-  added: Promise<unknown>,
+async function enqueueWithin(
+  queue: Queue<PrintableTicket>,
+  connection: Redis,
+  ticket: PrintableTicket,
   timeoutMs: number,
-  orderId: string,
 ): Promise<void> {
-  // A rejection is turned into a value up front, so the promise we may abandon always has a
-  // handler: an unhandled rejection here would take the whole worker down.
-  const settled = added.then(
-    () => ({ ok: true }) as const,
-    (error: unknown) => ({ ok: false, error }) as const,
+  if (connection.status !== 'ready') {
+    throw new Error(
+      `the print queue is not connected to Redis (${connection.status}): the ticket for order ` +
+        `${ticket.orderId} was not enqueued`,
+    );
+  }
+
+  const added = await settleWithin(
+    queue.add('print-ticket', ticket, { jobId: ticketHash(ticket) }),
+    timeoutMs,
   );
 
-  let timer: NodeJS.Timeout | undefined;
-  const overran = new Promise<'overran'>((resolve) => {
-    timer = setTimeout(() => {
-      resolve('overran');
-    }, timeoutMs);
-  });
+  if (added.kind === 'overran') {
+    throw new Error(
+      `the print queue did not accept the ticket for order ${ticket.orderId} within ${timeoutMs}ms`,
+    );
+  }
 
-  try {
-    const outcome = await Promise.race([settled, overran]);
-
-    if (outcome === 'overran') {
-      throw new Error(
-        `the print queue did not accept the ticket for order ${orderId} within ${timeoutMs}ms`,
-      );
-    }
-
-    if (!outcome.ok) {
-      throw outcome.error instanceof Error ? outcome.error : new Error(String(outcome.error));
-    }
-  } finally {
-    clearTimeout(timer);
+  if (added.kind === 'rejected') {
+    throw added.error instanceof Error ? added.error : new Error(String(added.error));
   }
 }

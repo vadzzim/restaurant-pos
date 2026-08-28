@@ -55,6 +55,12 @@ const environmentSchema = z.object({
   PRINT_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   /** BullMQ's exponential backoff base, so attempt n waits `base * 2^(n-1)`. */
   PRINT_BACKOFF_BASE_MS: z.coerce.number().int().positive().default(1_000),
+  /**
+   * How long each step of the print pipeline's shutdown may take before the Redis sockets are
+   * dropped instead. A `quit()` against an unreachable Redis waits for a reply rather than
+   * failing, and nothing after it — closing the database, exiting — would ever run.
+   */
+  PRINT_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
   /** How often the reconciliation sweep looks for tickets nothing has printed. */
   PRINT_RECONCILE_MS: z.coerce.number().int().positive().default(15_000),
   /** A bound on one sweep, so a backlog of unprintable tickets cannot monopolise the loop. */

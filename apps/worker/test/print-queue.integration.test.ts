@@ -77,7 +77,8 @@ describe('the print queue against a real Redis', () => {
       },
     };
 
-    const queue = createPrintQueue(connect(producerOptions), {
+    const queueRedis = connect(producerOptions);
+    const queue = createPrintQueue(queueRedis, {
       queueName,
       maxAttempts: 3,
       backoffBaseMs: 100,
@@ -89,6 +90,10 @@ describe('the print queue against a real Redis', () => {
     });
 
     try {
+      // The enqueue refuses a client that is not ready yet (review round 2), and this one was
+      // opened a line ago. The worker connects at boot, long before an event can arrive.
+      await queueRedis.ping();
+
       await queue.enqueue(printable);
       await queue.enqueue(printable);
 

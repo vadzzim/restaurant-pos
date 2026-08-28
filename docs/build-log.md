@@ -1211,3 +1211,52 @@ The shared shapes moved to `apps/worker/src/shared/redis.ts`: `BLOCKING_CONNECTI
 worker, `producerConnection(timeout)` for everything that enqueues, and one `connectRedis` that
 always attaches the `error` listener. Having the two named side by side is the point — the bug was
 that they looked like one thing.
+
+## M10 review round 2 — bounding the caller is not releasing the work
+
+Round 1's fix opened round 2, for the seventh milestone in a row. Two findings, both about waits
+that nobody was watching.
+
+**P1 — the abandoned `add` kept the ticket.** Racing `queue.add()` against a timeout freed the
+kitchen consumer, which is what round 1 set out to do, and did nothing whatsoever about the work
+it walked away from: BullMQ was still inside `waitUntilReady`, holding the job and its promise
+against a readiness that was not coming. One retained ticket per event, for the whole outage. The
+consumer kept projecting, so the symptom was not a stall but memory — a soft dependency taking the
+worker down slowly instead of quickly. **A timeout is a statement about the caller, never about
+the callee**, and the round 1 comment came close to saying so while missing the consequence: "a
+late add is harmless" is true about correctness and says nothing about what is being held until
+then.
+
+The fix is to refuse before starting anything: if the ioredis client is not `ready`, `enqueue`
+throws without touching BullMQ. Nothing is handed over, so nothing is retained.
+
+**Two designs were tried, and the second is the one worth explaining.** The first was to _wait_,
+bounded, for the client to become ready and only then `add` — no accumulation either, and no
+spurious failure at boot when the client is a few milliseconds from ready. But it makes every event
+during an outage cost the full bound before the consumer can move on, which slows the kitchen
+projection to one event per `PRINT_ENQUEUE_TIMEOUT_MS` — the same class of problem, milder, and it
+would have come back as round 3. Refusing immediately keeps the consumer at full speed and costs
+only a ticket enqueued inside the window between the connection opening and reaching `ready`. That
+connection is built at boot, long before the consumer group has joined, and the sweep repairs the
+window if it is ever hit. So there are now three guards, each covering something the others cannot:
+the status check stops work being _started_, `commandTimeout` bounds work that _was_ started, and
+the race covers the seam where the client is ready when checked and drops before `add` reads it.
+
+**P2 — shutdown could hang for ever.** `printWorker.close()`, `printQueue.close()` and especially
+`printWorkerRedis.quit()` do not _reject_ when Redis is unreachable — they wait for a reply that is
+never coming, and `quit()` on a connection with `maxRetriesPerRequest: null` waits by design. The
+`try`/`catch` around them was therefore decorative: nothing after `stopPrinting()` would ever run,
+`closeDb()` included, and only SIGKILL would end the process. Every step is now bounded by
+`PRINT_SHUTDOWN_TIMEOUT_MS` and both clients are `disconnect()`ed unconditionally afterwards —
+local, synchronous, and no reply required. The printer CLI had the same ordering bug and the same
+fix.
+
+The sharpest part of this finding is where the reviewer found the evidence: **the round 1 test
+already did `redis.disconnect()` before `queue.close()`**, with a comment saying why, because it
+would otherwise hang. The knowledge was in the repository, in a comment, in the same commit, and it
+had not been carried the twenty lines into the production path. A test that has to work around a
+behaviour is reporting a bug.
+
+`settleWithin` in `apps/worker/src/shared/timeout.ts` is now the one place that pattern lives —
+three call sites, the enqueue, the shutdown and the CLI — and it keeps the "attach a handler up
+front so an abandoned rejection is never unhandled" rule with it.

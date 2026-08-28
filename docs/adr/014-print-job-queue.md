@@ -43,11 +43,14 @@ the sweep. Marking the API unready would take a working POS offline to protect a
 That claim rests on one mechanism, and review round 1 found it missing: the kitchen consumer awaits
 the enqueue inside `eachMessage`, so an `add` that never settles is a consumer that never commits an
 offset and never projects another order — the soft dependency taking down the hard path. The
-producer connection is therefore bounded (`commandTimeout`, a finite `maxRetriesPerRequest`) **and**
-the `add` itself is raced against a timeout, because those cover different failures: the first
-bounds a connection that was ready and then broke, the second bounds one that was never ready, where
-BullMQ is still inside `waitUntilReady` and no command exists to time out. Neither gives up on the
-connection, so the queue recovers by itself when Redis returns.
+enqueue is therefore guarded three ways, because a Redis outage stalls it in three different places.
+`enqueue` refuses **before handing anything to BullMQ** when the client is not `ready` — round 2
+found that a bounded caller still leaves BullMQ holding a ticket per event for the length of the
+outage — while `commandTimeout` and a finite `maxRetriesPerRequest` bound a command that was
+started, and a timeout race covers the seam between the two. None of the three gives up on the
+connection, so the queue recovers by itself when Redis returns. The same rule governs shutdown: a
+`quit()` against an unreachable Redis waits rather than fails, so every teardown step is bounded and
+the sockets are dropped unconditionally afterwards.
 
 **The guarantee is at-least-once, and it is stated in the UI.** `ticket_hash` deduplicates the
 record and the fake printer's `Idempotency-Key` deduplicates the request within the device's own

@@ -5,6 +5,7 @@ import pino from 'pino';
 import { createPrintQueue } from '../src/modules/printing/print-queue.js';
 import { retryDeadLetteredTicket } from '../src/modules/printing/reconcile.js';
 import { connectRedis, producerConnection } from '../src/shared/redis.js';
+import { settleWithin } from '../src/shared/timeout.js';
 
 /**
  * §18's `Fail Printer` and §19.9's manual retry, until M12 gives them buttons in `/debug`.
@@ -62,8 +63,11 @@ async function main(): Promise<void> {
         const result = await retryDeadLetteredTicket(db, queue, argument);
         process.stdout.write(`${RETRY_MESSAGES[result] ?? result}\n`);
       } finally {
-        await queue.close();
-        await redis.quit();
+        // Bounded, then dropped. `close()` and `quit()` against an unreachable Redis wait for a
+        // reply rather than failing, and a command-line tool that never returns is worse than one
+        // that reports it could not reach the queue.
+        await settleWithin(queue.close(), config.PRINT_SHUTDOWN_TIMEOUT_MS);
+        redis.disconnect();
       }
       break;
     }

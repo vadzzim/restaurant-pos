@@ -14,6 +14,7 @@ import { connectBroker } from './shared/broker-session.js';
 import { supervise } from './shared/broker-supervisor.js';
 import { createKafka } from './shared/kafka.js';
 import { BLOCKING_CONNECTION, connectRedis, producerConnection } from './shared/redis.js';
+import { settleWithin } from './shared/timeout.js';
 
 const config = loadConfig();
 const logger = pino({ level: config.LOG_LEVEL });
@@ -188,8 +189,16 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
 
 /**
  * Redis is soft at shutdown too (ADR 014): a print pipeline that cannot reach it must not make a
- * clean stop look like a failed one. Sequential rather than concurrent, so one failure does not
- * hide the next, and every step logs instead of propagating.
+ * clean stop look like a failed one — and must not make it an *endless* one, which is what review
+ * round 2 found. A `close()` or a `quit()` against an unreachable Redis does not reject, it waits
+ * for a reply that is not coming, so a `catch` around it never runs. `printWorkerRedis` is the
+ * worst case: `maxRetriesPerRequest: null` means its commands wait for ever by design. Nothing
+ * after this function — `closeDb()`, the exit — would ever be reached, and only SIGKILL would end
+ * the process.
+ *
+ * So every step is bounded, and the fallback is `disconnect()`: it is local and synchronous, it
+ * closes the socket without asking Redis anything, and it is what the tests already had to do.
+ * Sequential rather than concurrent, so one stalled step does not hide the next.
  */
 async function stopPrinting(): Promise<void> {
   const steps: [string, () => Promise<unknown>][] = [
@@ -202,12 +211,25 @@ async function stopPrinting(): Promise<void> {
   ];
 
   for (const [step, stop] of steps) {
-    try {
-      await stop();
-    } catch (error) {
-      logger.warn({ err: error, step }, 'could not stop the print pipeline cleanly');
+    const outcome = await settleWithin(stop(), config.PRINT_SHUTDOWN_TIMEOUT_MS);
+
+    if (outcome.kind === 'rejected') {
+      logger.warn({ err: outcome.error, step }, 'could not stop the print pipeline cleanly');
+    }
+
+    if (outcome.kind === 'overran') {
+      logger.warn(
+        { step, timeoutMs: config.PRINT_SHUTDOWN_TIMEOUT_MS },
+        'a print shutdown step did not finish; dropping the Redis sockets',
+      );
+      break;
     }
   }
+
+  // Unconditional, and idempotent: after a clean `quit()` these are already closed, and after a
+  // stalled one they are the only thing that lets the process exit.
+  queueRedis.disconnect();
+  printWorkerRedis.disconnect();
 }
 
 function sleep(ms: number): Promise<void> {

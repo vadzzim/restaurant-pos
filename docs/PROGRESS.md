@@ -8,8 +8,8 @@
 **Last completed milestone:** M10 — the BullMQ print job: a fake printer that fails on demand and
 honours an idempotency key, `print_jobs` written by the *processor*, `ticket_hash` deduplicating the
 record, bounded backoff and a dead-letter state owned by BullMQ, and a reconciliation sweep that
-reads `kitchen_tickets` and repairs every way an enqueue can be lost. Plus review round 1 (one P1,
-one P2, both fixed).
+reads `kitchen_tickets` and repairs every way an enqueue can be lost. Plus two review rounds (one P1
+and one P2 each, all fixed).
 **The entire order lifecycle is demoable end to end, a broker outage is demoable, reloading the tab
 mid-order is demoable, §19.2, §19.3 and now §19.9 are demoable, and the publisher and the printer
 can both be driven from a terminal — the buttons for them are M12's.**
@@ -21,9 +21,10 @@ M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, 
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
 `2666d4a` and its second at `6349dce`, M8 `8f72739` plus two review rounds through `5414676`,
-M9 `ed9a0b7` plus its review round at `4718bc4`, M10 `5909867` plus its review round in this commit.
+M9 `ed9a0b7` plus its review round at `4718bc4`, M10 `5909867` plus its first review round at
+`5e1a6d7` and its second in this commit.
 The tree passes typecheck, lint,
-build and **283 tests** (61 domain, **57 api**, **52 worker**, 113 web) against a real PostgreSQL,
+build and **284 tests** (61 domain, **57 api**, **53 worker**, 113 web) against a real PostgreSQL,
 plus **three integration tests** that run only under `pnpm verify:integration` — two against a real
 Redpanda (§21.12's round trip and §21.13's offset window) and one new one against a real Redis and
 a real BullMQ worker. All green at the end of M10.
@@ -67,9 +68,11 @@ a real BullMQ worker. All green at the end of M10.
   the live path and the sweep compute), `printer-client.ts` (the HTTP device, non-2xx throws),
   `print-processor.ts` (the **only** writer of `print_jobs`, plus `resetDeadLetteredJob`),
   `print-queue.ts` and `print-worker.ts` (BullMQ, `jobId` = ticket hash, terminal jobs never
-  retained, the `add` bounded by `PRINT_ENQUEUE_TIMEOUT_MS`), `reconcile.ts` (the sweep and the
-  manual retry), and `shared/redis.ts` — `BLOCKING_CONNECTION` versus `producerConnection()`, the
-  two shapes review round 1 found conflated. The kitchen consumer enqueues after
+  retained, the `add` refused outright while the client is not ready and bounded by
+  `PRINT_ENQUEUE_TIMEOUT_MS` once it is), `reconcile.ts` (the sweep and the manual retry),
+  `shared/redis.ts` — `BLOCKING_CONNECTION` versus `producerConnection()`, the two shapes review
+  round 1 found conflated — and `shared/timeout.ts`'s `settleWithin`, the one deadline primitive
+  the enqueue, the shutdown and the CLI share. The kitchen consumer enqueues after
   its commit and never fails on it; `apps/worker/scripts/printer-control.ts` sits behind
   `pnpm -F @pos/worker printer`. ADR 014.
 - `apps/web` — a POS screen with all six of its commands (add, ±quantity, remove, send, pay,
@@ -356,11 +359,17 @@ a real BullMQ worker. All green at the end of M10.
   completed or failed job under that id would silently swallow every later `add` for the ticket,
   including the sweep's repair and a human's retry.
 - **Redis is still soft** and readiness still checks PostgreSQL only, print queue or not (ADR 014) —
-  and that claim is only true because **the enqueue is bounded twice**: a `commandTimeout` and a
-  finite `maxRetriesPerRequest` on the producer connection for a Redis that broke, and a timeout
-  race inside `createPrintQueue` for a Redis that was never reachable, where BullMQ is still in
-  `waitUntilReady` and no command exists to time out. Anything that enqueues from inside a consumer
-  needs both. Neither ends the connection, so the queue recovers on its own.
+  and that claim rests on **three** guards in `createPrintQueue`, each covering what the others
+  cannot. The client's status is checked *before* anything is handed to BullMQ, so an outage starts
+  no work and retains no tickets; `commandTimeout` on the producer connection bounds an `add` that
+  was started; and a timeout race covers the seam where the client is ready when checked and drops
+  before BullMQ reads it. None of them ends the connection, so the queue recovers on its own.
+  **A timeout is a statement about the caller, not about the callee** — that is the round 2 lesson
+  and it applies to anything else that walks away from work in this repository.
+- **Nothing in the print pipeline's shutdown may be unbounded.** `close()` and `quit()` against an
+  unreachable Redis wait rather than fail, so `stopPrinting()` bounds every step by
+  `PRINT_SHUTDOWN_TIMEOUT_MS` and then calls `disconnect()` — local and synchronous — on both
+  clients regardless. Without that, `closeDb()` and the process exit are unreachable.
 - **The `PRINTER_URL` default is right for `pnpm dev` and wrong in a container.** The Compose `app`
   profile sets it to `http://api:3000/api/printer/print`; inside that container `localhost` is the
   worker. M14's production images need the same care.
@@ -454,6 +463,12 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   second half is newer: bounding it needed *two* guards, because a connection that broke and a
   connection that was never ready fail at different layers — and the obvious single fix covers only
   the first.
+- **Round 2 was opened by round 1's fix, as every round has been since M4.** The timeout freed the
+  caller and left BullMQ holding a ticket per event for the length of the outage: **a timeout is a
+  statement about the caller, never about the callee.** Its second finding is worse to have written
+  than to read — round 1's own test called `redis.disconnect()` before `queue.close()`, with a
+  comment saying it would otherwise hang, and that knowledge never travelled the twenty lines into
+  the shutdown path. **A test that works around a behaviour is reporting a bug.**
 
 ## Known problems / open questions
 
@@ -487,6 +502,11 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **The print worker is fleet-wide and single-device.** One queue, one fake printer, no
   per-restaurant routing, `concurrency` left at one. Two workers would race on the same
   `print_jobs` row and spend attempts twice as fast.
+- **A ticket sent to the kitchen in the first milliseconds of the worker's life may not be
+  enqueued.** `enqueue` refuses while the Redis client is not `ready`, and the alternative — waiting
+  for readiness — costs the whole bound on every event during an outage. The connection is opened at
+  boot, long before the consumer group has joined, so the window is theoretical; if it is ever hit,
+  the sweep picks the ticket up within `PRINT_RECONCILE_MS`.
 - **An abandoned enqueue may still land.** The timeout rejects the promise; it cannot unsend the
   command. The `jobId` is the ticket hash, so a late `add` is a no-op — but "the worker reported a
   failed enqueue" and "nothing was queued" are not the same statement, exactly as with the outbox's

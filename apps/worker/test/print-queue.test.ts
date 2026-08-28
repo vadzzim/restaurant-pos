@@ -1,21 +1,52 @@
 import { randomUUID } from 'node:crypto';
 
+import type { Redis } from 'ioredis';
 import pino from 'pino';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
-import { createPrintQueue } from '../src/modules/printing/print-queue.js';
+import { createPrintQueue, type PrintQueue } from '../src/modules/printing/print-queue.js';
 import type { PrintableTicket } from '../src/modules/printing/ticket-hash.js';
 import { connectRedis, producerConnection } from '../src/shared/redis.js';
 
 const logger = pino({ level: 'silent' });
 
 /**
- * A port nothing listens on, so every connection attempt is refused immediately. That makes this a
- * unit test rather than an integration one: it needs no Redis, only the absence of one.
+ * A port nothing listens on, so every connection attempt is refused immediately. That makes these
+ * unit tests rather than integration ones: they need no Redis, only the absence of one.
  */
 const UNREACHABLE_REDIS = 'redis://127.0.0.1:1';
 
-const ENQUEUE_TIMEOUT_MS = 400;
+const ENQUEUE_TIMEOUT_MS = 300;
+
+let open: { queue: PrintQueue; redis: Redis } | undefined;
+
+function unreachableQueue(): PrintQueue {
+  const redis = connectRedis(
+    UNREACHABLE_REDIS,
+    producerConnection(ENQUEUE_TIMEOUT_MS),
+    'test',
+    logger,
+  );
+  const queue = createPrintQueue(redis, {
+    queueName: `print-unreachable-${randomUUID()}`,
+    maxAttempts: 3,
+    backoffBaseMs: 100,
+    enqueueTimeoutMs: ENQUEUE_TIMEOUT_MS,
+  });
+
+  open = { queue, redis };
+  return queue;
+}
+
+afterEach(async () => {
+  if (open !== undefined) {
+    // The raw client first: `queue.close()` would otherwise wait on the connection these tests
+    // exist because nothing can reach — which is the shutdown bug review round 2 found.
+    open.redis.disconnect();
+    await open.queue.close().catch(() => undefined);
+    open = undefined;
+  }
+});
 
 function ticket(): PrintableTicket {
   return {
@@ -32,38 +63,39 @@ function ticket(): PrintableTicket {
  * projecting anything further — a soft dependency taking the system down, which is exactly what
  * ADR 014 says Redis must never do.
  *
- * Redis is unreachable here from the start, which is the case the transport's own `commandTimeout`
- * cannot bound: BullMQ is still waiting for the connection to become ready and has issued no
- * command at all.
+ * Redis is unreachable from the start here, which is the case the connection's own `commandTimeout`
+ * cannot bound: BullMQ would still be waiting for the client to become ready, with no command
+ * issued at all.
  */
 describe('the print queue with Redis unreachable', () => {
   it('rejects the enqueue within its bound instead of waiting for ever', async () => {
-    const redis = connectRedis(
-      UNREACHABLE_REDIS,
-      producerConnection(ENQUEUE_TIMEOUT_MS),
-      'test',
-      logger,
-    );
-    const queue = createPrintQueue(redis, {
-      queueName: `print-unreachable-${randomUUID()}`,
-      maxAttempts: 3,
-      backoffBaseMs: 100,
-      enqueueTimeoutMs: ENQUEUE_TIMEOUT_MS,
-    });
+    const queue = unreachableQueue();
+    const started = Date.now();
 
-    try {
-      const started = Date.now();
+    await expect(queue.enqueue(ticket())).rejects.toThrow(/not connected to Redis/);
 
-      await expect(queue.enqueue(ticket())).rejects.toThrow(/did not accept the ticket|timeout/i);
+    // Generous, because the assertion is "bounded", not "fast": ten times the bound still fails if
+    // the enqueue is waiting on a reconnect loop that never ends.
+    expect(Date.now() - started).toBeLessThan(ENQUEUE_TIMEOUT_MS * 10);
+  });
 
-      // Generous, because the assertion is "bounded", not "fast": ten times the bound still fails
-      // if the enqueue is waiting on a reconnect loop that never ends.
-      expect(Date.now() - started).toBeLessThan(ENQUEUE_TIMEOUT_MS * 10);
-    } finally {
-      // The raw client first: `queue.close()` would otherwise wait on the connection this test
-      // exists because nothing can reach.
-      redis.disconnect();
-      await queue.close().catch(() => undefined);
+  /**
+   * Review round 2's finding. Bounding the *caller* is not the same as releasing the *work*: an
+   * `add` started against a client that is not ready is held by BullMQ, with the ticket inside it,
+   * until Redis returns — one per event, for the length of the outage.
+   *
+   * "Nothing is retained" cannot be asserted directly, so this asserts what only holds when nothing
+   * is started: every enqueue refuses on the connection's status instead of handing work to BullMQ
+   * and waiting out a timeout. Twenty of them inside a single bound is impossible otherwise.
+   */
+  it('refuses every enqueue outright rather than starting an add for each one', async () => {
+    const queue = unreachableQueue();
+    const started = Date.now();
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await expect(queue.enqueue(ticket())).rejects.toThrow(/not connected to Redis/);
     }
+
+    expect(Date.now() - started).toBeLessThan(ENQUEUE_TIMEOUT_MS);
   });
 });
