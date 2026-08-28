@@ -128,35 +128,51 @@ export const useOrderStore = defineStore('order', () => {
    */
   const blocked = computed(() => pending.value !== undefined);
 
+  /**
+   * Which screen currently owns this store.
+   *
+   * The terminal id alone cannot serve as the claim, because it survives the screen: a view that
+   * unmounts leaves `activeTerminalId` pointing at the terminal it was rendering, so a hydration
+   * still reading from disk would find its check passing against a screen that no longer exists.
+   * Every claim and every release therefore bumps a generation, the same shape `connection.start`
+   * and `connection.stop` already use.
+   */
+  let terminalGeneration = 0;
+
   /** The view announces which terminal it is rendering; nothing else may resolve that one. */
   function useTerminal(terminalId: string): void {
+    terminalGeneration += 1;
     activeTerminalId.value = terminalId;
   }
 
   /**
-   * Install a canonical snapshot and cache it (§14: update local state, then persist).
-   *
-   * Asynchronous because the persist is part of the action rather than a side effect of it: a
-   * reload a millisecond later must show what the operator was just shown. The cache is keyed by
-   * the terminal on screen, and with no terminal claimed there is nobody to hydrate it for, so
-   * nothing is written — a stored snapshot with no owner is exactly what this milestone must not
-   * create.
+   * The view is going away. Called from `onBeforeUnmount`, and before rebuilding on a terminal
+   * switch — anything still in flight for the old screen must not be able to write into the new
+   * one, or into no screen at all.
    */
-  async function adopt(snapshot: OrderSnapshot): Promise<void> {
-    if (!acceptsSnapshot(order.value, snapshot)) {
-      return;
-    }
+  function releaseTerminal(): void {
+    terminalGeneration += 1;
+    activeTerminalId.value = undefined;
+  }
 
-    order.value = snapshot;
-
-    const terminalId = activeTerminalId.value;
-    if (terminalId !== undefined) {
-      await localStore.saveOrder(terminalId, snapshot);
+  /**
+   * Install a canonical snapshot on screen. **Memory only, deliberately.**
+   *
+   * Caching is not a side effect of displaying: the cache is keyed by the terminal that *asked*
+   * the server, and only the caller knows which terminal that was. `send` can answer for a
+   * terminal whose screen has already moved on, and `hydrate` installs a snapshot that came off
+   * the disk in the first place. Persisting here would key all three by whatever screen happens to
+   * be showing, and would put the write in the wrong order relative to deleting the pending row —
+   * which is exactly the crash window the review found.
+   */
+  function adopt(snapshot: OrderSnapshot): void {
+    if (acceptsSnapshot(order.value, snapshot)) {
+      order.value = snapshot;
     }
   }
 
   /**
-   * Restore this terminal's state after a reload.
+   * Restore this terminal's state after a reload, then read the canonical snapshot.
    *
    * **Hydration is a second writer for state that already has an owner**, and every one of those
    * rules has to hold across a reload as well as across a screen:
@@ -170,18 +186,25 @@ export const useOrderStore = defineStore('order', () => {
    *   slow reader; `adopt` cannot tell its callers apart;
    * - the pending slot is filled only if it is empty. A mutation sent since hydration began is the
    *   more recent intent and must not be overwritten by a record of an older one;
-   * - and nothing is written at all if the screen has moved to another terminal, which here is a
-   *   move to another restaurant.
+   * - and nothing is written at all if the screen has moved to another terminal — or has gone
+   *   away entirely, which the generation is what detects.
    *
    * **The restored `mutationId` is the one that was stored.** Minting a fresh one would turn the
    * operator's Retry into a second mutation at a stale `baseVersion`: a duplicate order, or a
    * conflict reported over an operation that in fact succeeded. Nothing downstream could catch
    * it — the identity is the only thing §9 has to work with.
+   *
+   * **It ends with a canonical read, and that is part of hydration rather than of the view.** The
+   * cache is never authoritative (ADR 013), and a caller that forgets to refresh it leaves a
+   * stale order on screen indefinitely. Making it one operation is what guarantees the refresh
+   * happens on every transport — the socket's `onConnected` refetch does not run at all when
+   * `realtime.websocket_push` is off or `GET /api/config` fails.
    */
   async function hydrate(terminalId: string): Promise<void> {
+    const mine = terminalGeneration;
     const restored = await localStore.readTerminalState(terminalId);
 
-    if (activeTerminalId.value !== terminalId) {
+    if (mine !== terminalGeneration || activeTerminalId.value !== terminalId) {
       return;
     }
 
@@ -199,9 +222,12 @@ export const useOrderStore = defineStore('order', () => {
     }
 
     if (restored.order !== undefined && order.value === undefined) {
-      await adopt(restored.order);
+      // No write back: this snapshot came off the disk, and the pointer that found it is already
+      // there. `adopt` stays the installer so the version rule still applies.
+      adopt(restored.order);
     }
 
+    await refetch();
     await localStore.pruneOrders();
   }
 
@@ -236,7 +262,30 @@ export const useOrderStore = defineStore('order', () => {
     // `adopt` cannot see that this snapshot answers a question nobody is asking any more.
     if (snapshot !== undefined && order.value?.id === id) {
       readError.value = undefined;
-      await adopt(snapshot);
+      adopt(snapshot);
+
+      // Cached against the terminal on screen, because this read was made on its behalf.
+      const terminalId = activeTerminalId.value;
+      if (terminalId !== undefined) {
+        await localStore.saveOrder(terminalId, snapshot);
+      }
+    }
+  }
+
+  /**
+   * The order a response carries, if it carries one. `MUTATION_ID_REUSED` and `REJECTED` carry
+   * only a reason — there is nothing to cache, and nothing that needs caching: the server has
+   * refused the mutation outright, so its fate is known without a snapshot.
+   */
+  function canonicalOrderIn(response: MutationResponse): OrderSnapshot | undefined {
+    switch (response.status) {
+      case 'APPLIED':
+      case 'ALREADY_APPLIED':
+        return response.order;
+      case 'CONFLICT':
+        return response.canonicalOrder;
+      default:
+        return undefined;
     }
   }
 
@@ -279,6 +328,20 @@ export const useOrderStore = defineStore('order', () => {
       // The server answered, so this mutation's fate is known however it turned out. Only a
       // request that never produced an answer stays pending.
       pendingByTerminal.value.delete(identity.terminalId);
+
+      // **The answer is cached before the identity that could recover it is dropped.** These two
+      // writes are not atomic, and the tab can die between them. Deleting first leaves the one
+      // state that loses money: for `CREATE_ORDER`, the row is gone, the snapshot never arrived,
+      // and `createOrder` already cleared the pointer before sending — so the reload shows an
+      // empty till and the operator rings the order up a second time. In the other order the worst
+      // case is a row that outlived its answer, which Retry resolves as `ALREADY_APPLIED`.
+      //
+      // Keyed by the terminal that *sent* it, not by whatever screen is showing: the cache belongs
+      // to the device that asked the question.
+      const canonical = canonicalOrderIn(response);
+      if (canonical !== undefined) {
+        await localStore.saveOrder(identity.terminalId, canonical);
+      }
       await localStore.deletePending(identity.mutationId);
 
       // The screen may have moved to another terminal while this was in flight; the answer is
@@ -292,7 +355,7 @@ export const useOrderStore = defineStore('order', () => {
         case 'ALREADY_APPLIED':
           conflict.value = undefined;
           lastError.value = undefined;
-          await adopt(response.order);
+          adopt(response.order);
           break;
         case 'CONFLICT':
           // The server's version of the truth replaces ours immediately; resolving the *queue* is
@@ -302,7 +365,7 @@ export const useOrderStore = defineStore('order', () => {
             clientBaseVersion: response.clientBaseVersion,
             serverVersion: response.serverVersion,
           };
-          await adopt(response.canonicalOrder);
+          adopt(response.canonicalOrder);
           break;
         default:
           lastError.value = response.reason;
@@ -545,6 +608,7 @@ export const useOrderStore = defineStore('order', () => {
     pending,
     blocked,
     useTerminal,
+    releaseTerminal,
     hydrate,
     version,
     syncing,

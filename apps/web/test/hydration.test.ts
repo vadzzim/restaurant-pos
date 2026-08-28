@@ -57,10 +57,17 @@ describe('a reload keeps the order and the identity of what was in flight', () =
   it('restores both, and the retry carries the mutationId that was sent', async () => {
     const before = useOrderStore();
     before.useTerminal('pos-1');
-    await before.adopt(snapshot('order-a', 3));
 
-    // The request left the terminal and produced no answer: this is the only state in the whole
-    // system where losing a client-side fact loses money.
+    // An answered mutation is what puts a canonical snapshot on disk — `adopt` only paints it.
+    postMutationMock.mockResolvedValueOnce({
+      status: 'APPLIED',
+      serverVersion: 3,
+      order: snapshot('order-a', 3),
+    });
+    await before.createOrder('pos-1', 'demo-restaurant', '12');
+
+    // The next request left the terminal and produced no answer: this is the only state in the
+    // whole system where losing a client-side fact loses money.
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await before.addItem('pos-1', 'demo-restaurant', 'burger');
     const sentId = before.pending?.mutationId;
@@ -80,7 +87,7 @@ describe('a reload keeps the order and the identity of what was in flight', () =
     postMutationMock.mockResolvedValueOnce(applied(4));
     await after.retryPending();
 
-    const [, request] = postMutationMock.mock.calls[1] ?? [];
+    const [, request] = postMutationMock.mock.calls.at(-1) ?? [];
     // The same id and the same base version, so §9 answers `ALREADY_APPLIED` instead of adding a
     // second burger. A fresh id here is the one bug in this milestone that loses money.
     expect(request?.mutationId).toBe(sentId);
@@ -92,7 +99,7 @@ describe('a reload keeps the order and the identity of what was in flight', () =
   it('leaves the row PENDING when no answer came and deletes it when one did', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');
@@ -107,10 +114,60 @@ describe('a reload keeps the order and the identity of what was in flight', () =
     expect(await db.pendingMutations.count()).toBe(0);
   });
 
+  it('caches the answer before dropping the identity that could recover it', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+
+    // The two writes are not atomic and the tab can die between them. Deleting first leaves the
+    // one state that loses money on a `CREATE_ORDER`: no row, no snapshot, and no pointer either,
+    // because `createOrder` clears it before sending — so the reload shows an empty till and the
+    // operator rings the order up again.
+    const seenAtDelete: (string | undefined)[] = [];
+    const realDelete = localStore.deletePending.bind(localStore);
+    vi.spyOn(localStore, 'deletePending').mockImplementation(async (mutationId: string) => {
+      const cached = await db.orders.get('order-a');
+      seenAtDelete.push(cached === undefined ? undefined : `v${cached.snapshot.version}`);
+      await realDelete(mutationId);
+    });
+
+    postMutationMock.mockResolvedValueOnce({
+      status: 'APPLIED',
+      serverVersion: 3,
+      order: snapshot('order-a', 3),
+    });
+    await orders.createOrder('pos-1', 'demo-restaurant', '12');
+
+    expect(seenAtDelete).toEqual(['v3']);
+  });
+
+  it('caches the answer for the terminal that sent it, not the one on screen', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    let release: (value: MutationResponse) => void = () => {};
+    postMutationMock.mockReturnValueOnce(
+      new Promise<MutationResponse>((resolve) => {
+        release = resolve;
+      }),
+    );
+    const sending = orders.addItem('pos-1', 'demo-restaurant', 'burger');
+
+    // The operator walks to another terminal — another restaurant — before the answer lands.
+    orders.useTerminal('pos-3');
+    release(applied(4));
+    await sending;
+
+    // The answer belongs to pos-1 and is cached for pos-1. Keying it by the screen would put
+    // another tenant's order behind pos-3's pointer.
+    expect((await localStore.readTerminalState('pos-1')).order?.version).toBe(4);
+    expect((await localStore.readTerminalState('pos-3')).order).toBeUndefined();
+  });
+
   it('writes no status M8 has not been built for yet', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');
@@ -123,7 +180,7 @@ describe('a reload keeps the order and the identity of what was in flight', () =
   it('forgets the mutation for good when the operator discards it', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');
@@ -151,7 +208,7 @@ describe('hydration is a checked writer, not a privileged one', () => {
 
     // The read is in flight; the operator creates a new order before it lands.
     const hydrating = orders.hydrate('pos-1');
-    await orders.adopt(snapshot('order-b', 1));
+    orders.adopt(snapshot('order-b', 1));
     await hydrating;
 
     // `adopt` accepts a different order unconditionally — that is how a CREATE_ORDER response
@@ -168,7 +225,7 @@ describe('hydration is a checked writer, not a privileged one', () => {
     orders.useTerminal('pos-1');
 
     const hydrating = orders.hydrate('pos-1');
-    await orders.adopt(snapshot('order-a', 7));
+    orders.adopt(snapshot('order-a', 7));
     await hydrating;
 
     expect(orders.version).toBe(7);
@@ -189,7 +246,7 @@ describe('hydration is a checked writer, not a privileged one', () => {
     reload();
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.sendToKitchen('pos-1', 'demo-restaurant');
@@ -231,6 +288,46 @@ describe('hydration is a checked writer, not a privileged one', () => {
 
     orders.useTerminal('pos-1');
     expect(orders.pending).toBeUndefined();
+  });
+
+  it('writes nothing once the screen has gone away entirely', async () => {
+    await localStore.saveOrder('pos-1', snapshot('order-a', 3));
+
+    reload();
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+
+    const hydrating = orders.hydrate('pos-1');
+
+    // `onBeforeUnmount`, then the route is re-entered on the *same* terminal before the read
+    // lands. The terminal id survives the teardown, so an owner check written against the id
+    // alone passes here — the departed screen's hydration writes into its successor. Only a
+    // generation distinguishes the two mounts.
+    void orders.clear();
+    orders.releaseTerminal();
+    orders.useTerminal('pos-1');
+
+    await hydrating;
+
+    expect(orders.order).toBeUndefined();
+  });
+
+  it('ends with a canonical read, whatever the transport does', async () => {
+    await localStore.saveOrder('pos-1', snapshot('order-a', 3));
+
+    reload();
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+
+    // With `realtime.websocket_push` off, or `GET /api/config` failing, `connection.start` never
+    // opens a socket and its `onConnected` refresh never runs. The cache would then sit on screen
+    // for as long as the tab stayed open.
+    fetchOrderMock.mockResolvedValueOnce(snapshot('order-a', 9));
+    await orders.hydrate('pos-1');
+
+    expect(fetchOrderMock).toHaveBeenCalledWith('order-a');
+    expect(orders.version).toBe(9);
+    expect((await localStore.readTerminalState('pos-1')).order?.version).toBe(9);
   });
 
   it('collects a cached order nothing refers to any more', async () => {
@@ -344,7 +441,7 @@ describe('a device that cannot store anything still takes orders', () => {
 
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockResolvedValueOnce(applied(4));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');

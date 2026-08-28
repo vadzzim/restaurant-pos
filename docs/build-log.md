@@ -738,3 +738,52 @@ unresolved commands onto B's rail and offers to retry them.
 
 Web tests went from 47 to 76. `pnpm verify:integration` was run unchanged and passed: no server code
 moved, and that is worth demonstrating rather than assuming.
+
+## M7 review — three findings, all of them about _when_ a write happens
+
+A Codex pass over `fe9d5d1` found three, and they share a subject that the milestone's own brief
+did not have a column for. The brief tabulated every piece of client state, its owner, and what
+hydration must not do to it — and every finding answered "the right writer, at the wrong moment".
+
+**P1 — the pending row was deleted before the answer that settles it was durable.** `send` did
+`deletePending` and only then `adopt`, which persisted the snapshot. The two writes are not atomic
+and the tab can die between them. For `CREATE_ORDER` that window is expensive: the row is gone, the
+snapshot never arrived, and `createOrder` had already cleared the terminal's pointer before
+sending — so the reload shows an empty till, and the operator rings the order up a second time.
+Both halves of the identity that could have recovered it, `orderId` and `mutationId`, were in the
+row that had just been deleted. Reversed: the answer is cached first, and the worst case becomes a
+row that outlived its answer, which Retry resolves as `ALREADY_APPLIED`. **Do not reorder these.**
+
+The fix pulled a second decision out with it. `adopt` had been persisting, which meant the cache
+was keyed by whatever screen was showing — but `send` can be answering for a terminal the operator
+has already walked away from, and that answer belongs to the terminal that _asked_. So `adopt` is
+memory-only again, and the two callers that obtain a snapshot from the server — `send` and
+`refetch` — cache it themselves, against the terminal they asked on behalf of. Displaying and
+caching turned out to be different responsibilities wearing one function's name.
+
+**P2 — hydration left the canonical read to the view, and the view only does it on one transport.**
+The plan was hydrate-then-refresh, with the refresh arriving via the socket's `onConnected`. But
+`connection.start` returns without opening a socket when `realtime.websocket_push` is off or
+`GET /api/config` fails, so on the flag's other branch — the one M13 exists to complete — the
+cached snapshot would sit on screen for as long as the tab stayed open. ADR 013's own sentence
+("every screen hydrates and then refetches") was true of one code path and asserted of all of them.
+`hydrate` now ends with the read, so it is one operation and cannot be half-called.
+
+**P2 — the owner check used the terminal id, and the id outlives the screen.** `onBeforeUnmount`
+calls `clear()`, which empties the order but leaves `activeTerminalId` naming the terminal the view
+was rendering. A hydration still reading from disk therefore passed its check against a screen that
+no longer existed — and worse, against the _next_ mount of the same terminal. The claim is now a
+generation bumped by `useTerminal` and `releaseTerminal`, which is the shape `connection.start` and
+`connection.stop` had used since M4. I had reached for the nearest available token instead of the
+one that models the lifetime; this is round 1 of the M6 review again — a correct signal attached to
+the wrong object — in a different file.
+
+All three regression tests were checked by breaking the fix and watching them fail, one at a time.
+The unmount test in particular only bites if it re-enters the same terminal before the read lands:
+with `releaseTerminal` merely nulling the id, an id check would still pass on the remount.
+
+**The lesson to carry into M8.** The brief asked "who may write this?" for every piece of state and
+that was not enough. The second question is **"for each pair of writes, which order survives a
+crash between them?"** — M7 has three such pairs (cache/delete, snapshot/pointer, memory/disk) and
+got one of them wrong. M8's sync engine is the third writer of this state and the first that runs
+without a screen asking it to, so it will have more pairs, not fewer.

@@ -36,7 +36,7 @@ describe('an unresolved mutation halts the terminal', () => {
   it('refuses a different command rather than overwriting the only id that can settle the first', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     // The request left the terminal and produced no answer: the outcome is unknown.
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
@@ -58,7 +58,7 @@ describe('an unresolved mutation halts the terminal', () => {
   it('retries with the identical identity and clears on the answer', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');
@@ -82,7 +82,7 @@ describe('an unresolved mutation halts the terminal', () => {
   it('keeps the pending mutation when the operator starts a new order', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');
@@ -100,7 +100,7 @@ describe('a refetch that outlives its question', () => {
   it('does not reinstall an order the screen has already left', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     let release: (value: OrderSnapshot | undefined) => void = () => undefined;
     fetchOrderMock.mockReturnValueOnce(
@@ -122,7 +122,7 @@ describe('a refetch that outlives its question', () => {
   it('does not replace a newer order with a slow read of the previous one', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     let release: (value: OrderSnapshot | undefined) => void = () => undefined;
     fetchOrderMock.mockReturnValueOnce(
@@ -133,7 +133,7 @@ describe('a refetch that outlives its question', () => {
 
     const inFlight = orders.refetch();
 
-    await orders.adopt(snapshot('order-b', 1));
+    orders.adopt(snapshot('order-b', 1));
     release(snapshot('order-a', 9));
     await inFlight;
 
@@ -147,7 +147,7 @@ describe('a failed canonical read', () => {
   it('is not reported on a screen that has moved on', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     let reject: (error: Error) => void = () => undefined;
     fetchOrderMock.mockReturnValueOnce(
@@ -158,7 +158,7 @@ describe('a failed canonical read', () => {
 
     const inFlight = orders.refetch();
 
-    await orders.adopt(snapshot('order-b', 1));
+    orders.adopt(snapshot('order-b', 1));
     reject(new Error('offline'));
     await inFlight;
 
@@ -169,7 +169,7 @@ describe('a failed canonical read', () => {
   it('is cleared by the next successful read of the same order', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     fetchOrderMock.mockRejectedValueOnce(new Error('offline'));
     await orders.refetch();
@@ -185,7 +185,7 @@ describe('a failed canonical read', () => {
   it('does not survive as a mutation error, nor swallow one', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     fetchOrderMock.mockRejectedValueOnce(new Error('offline'));
     await orders.refetch();
@@ -200,7 +200,7 @@ describe('a pending mutation belongs to the terminal that sent it', () => {
   it('is neither shown nor retried from another terminal', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');
@@ -230,7 +230,7 @@ describe('a pending mutation belongs to the terminal that sent it', () => {
   it('never paints another terminal answer onto the screen that replaced it', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
-    await orders.adopt(snapshot('order-a', 3));
+    orders.adopt(snapshot('order-a', 3));
 
     let release: (value: MutationResponse) => void = () => undefined;
     postMutationMock.mockReturnValueOnce(

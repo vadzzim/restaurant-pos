@@ -48,9 +48,8 @@ async function start(): Promise<void> {
   // terminal's screen this is: only that terminal's unresolved mutation may be shown or retried.
   orders.useTerminal(terminalId.value);
 
-  // Before anything reads the network. Hydration is the only writer that must not lose a race
-  // against a refetch, and the cheapest way to keep it honest is to let it run first — its own
-  // guards then cover the case where it does not (a slow IndexedDB, a terminal switched mid-read).
+  // Restores the cached order and any unresolved mutation, and ends with a canonical read — the
+  // cache is never authoritative, and the socket's own refresh does not run on every transport.
   await orders.hydrate(terminalId.value);
 
   await menu.load();
@@ -141,12 +140,19 @@ onMounted(start);
 onBeforeUnmount(() => {
   connection.stop();
   void orders.clear();
+  // `clear()` empties the screen; this gives up the claim on it. Without it a hydration still
+  // reading from disk would find `activeTerminalId` unchanged, pass its owner check and restore
+  // the order onto a screen that no longer exists.
+  orders.releaseTerminal();
 });
 
 // Switching terminals in the URL is switching restaurants: rebuild the whole connection.
 watch(terminalId, async () => {
   connection.stop();
   void orders.clear();
+  // `start()` claims the new terminal, but it returns early for an unknown one — so the claim on
+  // the old terminal is dropped here rather than left to be overwritten.
+  orders.releaseTerminal();
   await start();
 });
 </script>

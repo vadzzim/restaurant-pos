@@ -43,13 +43,33 @@ sync engines and two places for §14.1's halt to live.
 route and the Pinia store do not. In M7 it holds one pointer: which order this device is working
 on.
 
+**Displaying and caching are separate, and the cache is keyed by the terminal that asked.** `adopt`
+installs a snapshot on screen and writes nothing; the two callers that obtained a snapshot from the
+server — `send` and `refetch` — are the ones that cache it. Only they know which terminal the
+question was asked on behalf of, which is not always the terminal on screen: an answer can arrive
+after the operator has walked to another till, and it still belongs to the one that sent it.
+
+**A pending row is deleted only after the answer that settles it is durable.** The two writes are
+not atomic. Deleting first leaves a crash window in which a `CREATE_ORDER` has lost its snapshot,
+its `orderId` and its `mutationId` at once — and because creation clears the pointer before sending,
+the reload shows an empty till and the operator rings the order up a second time. In the other
+order the worst case is a row that outlived its answer, which Retry resolves as `ALREADY_APPLIED`.
+
 **Hydration goes through the existing owners and re-checks its claim after every await.** It calls
 `adopt` rather than assigning, so the monotonic-version rule still holds; it additionally refuses to
 install anything if the store already holds an order, because `adopt` accepts a _different_ order
 unconditionally and cannot tell a hydration from a `CREATE_ORDER` response; it fills a pending slot
-only if that slot is empty; and it writes nothing at all if the terminal — or, in the kitchen, the
-restaurant — changed while it was reading. The kitchen's read is filtered by `restaurantId` as well
-as by terminal, because every kitchen display shares one terminal id across every restaurant.
+only if that slot is empty; and it writes nothing at all if the screen it was hydrating for is gone.
+That last claim is a **generation**, not the terminal id: the id outlives the screen, so a view that
+unmounts and is re-entered on the same terminal would let the departed screen's read write into its
+successor. The kitchen's read is filtered by `restaurantId` as well as by terminal, because every
+kitchen display shares one terminal id across every restaurant.
+
+**Hydration ends with a canonical read, and that read is part of hydration rather than of the
+view.** The cache is never authoritative, so leaving the refresh to the caller means it happens only
+on the paths that remember it — and the socket's `onConnected` refetch does not run at all when
+`realtime.websocket_push` is off or `GET /api/config` fails, which would leave a stale order on
+screen for as long as the tab stayed open.
 
 **A storage failure is reported, never thrown.** Each repository call resolves with a neutral value
 and records the failure in one exported ref, shown as a `NOT DURABLE` badge. The ref is not cleared
@@ -74,7 +94,11 @@ by a later success.
   per terminal, so this changes nothing; if the demo ever wants two tabs on one terminal, this is
   where it breaks.
 - Persistence adds two awaits to the path of every command. On IndexedDB that is sub-millisecond
-  and it buys the ordering §14 requires — durable before attempted.
+  and it buys the ordering §14 requires — durable before attempted, and settled before forgotten.
+- **The crash windows are ordered, not closed.** Two IndexedDB writes cannot be made atomic across
+  a tab that dies between them, so the design chooses which side of each window to fail on: a row
+  that outlived its answer over an answer that outlived its row, and a stale cache over no cache.
+  Both survivable states are ones Retry or a refetch resolves.
 - **A failed write is not retried.** The badge says the device is no longer durable; it does not
   repair it. Repair would mean a write-ahead queue for the queue, which is not worth building for
   a failure mode whose honest answer is "use a different device".

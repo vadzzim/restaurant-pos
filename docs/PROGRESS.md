@@ -13,8 +13,8 @@ reloading the tab mid-order.**
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
-M6 `860b064` plus five review rounds through `fa1255a`, M7 `HEAD`. The tree passes typecheck, lint,
-build and **212 tests** (61 domain, 52 api, 22 worker, **76 web**) against a real PostgreSQL, plus
+M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its review at `HEAD`. The tree passes typecheck, lint,
+build and **216 tests** (61 domain, 52 api, 22 worker, **80 web**) against a real PostgreSQL, plus
 **one integration test** against a real Redpanda that runs only under `pnpm verify:integration`.
 Ten of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3,
 **21.4**, 21.5, 21.6, **21.9**, **21.10**, 21.11, 21.15.
@@ -162,9 +162,23 @@ Ten of the sixteen mandatory §21 tests exist and are named by their spec number
 - **Client state that outlives a screen has an explicit owner.** `adopt` refuses a snapshot older
   than the one held for that order; `refetch` re-checks that the order it asked about is still
   current; `connection.start`/`stop` claim a generation. This class of bug is what three of the
-  four M4 review rounds found. **M7 added a writer to every one of them and kept the rules**:
-  hydration goes through `adopt`, re-checks its terminal after the await, and fills a pending slot
-  only when it is empty. M8 adds the next writer — the sync engine — to the same state.
+  four M4 review rounds found. **M7 added a writer to every one of them**: hydration goes through
+  `adopt`, fills a pending slot only when it is empty, and claims a **generation** — `useTerminal`
+  and `releaseTerminal` — because the terminal id outlives the screen and an id check would let a
+  departed view write into its successor. M8 adds the next writer, the sync engine, to the same
+  state.
+- **`adopt` displays; `send` and `refetch` cache.** Caching is keyed by the terminal that *asked*
+  the server, which is not always the terminal on screen — an answer can land after the operator
+  has walked to another till. Putting the write inside `adopt` keyed all three callers by whatever
+  was showing, and the M7 review found it.
+- **A pending row is deleted only after the answer that settles it is cached.** The two IndexedDB
+  writes are not atomic. Deleting first leaves the one state that loses money: a `CREATE_ORDER`
+  with no row, no snapshot and no pointer, so the reload shows an empty till and the operator rings
+  the order up twice. **Do not reorder these two writes.**
+- **`hydrate` ends with a canonical read, and that belongs to the store, not the view.** The
+  socket's `onConnected` refetch does not run when `realtime.websocket_push` is off or
+  `GET /api/config` fails, so a view-level refresh would leave the cache on screen indefinitely on
+  the transport M13 exists to complete.
 - **The three §14 tables are written but not yet read by a sync engine (M7).** `orders` is a cache
   and is pruned; `pendingMutations` is the durable fact, keyed by `mutationId`, **never
   regenerated**; `syncMetadata` is per terminal and holds the pointer to the order that device is
@@ -255,11 +269,15 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **Five rounds, findings 4 → 3 → 2 → 1 → 0.** The cycle converged to a clean report. The honest
   line for the interview is not "the code was right" but "the invariant was stated precisely and
   attached to a mechanism imprecisely four times, and an external reviewer caught each one".
-- **M7 had no review round and was written against the M4 lesson directly.** The whole milestone is
-  one new writer over state that already had owners, so the brief listed those owners in a table
-  before any code, and each rule got a test that races the two writers rather than calling them in
-  a convenient order. Whether that is enough is exactly what M8 will find out: the sync engine is
-  the *third* writer of the same state, and it is the one that runs on a timer.
+- **M7's review found three, and all three were about *when* a write happens rather than whether
+  it does.** The pending row was deleted before the answer that settles it was cached; hydration
+  left the refresh to a view that only performs it on one of two transports; and the owner check
+  used the terminal id, which outlives the screen. The brief had listed the owners in a table
+  before any code and still missed all three — because the table asked "who may write this?" and
+  every finding answered "the right writer, at the wrong moment". **Add the second question to the
+  next milestone's brief: for each pair of writes, which order survives a crash between them?**
+  That is the M8 question exactly: the sync engine is the *third* writer of this state, and it is
+  the first that runs without a screen asking it to.
 
 ## Known problems / open questions
 
