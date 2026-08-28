@@ -58,24 +58,36 @@ const envelopeSchema = z.object({
 
 /**
  * A message this consumer cannot understand must not become a crash loop. Anything from another
- * producer, a half-written value or a future envelope this build predates is logged and skipped;
- * `processed_events` is deliberately *not* written, so a later build can reprocess it. Genuine
- * failures — the database being unreachable — still throw, because those must be retried.
+ * producer, a half-written value or an envelope this build predates is logged and skipped.
+ *
+ * **The skip is terminal, and that is a real cost.** Returning from `eachMessage` counts as
+ * success, so KafkaJS commits the offset and this consumer group will never be offered the message
+ * again — a later build cannot pick it up. The alternative, throwing, would stall the partition
+ * forever behind one bad message and freeze every screen in the restaurant. Between silently
+ * losing one broadcast and losing all of them, this loses the one, loudly: the skip is logged at
+ * `error` with the raw payload so it is recoverable by hand from the topic, which is still within
+ * its retention. A consumer-side dead-letter topic is the real answer and is out of scope for M4 —
+ * `outbox_events` already dead-letters on the *publish* side, and the read side would need its own.
+ *
+ * Genuine failures — the database being unreachable — still throw, because those must be retried.
  */
 export function parseDomainEvent(raw: string, logger: FastifyBaseLogger): DomainEvent | undefined {
   let json: unknown;
   try {
     json = JSON.parse(raw);
   } catch (error) {
-    logger.warn({ err: error }, 'realtime consumer skipped a message that is not JSON');
+    logger.error(
+      { err: error, raw: raw.slice(0, 500) },
+      'realtime consumer permanently skipped a message that is not JSON; its offset is committed',
+    );
     return undefined;
   }
 
   const parsed = envelopeSchema.safeParse(json);
   if (!parsed.success) {
-    logger.warn(
-      { issues: parsed.error.issues },
-      'realtime consumer skipped a message that is not a DomainEvent',
+    logger.error(
+      { issues: parsed.error.issues, raw: raw.slice(0, 500) },
+      'realtime consumer permanently skipped a message that is not a DomainEvent; its offset is committed',
     );
     return undefined;
   }
@@ -115,38 +127,46 @@ async function connectConsumer(
     }
   });
 
-  await consumer.connect();
-  await consumer.subscribe({ topic: config.KAFKA_ORDER_EVENTS_TOPIC, fromBeginning: false });
+  // `subscribe` and `run` can fail after `connect` has already opened sockets. The caller only
+  // ever sees the returned handle, so a consumer that dies in between has to clean up after
+  // itself here — otherwise every supervisor retry would leak another live connection.
+  try {
+    await consumer.connect();
+    await consumer.subscribe({ topic: config.KAFKA_ORDER_EVENTS_TOPIC, fromBeginning: false });
 
-  await consumer.run({
-    eachMessage: async ({ message }) => {
-      const raw = message.value?.toString();
-      if (raw === undefined) {
-        return;
-      }
+    await consumer.run({
+      eachMessage: async ({ message }) => {
+        const raw = message.value?.toString();
+        if (raw === undefined) {
+          return;
+        }
 
-      const event = parseDomainEvent(raw, logger);
-      if (event === undefined) {
-        return;
-      }
+        const event = parseDomainEvent(raw, logger);
+        if (event === undefined) {
+          return;
+        }
 
-      const result = await handleRealtimeEvent(db, emitter, event);
+        const result = await handleRealtimeEvent(db, emitter, event);
 
-      logger.info(
-        {
-          consumer: REALTIME_CONSUMER,
-          eventId: event.eventId,
-          eventType: event.eventType,
-          orderId: event.aggregateId,
-          restaurantId: event.restaurantId,
-          version: event.version,
-          traceId: event.traceId,
-          result,
-        },
-        'realtime event handled',
-      );
-    },
-  });
+        logger.info(
+          {
+            consumer: REALTIME_CONSUMER,
+            eventId: event.eventId,
+            eventType: event.eventType,
+            orderId: event.aggregateId,
+            restaurantId: event.restaurantId,
+            version: event.version,
+            traceId: event.traceId,
+            result,
+          },
+          'realtime event handled',
+        );
+      },
+    });
+  } catch (error) {
+    await consumer.disconnect().catch(() => undefined);
+    throw error;
+  }
 
   return consumer;
 }

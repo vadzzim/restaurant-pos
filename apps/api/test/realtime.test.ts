@@ -96,22 +96,30 @@ describe('§12.2 the realtime consumer', () => {
 });
 
 describe('poison messages', () => {
-  const silent = { warn: () => undefined } as unknown as Parameters<typeof parseDomainEvent>[1];
+  const logged: string[] = [];
+  // A skip is terminal — KafkaJS commits the offset — so it must be reported at `error`, not
+  // buried at `warn` where nobody would go looking for a lost broadcast.
+  const capture = {
+    error: (_fields: unknown, message: string) => logged.push(message),
+  } as unknown as Parameters<typeof parseDomainEvent>[1];
 
   it('accepts a well-formed envelope', () => {
     const good = event();
-    expect(parseDomainEvent(JSON.stringify(good), silent)?.eventId).toBe(good.eventId);
+    expect(parseDomainEvent(JSON.stringify(good), capture)?.eventId).toBe(good.eventId);
+    expect(logged).toHaveLength(0);
   });
 
   it('skips a message that is not JSON instead of crashing the consumer', () => {
-    expect(parseDomainEvent('{ not json', silent)).toBeUndefined();
+    expect(parseDomainEvent('{ not json', capture)).toBeUndefined();
+    expect(logged.at(-1)).toMatch(/permanently skipped/);
   });
 
   it('skips a message that is JSON but not a DomainEvent', () => {
-    expect(parseDomainEvent(JSON.stringify({ hello: 'world' }), silent)).toBeUndefined();
+    expect(parseDomainEvent(JSON.stringify({ hello: 'world' }), capture)).toBeUndefined();
     // A plausible-looking envelope with a non-uuid aggregate is still not one of ours.
     expect(
-      parseDomainEvent(JSON.stringify({ ...event(), aggregateId: 'order-1' }), silent),
+      parseDomainEvent(JSON.stringify({ ...event(), aggregateId: 'order-1' }), capture),
     ).toBeUndefined();
+    expect(logged.at(-1)).toMatch(/permanently skipped/);
   });
 });

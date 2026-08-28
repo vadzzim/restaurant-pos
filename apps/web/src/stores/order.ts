@@ -21,11 +21,15 @@ export interface ConflictBanner {
 /**
  * Everything that makes a mutation *the same* mutation on a retry. `orderId` belongs here as much
  * as `mutationId` does: for `CREATE_ORDER` it is the aggregate's identity, and generating a fresh
- * one is what turns a retry into a second order.
+ * one is what turns a retry into a second order. `terminalId` and `restaurantId` are here so a
+ * retry is self-contained — it must be re-sent as the terminal that sent it, whatever the screen
+ * is showing by then.
  */
 export interface MutationIdentity {
   orderId: string;
   mutationId: string;
+  terminalId: string;
+  restaurantId: string;
   type: SupportedMutationType;
   baseVersion: number;
   payload: MutationRequest['payload'];
@@ -36,6 +40,11 @@ export interface MutationIdentity {
  * so two `GET /api/orders/:id` calls can be in flight at once and the older response can land
  * last; adopting it unconditionally would roll the screen back to a state the server has already
  * left. The version is monotonic per order, which makes this check exact rather than heuristic.
+ *
+ * A snapshot for a *different* order is accepted, because that is how a mutation response installs
+ * a newly created order. That is right for a response and wrong for a refetch, so `refetch` checks
+ * separately that the order it asked about is still the one on screen — `adopt` alone cannot tell
+ * the two callers apart.
  */
 export function acceptsSnapshot(held: OrderSnapshot | undefined, incoming: OrderSnapshot): boolean {
   if (held === undefined || held.id !== incoming.id) {
@@ -82,6 +91,14 @@ export const useOrderStore = defineStore('order', () => {
 
   const version = computed(() => order.value?.version ?? 0);
   const syncing = computed(() => inFlight.value > 0);
+  /**
+   * One slot means one unresolved mutation at a time. While it is occupied the terminal takes no
+   * new commands: sending one would overwrite the only `mutationId` that can still resolve the
+   * first, and its outcome would become permanently unknowable. This is the same shape as §14.1's
+   * halt-on-conflict — the queue for this aggregate stops until a human decides — and M8 gives it
+   * the durable, per-aggregate form.
+   */
+  const blocked = computed(() => pending.value !== undefined);
 
   function adopt(snapshot: OrderSnapshot): void {
     if (acceptsSnapshot(order.value, snapshot)) {
@@ -100,20 +117,27 @@ export const useOrderStore = defineStore('order', () => {
     }
 
     const snapshot = await fetchOrder(id);
-    if (snapshot !== undefined) {
+
+    // The screen may have moved to another order — or to none — while this was in flight. Without
+    // this check a slow read of the previous order would reinstall it over its successor, because
+    // `adopt` cannot see that this snapshot answers a question nobody is asking any more.
+    if (snapshot !== undefined && order.value?.id === id) {
       adopt(snapshot);
     }
   }
 
-  async function send(
-    identity: MutationIdentity,
-    terminalId: string,
-    restaurantId: string,
-  ): Promise<MutationResponse | undefined> {
+  async function send(identity: MutationIdentity): Promise<MutationResponse | undefined> {
+    const held = pending.value;
+    if (held !== undefined && held.mutationId !== identity.mutationId) {
+      lastError.value =
+        'A mutation from this terminal has no answer yet. Retry or discard it before sending another.';
+      return undefined;
+    }
+
     const request: MutationRequest = {
       mutationId: identity.mutationId,
-      terminalId,
-      restaurantId,
+      terminalId: identity.terminalId,
+      restaurantId: identity.restaurantId,
       baseVersion: identity.baseVersion,
       type: identity.type,
       payload: identity.payload,
@@ -159,6 +183,34 @@ export const useOrderStore = defineStore('order', () => {
     }
   }
 
+  /**
+   * Retrying with the same `mutationId` turns a lost response into `ALREADY_APPLIED` (§9). With a
+   * fresh one the retry is a new mutation at a stale `baseVersion`, so it comes back as a conflict
+   * over an operation that in fact succeeded — technically safe, and a lie to the operator.
+   */
+  function identityFor(
+    type: SupportedMutationType,
+    orderId: string,
+    terminalId: string,
+    restaurantId: string,
+    baseVersion: number,
+    payload: MutationRequest['payload'],
+  ): MutationIdentity {
+    if (sameMutation(pending.value, type, orderId, baseVersion, payload)) {
+      return pending.value as MutationIdentity;
+    }
+
+    return {
+      orderId,
+      mutationId: crypto.randomUUID(),
+      terminalId,
+      restaurantId,
+      type,
+      baseVersion,
+      payload,
+    };
+  }
+
   async function createOrder(
     terminalId: string,
     restaurantId: string,
@@ -175,6 +227,8 @@ export const useOrderStore = defineStore('order', () => {
       : {
           orderId: crypto.randomUUID(),
           mutationId: crypto.randomUUID(),
+          terminalId,
+          restaurantId,
           type: 'CREATE_ORDER',
           baseVersion: 0,
           payload,
@@ -185,7 +239,7 @@ export const useOrderStore = defineStore('order', () => {
       conflict.value = undefined;
     }
 
-    await send(identity, terminalId, restaurantId);
+    await send(identity);
   }
 
   async function addItem(
@@ -201,9 +255,7 @@ export const useOrderStore = defineStore('order', () => {
 
     const payload: AddItemPayload = { productId, quantity };
     await send(
-      identityFor('ADD_ITEM', current.id, current.version, payload),
-      terminalId,
-      restaurantId,
+      identityFor('ADD_ITEM', current.id, terminalId, restaurantId, current.version, payload),
     );
   }
 
@@ -214,43 +266,36 @@ export const useOrderStore = defineStore('order', () => {
     }
 
     await send(
-      identityFor('SEND_TO_KITCHEN', current.id, current.version, {}),
-      terminalId,
-      restaurantId,
+      identityFor('SEND_TO_KITCHEN', current.id, terminalId, restaurantId, current.version, {}),
     );
   }
 
-  /**
-   * Retrying with the same `mutationId` turns a lost response into `ALREADY_APPLIED` (§9). With a
-   * fresh one the retry is a new mutation at a stale `baseVersion`, so it comes back as a conflict
-   * over an operation that in fact succeeded — technically safe, and a lie to the operator.
-   */
-  function identityFor(
-    type: SupportedMutationType,
-    orderId: string,
-    baseVersion: number,
-    payload: MutationRequest['payload'],
-  ): MutationIdentity {
-    if (sameMutation(pending.value, type, orderId, baseVersion, payload)) {
-      return pending.value as MutationIdentity;
-    }
-
-    return { orderId, mutationId: crypto.randomUUID(), type, baseVersion, payload };
-  }
-
   /** Re-send the mutation whose answer never arrived, unchanged. */
-  async function retryPending(terminalId: string, restaurantId: string): Promise<void> {
+  async function retryPending(): Promise<void> {
     const identity = pending.value;
     if (identity !== undefined) {
-      await send(identity, terminalId, restaurantId);
+      await send(identity);
     }
   }
 
+  /**
+   * Give up on an unresolved mutation. It may still have been applied on the server — the operator
+   * is asserting they will live with either outcome, which is why this is a deliberate action and
+   * never something a screen does on their behalf.
+   */
+  function discardPending(): void {
+    pending.value = undefined;
+    lastError.value = undefined;
+  }
+
+  /**
+   * Start over on this screen. `pending` deliberately survives: pressing "New order" is not an
+   * answer to "did that mutation apply?", and dropping the identity here would make it unknowable.
+   */
   function clear(): void {
     order.value = undefined;
     conflict.value = undefined;
     lastError.value = undefined;
-    pending.value = undefined;
   }
 
   return {
@@ -258,6 +303,7 @@ export const useOrderStore = defineStore('order', () => {
     conflict,
     lastError,
     pending,
+    blocked,
     version,
     syncing,
     adopt,
@@ -266,6 +312,7 @@ export const useOrderStore = defineStore('order', () => {
     addItem,
     sendToKitchen,
     retryPending,
+    discardPending,
     clear,
   };
 });

@@ -57,16 +57,17 @@ export const useConnectionStore = defineStore('connection', () => {
   /**
    * Fetched once at bootstrap. M13 re-polls this every 15 s so an open client picks up a rollout
    * change; a WebSocket control event would be circular when the flag turns WebSocket off (§15).
+   *
+   * Deliberately free of side effects: it resolves a value and writes nothing. The caller writes
+   * `transport` only after checking that its generation is still current, so the late answer of a
+   * cancelled `start` cannot relabel the transport of the restaurant that replaced it.
    */
-  async function resolveTransport(restaurantId: string): Promise<boolean> {
+  async function resolveTransport(restaurantId: string): Promise<Transport> {
     try {
       const config = await fetchConfig(restaurantId);
-      const enabled = config.flags['realtime.websocket_push'];
-      transport.value = enabled ? 'PUSH' : 'PUSH DISABLED';
-      return enabled;
+      return config.flags['realtime.websocket_push'] ? 'PUSH' : 'PUSH DISABLED';
     } catch {
-      transport.value = 'UNKNOWN';
-      return false;
+      return 'UNKNOWN';
     }
   }
 
@@ -81,8 +82,13 @@ export const useConnectionStore = defineStore('connection', () => {
     const mine = generation;
     teardown();
 
-    const enabled = await resolveTransport(options.restaurantId);
-    if (!enabled || mine !== generation) {
+    const resolved = await resolveTransport(options.restaurantId);
+    if (mine !== generation) {
+      return;
+    }
+
+    transport.value = resolved;
+    if (resolved !== 'PUSH') {
       return;
     }
 

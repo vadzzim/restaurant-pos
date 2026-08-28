@@ -11,8 +11,8 @@ kitchen screen in Vue. **The project is demoable from here on.**
 **Next:** M5 — the remaining six mutation types and the full §8 conflict matrix. Model: Sonnet.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` + the
-review fixes. The tree passes typecheck, lint, build and 62 tests (9 domain, 27 api, 11 worker,
-15 web) against a real PostgreSQL. The seven mandatory M3 tests §21.1, 21.2, 21.3, 21.5, 21.6,
+review fixes. The tree passes typecheck, lint, build and 74 tests (9 domain, 27 api, 11 worker,
+27 web) against a real PostgreSQL. The seven mandatory M3 tests §21.1, 21.2, 21.3, 21.5, 21.6,
 21.11 and 21.15 are still present and named by their spec number.
 
 ## What exists
@@ -76,9 +76,16 @@ review fixes. The tree passes typecheck, lint, build and 62 tests (9 domain, 27 
 - **The kitchen socket joins only `kitchen:{restaurantId}`,** and `roomsFor` decides which event
   types reach it through `KITCHEN_EVENT_TYPES`. M5 adds `OrderPreparing`, `OrderReady` and
   `OrderCancelled` there at the same time as it teaches the kitchen consumer to advance `state`.
-- **A mutation whose answer never came back keeps its identity** (`orderId` + `mutationId`) and is
-  retried unchanged, so §9 resolves it as `ALREADY_APPLIED`. M8 replaces that one slot with the
-  durable queue — the reasoning carries over, the storage does not.
+- **A mutation whose answer never came back keeps its identity** (`orderId`, `mutationId`,
+  `terminalId`, `restaurantId`) and is retried unchanged, so §9 resolves it as `ALREADY_APPLIED`.
+  **One slot means the terminal halts:** while it is occupied every command is refused, because
+  sending another would overwrite the only id that can still settle the first. Resolution is
+  explicit — Retry, or Discard and accept an unknown outcome. Same shape as §14.1, which is why M8
+  generalises it per aggregate rather than replacing it.
+- **A list that is replaced wholesale is never loaded concurrently.** `createCoalescingLoader` runs
+  one read at a time and folds in whatever arrived meanwhile. The rule it encodes: an expectation
+  may only be judged by a read *issued after* it was raised — an in-flight read predates the event
+  and proves nothing about it, even when it happens to contain the effect.
 - **The publisher claims only an order's earliest unpublished event**, so that order's events reach
   Redpanda in version order regardless of retries or how many workers run. A pass that published
   something immediately runs again instead of waiting out the poll interval.
@@ -182,6 +189,22 @@ review fixes. The tree passes typecheck, lint, build and 62 tests (9 domain, 27 
 
 Full reasoning in `build-log.md`. Ten regression tests were added.
 
+## M4 review round 2 — accepted
+
+- **Kitchen loads are coalesced,** not run in parallel; overlapping reads could take a visible
+  ticket back off the screen.
+- **An unresolved mutation halts the terminal** instead of being overwritten by the next command or
+  dropped by "New order".
+- **`refetch` checks that the order it asked about is still on screen.** `adopt` cannot tell a
+  stale read from a newly created order.
+- **`connectConsumer` cleans up after itself** if `subscribe` or `run` throws after `connect`.
+- **`resolveTransport` has no side effects;** `start` writes `transport` only after its generation
+  check.
+- **The poison-message skip is terminal and now says so.** The offset is committed; no later build
+  will see that message. Logged at `error`, not `warn`.
+
+Full reasoning in `build-log.md`. Twelve regression tests were added.
+
 ## Known problems / open questions
 
 - Scope grew across both reviews and nothing was cut, by explicit choice. Watch the usage budget;
@@ -212,9 +235,14 @@ Full reasoning in `build-log.md`. Ten regression tests were added.
   kitchen screen shows `PROJECTION LAG` and the ticket appears only when a later event lands or the
   page is reloaded. M13's polling transport removes the reload as the last resort; M11's `/debug`
   is where consumer lag becomes visible as a number.
-- **One pending mutation slot, not a queue.** Only the most recent unanswered mutation keeps its
-  identity, and it lives in memory. M7 and M8 make it durable and ordered; until then, closing the
-  tab loses it.
+- **One pending mutation slot, not a queue.** It lives in memory and it halts the terminal while
+  occupied, which is correct but coarse: a POS that loses one response takes no orders until a
+  human presses Retry or Discard. M7 and M8 make it durable and per-aggregate, which is what makes
+  the halt tolerable in a real rush.
+- **A poison message on the realtime topic is lost to that consumer group permanently.** The offset
+  is committed and no later build will be offered it; recovery is by hand from the topic, while
+  retention lasts. A consumer-side dead-letter topic is the real answer and is not built. The
+  publish side already dead-letters through `outbox_events`.
 - **The concurrent-read test asserts an invariant, it does not force the interleaving.** It cannot
   fail falsely, but it is not a proof that the old code was broken — the reasoning in
   `build-log.md` is. A deterministic version would need statement-level hooks.

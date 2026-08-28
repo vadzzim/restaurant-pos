@@ -1,6 +1,7 @@
 import type { OrderSnapshot } from '@pos/contracts';
 import { describe, expect, it } from 'vitest';
 
+import { ticketsSatisfy } from '../src/stores/kitchen';
 import { acceptsSnapshot, sameMutation, type MutationIdentity } from '../src/stores/order';
 
 function snapshot(id: string, version: number): OrderSnapshot {
@@ -40,6 +41,8 @@ describe('sameMutation (retrying with the same identity)', () => {
   const pending: MutationIdentity = {
     orderId: 'order-1',
     mutationId: 'mutation-1',
+    terminalId: 'pos-1',
+    restaurantId: 'demo-restaurant',
     type: 'ADD_ITEM',
     baseVersion: 3,
     payload: { productId: 'burger', quantity: 1 },
@@ -70,6 +73,8 @@ describe('sameMutation (retrying with the same identity)', () => {
     const create: MutationIdentity = {
       orderId: 'order-9',
       mutationId: 'mutation-9',
+      terminalId: 'pos-1',
+      restaurantId: 'demo-restaurant',
       type: 'CREATE_ORDER',
       baseVersion: 0,
       payload: { tableNumber: '12' },
@@ -84,5 +89,38 @@ describe('sameMutation (retrying with the same identity)', () => {
     expect(sameMutation(undefined, 'CREATE_ORDER', undefined, 0, { tableNumber: '12' })).toBe(
       false,
     );
+  });
+});
+
+describe('ticketsSatisfy (has the projection caught up?)', () => {
+  const ticket = (orderId: string, sourceEventVersion: number) => ({
+    orderId,
+    restaurantId: 'demo-restaurant',
+    tableNumber: '12',
+    items: [],
+    state: 'SENT_TO_KITCHEN',
+    sourceEventVersion,
+    createdAt: '2026-08-28T00:00:00.000Z',
+    updatedAt: '2026-08-28T00:00:00.000Z',
+  });
+
+  it('is trivially satisfied when nothing was expected', () => {
+    expect(ticketsSatisfy([], [])).toBe(true);
+  });
+
+  it('needs every expectation of the round, not just one', () => {
+    const rows = [ticket('a', 3)];
+    expect(ticketsSatisfy(rows, [{ orderId: 'a', version: 3 }])).toBe(true);
+    expect(
+      ticketsSatisfy(rows, [
+        { orderId: 'a', version: 3 },
+        { orderId: 'b', version: 2 },
+      ]),
+    ).toBe(false);
+  });
+
+  it('refuses a ticket the projection has not advanced far enough', () => {
+    expect(ticketsSatisfy([ticket('a', 2)], [{ orderId: 'a', version: 3 }])).toBe(false);
+    expect(ticketsSatisfy([ticket('a', 4)], [{ orderId: 'a', version: 3 }])).toBe(true);
   });
 });

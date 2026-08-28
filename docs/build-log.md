@@ -193,3 +193,60 @@ projection wait and its backoff, the monotonic snapshot rule, mutation-identity 
 snapshot invariant asserted while writes run concurrently. That last one checks that the total
 always agrees with the items returned alongside it; it does not force the interleaving, so it can
 only ever fail truthfully.
+
+## M4 review round 2 — three more races, and one comment that was simply false
+
+**Concurrent kitchen loads could take a visible ticket back off the screen.** The list is replaced
+wholesale, so two overlapping `load` calls both wrote it — and the answer to the _first_ event,
+delayed by its own wait for a lagging projection, could land after the answer to the second. With
+repeats dropped by `eventId`, nothing would arrive to correct it. Reads are now coalesced through
+`createCoalescingLoader`: one read in flight, expectations queued, `apply` called from one place.
+
+Serialising alone would not have been enough, and getting that right needed a sharper rule than
+the one the first fix implied: **an expectation may only be judged by a read issued after it was
+raised.** A read already in flight was sent before the event existed, so it proves nothing about
+it even when it happens to contain the effect. Hence a round that finds work queued runs again
+instead of trusting its own response. The first version of the test asserted the opposite — that a
+single read containing both was enough — and hung; the test was wrong, not the code, and the
+corrected version now states the rule explicitly.
+
+**Any new command destroyed the one identity that could resolve the previous one.** `pending`
+survived a transport failure, but nothing stopped the next `ADD_ITEM` from overwriting it, and
+`clear()` — "New order" — dropped it silently. Either way the first mutation's outcome became
+permanently unknowable: no retry could ever produce `ALREADY_APPLIED` for a `mutationId` nobody
+holds any more. With one slot, one unresolved mutation halts the terminal: `send` refuses a
+differing identity, every command is disabled, `clear()` keeps the slot, and the banner offers
+Retry or an explicit Discard that says the outcome will stay unknown. It is §14.1's shape — the
+queue for this aggregate stops until a human decides — which is why M8 generalises it rather than
+replacing it. `MutationIdentity` grew `terminalId` and `restaurantId` so a retry is self-contained
+and is re-sent as the terminal that sent it.
+
+**A slow refetch could reinstall an order the screen had left.** `acceptsSnapshot` lets a
+_different_ order id through, because that is exactly what a freshly created order looks like
+arriving in a mutation response. Correct there, wrong for a refetch: a `GET` of order A completing
+after a `clear()` or after order B was created passed the check and overwrote B. `adopt` cannot
+tell the two callers apart, so `refetch` now checks for itself that the order it asked about is
+still on screen.
+
+**`connectConsumer` leaked a connected consumer when `subscribe` or `run` threw.** The handle is
+only returned on full success, so a failure after `connect` left an open connection the supervisor
+could not see, and every retry opened another. Cleanup moved inside, next to the thing it owns.
+
+**A cancelled `start` could still relabel the transport.** The generation check came _after_
+`resolveTransport` had already written `PUSH` / `PUSH DISABLED` / `UNKNOWN`. `resolveTransport` is
+now side-effect free and returns the value; `start` writes it only once it knows its claim still
+stands.
+
+**The poison-message comment claimed something untrue.** It said `processed_events` was left
+unwritten "so a later build can reprocess it". Returning from `eachMessage` counts as success, so
+KafkaJS commits the offset and this consumer group is never offered that message again — no later
+build will see it. The behaviour is right (throwing would stall the partition forever behind one
+bad message and freeze every screen in the restaurant), the description was not. It is now stated
+as a terminal skip, logged at `error` with the raw payload so it is recoverable by hand from the
+topic while retention lasts, and a consumer-side dead-letter topic is named as the real answer and
+as out of scope. A test asserts the level, because a lost broadcast reported at `warn` is a lost
+broadcast nobody finds.
+
+Twelve regression tests were added. Three of them were run against the pre-fix sources and fail
+there; the coalescing-loader tests are structural and the consumer-cleanup path needs a broker, so
+neither of those was demonstrated that way.

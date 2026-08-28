@@ -20,7 +20,7 @@ const busy = ref(false);
 
 const money = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 
-const canOrder = computed(() => orders.order?.status === 'OPEN');
+const canOrder = computed(() => orders.order?.status === 'OPEN' && !orders.blocked);
 
 async function start(): Promise<void> {
   const restaurantId = terminal.value?.restaurantId;
@@ -51,13 +51,7 @@ async function run(action: () => Promise<unknown>): Promise<void> {
   }
 }
 
-const retryPending = (): Promise<void> =>
-  run(async () => {
-    const restaurantId = terminal.value?.restaurantId;
-    if (restaurantId !== undefined) {
-      await orders.retryPending(terminalId.value, restaurantId);
-    }
-  });
+const retryPending = (): Promise<void> => run(() => orders.retryPending());
 
 const createOrder = (): Promise<void> =>
   run(async () => {
@@ -134,17 +128,30 @@ watch(terminalId, async () => {
     >
       <span>
         <strong>{{ orders.pending.type }} left this terminal but no answer came back.</strong>
-        Retrying reuses the same <code>mutationId</code>, so if the server did apply it the answer
-        is <code>ALREADY_APPLIED</code> rather than a second one.
+        This terminal takes no new commands until it is resolved — there is one slot, and sending
+        anything else would overwrite the only <code>mutationId</code> that can still settle it.
+        Retrying reuses that id, so if the server did apply it the answer is
+        <code>ALREADY_APPLIED</code> rather than a second one. Discarding accepts that the outcome
+        will stay unknown.
       </span>
-      <button
-        type="button"
-        class="rounded border border-amber-500 px-3 py-1 font-medium"
-        :disabled="busy"
-        @click="retryPending"
-      >
-        Retry
-      </button>
+      <span class="flex gap-2">
+        <button
+          type="button"
+          class="rounded border border-amber-500 px-3 py-1 font-medium disabled:opacity-40"
+          :disabled="busy"
+          @click="retryPending"
+        >
+          Retry
+        </button>
+        <button
+          type="button"
+          class="rounded border border-amber-400 px-3 py-1 disabled:opacity-40"
+          :disabled="busy"
+          @click="orders.discardPending()"
+        >
+          Discard
+        </button>
+      </span>
     </p>
 
     <p
@@ -197,7 +204,7 @@ watch(terminalId, async () => {
           <button
             type="submit"
             class="rounded bg-emerald-700 px-4 py-2 font-medium text-white disabled:opacity-40"
-            :disabled="busy"
+            :disabled="busy || orders.blocked"
           >
             Create order
           </button>
@@ -237,8 +244,8 @@ watch(terminalId, async () => {
             </button>
             <button
               type="button"
-              class="rounded border border-stone-300 px-4 py-2"
-              :disabled="busy"
+              class="rounded border border-stone-300 px-4 py-2 disabled:opacity-40"
+              :disabled="busy || orders.blocked"
               @click="orders.clear()"
             >
               New order
