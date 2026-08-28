@@ -69,14 +69,19 @@ teardown is in flight — and later returns its replacement — so a guard writt
 supervisor would read "alive" for the whole window it exists to close, and then answer for a
 different session than the one the publisher is holding.
 
-**A record the broker rejected does not end the session.** A `KafkaJSProtocolError` —
-`MESSAGE_TOO_LARGE` and its kind — is an answer, not a silence: the connection carried the request
-and brought back a refusal. Tearing the session down for it would take the kitchen consumer with it
-and abandon every unrelated row of the batch, once per retry, until the poison row dead-lettered.
-That is the mirror of this ADR's own argument: `attempt_count` must keep meaning _this event is
-bad_, and a bad event must not be allowed to mean _the broker is gone_. Anything unrecognised still
-ends the session, because pausing the publisher costs a reconnect while carrying on through a dead
-transport costs an attempt on every claimed row.
+**A record the broker rejected does not end the session, and the list of those is a whitelist.**
+`MESSAGE_TOO_LARGE` and its kind say the connection carried the request and brought back a refusal
+about _this row_; tearing the session down for one would take the kitchen consumer with it and
+abandon every unrelated row of the batch, once per retry, until the poison row dead-lettered. That
+is the mirror of the argument above: `attempt_count` must keep meaning _this event is bad_, and a
+bad event must not be allowed to mean _the broker is gone_.
+
+The condition is `RECORD_REJECTIONS`, an explicit set, and **not** "is it a protocol error at all".
+`TOPIC_AUTHORIZATION_FAILED` is one too, and it means every row of the batch will fail — reading it
+as a record rejection would charge an attempt to each of them and dead-letter healthy events, which
+is what this whole section exists to prevent. So anything not on the list ends the session, and the
+asymmetry is the reason: being wrong about an unfamiliar code costs one reconnect, being wrong the
+other way costs an order's event.
 
 ## Consequences
 
@@ -104,7 +109,9 @@ transport costs an attempt on every claimed row.
   long outage leaves one abandoned operation behind per health request. Redis needs **two** sources
   rather than one: the adapter client's `status` answers "are broadcasts connected?", and a third
   client with `enableOfflineQueue: false` and a `commandTimeout` carries the actual `PING`, because
-  a half-open socket leaves ioredis reporting `ready` with nothing moving.
+  a half-open socket leaves ioredis reporting `ready` with nothing moving. That client is discarded
+  and reopened whenever a probe fails: the timeout rejects the promise, but only closing the socket
+  takes the command out of ioredis's ordered response queue.
 - Two supervision loops now exist, one in each process, deliberately not shared. They differ in
   logger type, in what a session owns and in why they exist; their only common home would be a new
   runtime package, which is more structure than forty lines of loop earns.

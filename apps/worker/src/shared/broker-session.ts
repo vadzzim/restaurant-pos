@@ -20,18 +20,36 @@ export interface BrokerConnection {
 }
 
 /**
- * A protocol error is an answer, not a silence: the broker was reachable enough to reject this
- * record — `MESSAGE_TOO_LARGE` and its kind — so the connection is fine and the *event* is the
- * problem. Ending the session for it would take the kitchen consumer down with it and abandon every
- * unrelated row of the batch, once per retry, until the poison row dead-letters. Rejecting one
- * record is the per-event failure path's job, and it already does it (§10).
+ * The produce errors that are about **this record** and would be about it again on any connection:
+ * it is the wrong size, the wrong shape, or in a format this cluster will not store. Retrying such
+ * a row until it dead-letters is exactly what `attempt_count` is for (§10).
  *
- * Everything else — a socket that went away, a timeout, a broker that cannot be found — ends the
- * session, and so does anything unrecognised: pausing the publisher costs a reconnect, while
- * carrying on through a dead transport costs an `attempt_count` on every claimed row.
+ * A whitelist, and a short one, because the safe direction is asymmetric. "The broker answered" is
+ * not the same as "the record is at fault": `TOPIC_AUTHORIZATION_FAILED` and its kind are protocol
+ * errors too, and they say *every* row of the batch will fail. Treating one of those as a record
+ * rejection would charge an attempt to every claimed row and dead-letter healthy events — the
+ * invariant ADR 011 exists to hold. So anything not named here ends the session instead, and the
+ * cost of being wrong about an unfamiliar code is one reconnect.
+ */
+const RECORD_REJECTIONS: ReadonlySet<string> = new Set([
+  'CORRUPT_MESSAGE',
+  'MESSAGE_TOO_LARGE',
+  'RECORD_LIST_TOO_LARGE',
+  'INVALID_TIMESTAMP',
+  'UNSUPPORTED_FOR_MESSAGE_FORMAT',
+  'INVALID_RECORD',
+]);
+
+/**
+ * Whether a failed send says the *event* is bad rather than the connection. Ending the session for
+ * a bad record would take the kitchen consumer down with it and abandon every unrelated row of the
+ * batch, once per retry, until the poison row dead-letters. Keeping the session alive for a
+ * broker-wide refusal would dead-letter events that were never bad. Only the first of those two is
+ * a record rejection, and everything else — a socket that went away, a timeout, a broker that
+ * cannot be found, a code this list does not know — ends the session.
  */
 export function isRecordRejection(error: unknown): boolean {
-  return error instanceof KafkaJSProtocolError;
+  return error instanceof KafkaJSProtocolError && RECORD_REJECTIONS.has(error.type);
 }
 
 /**

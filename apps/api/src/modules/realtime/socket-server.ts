@@ -48,29 +48,30 @@ export function createRealtimeServer(
   const pub = new Redis(config.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: null });
   const sub = pub.duplicate();
 
-  /**
-   * A third connection, for the health probe alone. The adapter's two must never drop a command —
-   * `maxRetriesPerRequest: null` holds a broadcast until Redis returns — and that is exactly what a
-   * probe must not do: a command that waits forever is the outage it was sent to detect. This one
-   * refuses to queue and times out on its own, so `/api/debug/dependencies` cannot accumulate
-   * pending pings across an outage, including the half-open case where the socket never closes and
-   * ioredis still believes it is `ready`.
-   */
-  const probe = pub.duplicate({
-    maxRetriesPerRequest: 1,
-    enableOfflineQueue: false,
-    commandTimeout: config.HEALTH_CHECK_TIMEOUT_MS,
-  });
-
   for (const client of [pub, sub]) {
     client.on('error', (error: Error) => {
       logger.warn({ err: error }, 'redis adapter connection error; broadcast stays instance-local');
     });
   }
 
-  // Its failures are the probe's answer, not news; without a listener ioredis would throw them at
-  // the process instead.
-  probe.on('error', () => undefined);
+  /**
+   * A third connection, for the health probe alone. The adapter's two must never drop a command —
+   * `maxRetriesPerRequest: null` holds a broadcast until Redis returns — and that is exactly what a
+   * probe must not do: a command that waits forever is the outage it was sent to detect.
+   */
+  function openProbe(): Redis {
+    const client = pub.duplicate({
+      maxRetriesPerRequest: 1,
+      enableOfflineQueue: false,
+      commandTimeout: config.HEALTH_CHECK_TIMEOUT_MS,
+    });
+    // Its failures are the probe's answer, not news; without a listener ioredis would throw them at
+    // the process instead.
+    client.on('error', () => undefined);
+    return client;
+  }
+
+  let probe = openProbe();
 
   io.adapter(createAdapter(pub, sub));
 
@@ -128,7 +129,18 @@ export function createRealtimeServer(
       if (pub.status !== 'ready') {
         throw new Error(`redis adapter client is ${pub.status}`);
       }
-      await probe.ping();
+
+      try {
+        await probe.ping();
+      } catch (error) {
+        // `commandTimeout` rejects the promise but cannot take the command out of ioredis's ordered
+        // response queue; only closing the socket does that. Against a black-holed connection the
+        // timeout alone would therefore leave one more queued PING behind on every health request.
+        // The probe connection is cheap and disposable, so a failed probe throws it away.
+        probe.disconnect();
+        probe = openProbe();
+        throw error;
+      }
     },
     close: async () => {
       await io.close();

@@ -17,8 +17,11 @@ function throwing(error: unknown): EventTransport {
 }
 
 function protocolError(type: string): KafkaJSProtocolError {
-  // What KafkaJS raises when the broker answers with a rejection rather than going silent.
-  return new KafkaJSProtocolError(type);
+  // What KafkaJS raises when the broker answers with a rejection rather than going silent. It
+  // copies `type` and `code` off the protocol's error descriptor; the published constructor type
+  // only admits an `Error`, so the descriptor rides on one.
+  const descriptor = Object.assign(new Error(type), { type, code: 1, retriable: false });
+  return new KafkaJSProtocolError(descriptor);
 }
 
 describe('what ends a broker session', () => {
@@ -34,6 +37,20 @@ describe('what ends a broker session', () => {
     await expect(transport.publish(event, 'order-1')).rejects.toThrow();
     expect(died).toBe(false);
     expect(isRecordRejection(protocolError('MESSAGE_TOO_LARGE'))).toBe(true);
+  });
+
+  it('ends it for a broker-wide refusal, even though that is a protocol error too', async () => {
+    // TOPIC_AUTHORIZATION_FAILED comes back over a healthy connection, like MESSAGE_TOO_LARGE —
+    // and unlike it, says every row of the batch will fail. Calling it a record rejection would
+    // charge an attempt to each one and dead-letter events that were never bad.
+    let died = false;
+    const transport = guardTransport(throwing(protocolError('TOPIC_AUTHORIZATION_FAILED')), () => {
+      died = true;
+    });
+
+    await expect(transport.publish(event, 'order-1')).rejects.toThrow();
+    expect(died).toBe(true);
+    expect(isRecordRejection(protocolError('TOPIC_AUTHORIZATION_FAILED'))).toBe(false);
   });
 
   it('ends it for a connection failure, before the error is rethrown', async () => {

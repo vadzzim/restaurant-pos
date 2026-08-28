@@ -12,8 +12,8 @@ health split with its ADR, the supervised worker, `pnpm verify:integration` and 
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
-M6 `860b064` plus two review commits through `HEAD`. The tree passes typecheck, lint, build and
-**182 tests** (61 domain, 52 api, 21 worker, 47 web) against a real PostgreSQL, plus **one
+M6 `860b064` plus three review commits through `HEAD`. The tree passes typecheck, lint, build and
+**183 tests** (61 domain, 52 api, 22 worker, 47 web) against a real PostgreSQL, plus **one
 integration test** against a real Redpanda that runs only under `pnpm verify:integration`. Ten of the sixteen
 mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3, **21.4**, 21.5,
 21.6, **21.9**, **21.10**, 21.11, 21.15.
@@ -78,18 +78,23 @@ mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3,
   session while its teardown is in flight, and later returns its replacement, so
   `isTransportAlive` is taken from the same `BrokerConnection` object as the transport being used.
   Round 2 of the review found the version that asked the supervisor instead.
-- **A record the broker rejected is not a dead broker.** `isRecordRejection` keeps a
-  `KafkaJSProtocolError` — `MESSAGE_TOO_LARGE` and its kind — on the per-event failure path;
-  killing the session for it would take the kitchen consumer down and abandon the batch on every
-  retry. Anything unrecognised still ends the session. Both live in
-  `apps/worker/src/shared/broker-session.ts` **with unit tests** — they were in `index.ts`, where
-  nothing could be asserted, which is why two P1s hid there.
+- **A record the broker rejected is not a dead broker — but "the broker answered" is not "the record
+  is at fault" either.** `isRecordRejection` matches an explicit **whitelist**, `RECORD_REJECTIONS`:
+  the produce errors about the record itself. `TOPIC_AUTHORIZATION_FAILED` is a
+  `KafkaJSProtocolError` too and means every row will fail, so it ends the session like any outage.
+  **Do not widen this back to `instanceof` alone**; review round 3 found exactly that. The default
+  is asymmetric on purpose: an unfamiliar code costs one reconnect, the other way costs a
+  dead-lettered order event. All of it lives in `apps/worker/src/shared/broker-session.ts` **with
+  unit tests** — it was in `index.ts`, where nothing could be asserted, which is why two P1s hid
+  there.
 - **A probe timeout gives up, it does not cancel.** Anything a probe calls has to be bounded at its
   own client — the pool's `connectionTimeoutMillis`, the probe broker's disabled retries — or a
   long outage accumulates one abandoned operation per health request. Redis takes **two** sources:
   the adapter client's `status` says whether broadcasts have a connection, and a third client with
   `enableOfflineQueue: false` and a `commandTimeout` carries the actual `PING`, because a half-open
-  socket leaves ioredis reporting `ready` with nothing moving.
+  socket leaves ioredis reporting `ready` with nothing moving. That probe client is **thrown away
+  and reopened on every failure**: `commandTimeout` rejects the promise, but only closing the socket
+  takes the command out of ioredis's ordered response queue.
 - **`decide()` owns §8 and nothing else does.** Nine mutation types, six statuses, one table-driven
   function, one matrix test. A rule added anywhere else is a bug. The order of checks is fixed:
   **domain rule first, version second** — §21.4 fails if that is reversed, because a client at v5
@@ -207,11 +212,17 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   bound in an `onRequest` hook, which runs after Fastify's first log line; the probe race, which
   gives up without cancelling. Each trusted a signal to fire at a moment it does not cover. **Ask
   what the failure actually emits, not what the API has an event named after.**
-- **Round 2 found what round 1's fix opened, exactly as M4 and M5 did.** The new death signal was
-  correct and the guard read it off the wrong object: a liveness flag on the supervisor and one on
-  the session look identical at the call site and differ precisely during the failure they exist
-  for. **Ask which object the answer belongs to.** It also found the mirror of ADR 011's own
-  argument — a bad event was being allowed to mean "the broker is gone".
+- **Rounds 2 and 3 each found what the previous fix opened, exactly as M4 and M5 did.** Round 1
+  wired a correct signal to the wrong object — a liveness flag on the supervisor and one on the
+  session read identically at the call site and differ precisely during the failure they exist for.
+  Round 2 split a condition with the wrong polarity: a blacklist where only a whitelist is safe,
+  because "the broker answered" does not imply "this row is at fault". Round 3 bounded a command
+  without releasing it. **All three were in the same forty lines** — the ones carrying ADR 011's one
+  real claim. Round 3 also caught a test that could not fail: it built a `KafkaJSProtocolError` from
+  a string, so the field it meant to assert on was `undefined`.
+- **Three rounds was the stopping point, chosen deliberately.** The findings had narrowed to
+  conditions this demo cannot reach — no ACLs anywhere, so no `TOPIC_AUTHORIZATION_FAILED` — and
+  the budget belongs to M7.
 
 ## Known problems / open questions
 

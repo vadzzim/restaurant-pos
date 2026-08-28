@@ -630,3 +630,44 @@ asserted.
 The lesson of round 1 was "ask what the failure actually emits". Round 2 sharpens it: **ask which
 object the answer belongs to.** A liveness flag on the supervisor and a liveness flag on the session
 read identically at the call site and differ exactly during the failure they exist for.
+
+## M6 review round 3 — "the broker answered" is not "the record is at fault"
+
+A third Codex pass, over `ebdfa14`, found two, both opened by round 2's fixes. Fixed, and the review
+cycle stops here: the findings are narrowing into conditions this demo cannot reach, and the
+remaining budget belongs to M7.
+
+**P1 — the record/connection split was a blacklist where only a whitelist is safe.** Round 2 asked
+"did the broker answer?" and treated every `KafkaJSProtocolError` as a record rejection. But
+`TOPIC_AUTHORIZATION_FAILED`, `CLUSTER_AUTHORIZATION_FAILED` and their kind are protocol errors too:
+the broker answered, and it will answer the same way for _every_ row of the batch. Keeping the
+session alive there charges an attempt to each claimed row and dead-letters healthy events — the
+exact invariant ADR 011 exists to hold, broken from the other side than round 1 broke it.
+
+The reasoning error was mine, not the code's: "the connection is fine" and "this row is at fault"
+are two claims, and I derived the second from the first. `RECORD_REJECTIONS` is now an explicit list
+of the produce errors that are about the record itself — `MESSAGE_TOO_LARGE`,
+`RECORD_LIST_TOO_LARGE`, `INVALID_RECORD`, `INVALID_TIMESTAMP`, `UNSUPPORTED_FOR_MESSAGE_FORMAT`,
+`CORRUPT_MESSAGE` — and anything else ends the session. The asymmetry decides the default: being
+wrong about an unfamiliar code costs one reconnect, while being wrong the other way costs a
+dead-lettered order event.
+
+**Round 2's test for this was passing vacuously, and the fix is what exposed it.** It built its
+`KafkaJSProtocolError` from a string, but KafkaJS copies `type` and `code` off a protocol _error
+descriptor_ — so `error.type` was `undefined` and the assertion held only because the old predicate
+never looked at it. The helper now attaches a real descriptor, and there is a second case:
+`TOPIC_AUTHORIZATION_FAILED` must end the session. A test that cannot fail is worth less than no
+test, because it reads like cover.
+
+**P2 — `commandTimeout` rejects a promise, it does not dequeue a command.** ioredis keeps an ordered
+response queue, and a command only leaves it when the socket closes. Against a black-holed Redis the
+timeout alone therefore left one more queued `PING` behind on every `/api/debug/dependencies`
+request — the accumulation the probe client was introduced to prevent, one level down. A failed
+probe now disconnects that client and opens a fresh one. The connection is single-purpose and cheap,
+so throwing it away is the cheapest correct answer.
+
+Three rounds, and one sentence covers all of them: **each round's finding was opened by the previous
+round's fix.** Round 1 wired a correct signal to the wrong object, round 2 split a condition with the
+wrong polarity, round 3 bounded a command without releasing it. All three were in the same forty
+lines — the ones that carry ADR 011's one real claim — which is a fair measure of how much attention
+the load-bearing part of a milestone deserves relative to the rest.
