@@ -12,9 +12,9 @@ component, the two §17 kitchen adapters, payments, and the kitchen rail moving 
 Model: Sonnet.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
-four review commits through `50d4ac7`; M5 is `HEAD` (a commit cannot cite its own hash). The tree
-passes typecheck, lint, build and **155 tests**
-(61 domain, 37 api, 16 worker, 41 web) against a real PostgreSQL. Ten of the sixteen mandatory
+four review commits through `50d4ac7`, M5 `f6888e6` plus one review commit at `HEAD`. The tree
+passes typecheck, lint, build and **162 tests**
+(61 domain, 39 api, 16 worker, 46 web) against a real PostgreSQL. Ten of the sixteen mandatory
 §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3, **21.4**, 21.5, 21.6,
 **21.9**, **21.10**, 21.11, 21.15.
 
@@ -63,6 +63,14 @@ passes typecheck, lint, build and **155 tests**
   cancelling a cancelled order. Everything else conflicts, including a repeated kitchen transition
   (`INVALID_STATUS_TRANSITION`) and a quantity change to the value already stored (which applies
   and bumps the version). The reasoning is in `build-log.md` under M5.
+- **`ALREADY_APPLIED` is the one answer that asserts state without writing it**, so it is the one
+  place with no versioned UPDATE to protect it. `alreadyAppliedOutcome` therefore locks the order
+  row (`select … for update`) and takes the decision again under that lock, in one transaction with
+  the `processed_mutations` insert. **Do not turn that back into a bare read**: without it, an
+  `ADD_ITEM` committing in the gap makes a no-op removal acknowledge a line that is still there.
+  This is the only pessimistic lock in the write path; everywhere else optimism is correct because
+  there is a write to guard. Both regression tests are deterministic — they hold the row and poll
+  `pg_stat_activity` until the acknowledgement is provably blocked.
 - **`PAY` carries `{ method }`, never an amount.** `payments.amount_cents` is the order's canonical
   total read inside the transaction; `payments.mutation_id` is unique as a backstop, but §21.9
   passes through `processed_mutations` like every other repeat.
@@ -84,6 +92,11 @@ passes typecheck, lint, build and **155 tests**
   projection it refers to has been written, so the kitchen store reads until
   `source_event_version >= event.version` on a bounded backoff. A screen reading `orders` does not
   need this, because that row is written by the transaction that wrote the outbox row.
+- **Not every event earns that wait.** `expectationFor` decides: only `OrderSentToKitchen` can
+  create a ticket, so any other event earns an expectation only when the screen already holds a
+  ticket for that order. `OrderCancelled` for an `OPEN` order is the case this exists for — the
+  projection records it and builds nothing, so waiting for a ticket would spend the whole retry
+  budget and raise `PROJECTION LAG` over a fault that does not exist.
 - **The browser filters what the socket delivers**: dedup by `eventId`, ignore `version` not
   greater than what it holds, refetch the snapshot on reconnect. A socket message never carries
   state into the UI — it only triggers a canonical read.
@@ -124,14 +137,18 @@ passes typecheck, lint, build and **155 tests**
 - **Drop order if the interview date closes in:** M10 (print job), then M16 (`/demo`), then M17
   (PWA). Do not drop M15 or M18 first.
 
-## Review rounds 1 and 2, and the M4 reviews
+## Review rounds 1 and 2, the M4 reviews, and the M5 review
 
-Recorded in full in `docs/build-log.md`. The two habits worth carrying forward:
+Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 
 - **Client state that outlives the screen which created it, with no explicit owner**, was three of
   the four M4 findings. It is the class of bug M7 and M8 will reopen.
-- **Every review round's findings were opened by the previous round's fix.** A pass over M3/M4 code
-  is now worth much less than a pass over M5, which is the newest and least examined.
+- **Every review round's findings were opened by the previous round's fix.**
+- **M5's own lesson is narrower and sharper:** the correctness model here is "a write is the
+  guard", so the one code path that answers without writing was the one the model did not cover.
+  When adding an answer, ask what write makes it true. The M5 review also found a rule I had stated
+  correctly in a comment (`KITCHEN_EVENT_TYPES`) and then broken two lines later — a comment is not
+  a check.
 
 ## Known problems / open questions
 

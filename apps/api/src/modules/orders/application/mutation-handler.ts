@@ -111,7 +111,7 @@ export async function applyMutation(db: Db, input: MutationInput): Promise<Mutat
     }
 
     if (error instanceof AlreadyAppliedSignal) {
-      return alreadyAppliedOutcome(db, input);
+      return alreadyAppliedOutcome(db, input, hash);
     }
 
     if (isUniqueViolation(error, 'processed_mutations_pkey')) {
@@ -408,30 +408,59 @@ async function conflictOutcome(
  * with identical content, a line removed that is not there, an order cancelled twice. Nothing is
  * applied and the version does not move, but the mutation is still recorded so its own retries are
  * cheap and consistent, and the caller gets the canonical order to rebase on.
+ *
+ * **This is the one answer in the system that asserts something about state without writing it**,
+ * so there is no versioned UPDATE here for §6 to protect — and the state it asserts can move
+ * underneath it. The decision was taken in a transaction that then rolled back: a `REMOVE_ITEM`
+ * for a line the order does not have can be overtaken by an `ADD_ITEM` for that very product,
+ * which commits in the gap. Answering `ALREADY_APPLIED` then hands the caller a canonical order
+ * still containing the line they asked to remove, and tells them their removal is reflected in it.
+ *
+ * So the order row is locked and the decision is taken again under that lock. The lock is narrow
+ * on purpose — this path writes one row, calls nothing external, and is the only pessimistic lock
+ * in the write path. Everywhere else optimism is correct because there is a write to guard.
  */
-async function alreadyAppliedOutcome(db: Db, input: MutationInput): Promise<MutationOutcome> {
-  const order = await loadOrderSnapshot(db, input.orderId);
-  if (order === undefined) {
-    throw new ApiError(404, 'ORDER_NOT_FOUND', `Order ${input.orderId} does not exist.`);
-  }
+async function alreadyAppliedOutcome(
+  db: Db,
+  input: MutationInput,
+  hash: string,
+): Promise<MutationOutcome> {
+  const settled = await db.transaction(async (tx) => {
+    await tx.execute(sql`select 1 from orders where id = ${input.orderId} for update`);
 
-  const result: StoredResult = { order, serverVersion: order.version };
+    const order = await loadOrderSnapshot(tx, input.orderId);
+    if (order === undefined) {
+      throw new ApiError(404, 'ORDER_NOT_FOUND', `Order ${input.orderId} does not exist.`);
+    }
 
-  await db
-    .insert(processedMutations)
-    .values({
-      mutationId: input.mutationId,
-      terminalId: input.terminalId,
-      orderId: input.orderId,
-      requestHash: requestHash(input.orderId, input.type, input.payload),
-      resultJson: result,
-    })
-    .onConflictDoNothing();
+    const verdict = decide(order, toCommand(input));
+    if (verdict.kind !== 'already-applied') {
+      // The world moved between the decision and this acknowledgement. `apply` means the
+      // operation is meaningful again — at a version this client no longer holds; `conflict`
+      // means it is now refused for a reason worth naming instead.
+      return verdict.kind === 'conflict' ? verdict.reason : ('ORDER_VERSION_CONFLICT' as const);
+    }
 
-  return {
-    httpStatus: 200,
-    body: { status: 'ALREADY_APPLIED', order, serverVersion: order.version },
-  };
+    const result: StoredResult = { order, serverVersion: order.version };
+
+    await tx
+      .insert(processedMutations)
+      .values({
+        mutationId: input.mutationId,
+        terminalId: input.terminalId,
+        orderId: input.orderId,
+        requestHash: hash,
+        resultJson: result,
+      })
+      .onConflictDoNothing();
+
+    return {
+      httpStatus: 200,
+      body: { status: 'ALREADY_APPLIED', order, serverVersion: order.version },
+    } satisfies MutationOutcome;
+  });
+
+  return typeof settled === 'string' ? conflictOutcome(db, input, settled) : settled;
 }
 
 async function racedOutcome(db: Db, input: MutationInput, hash: string): Promise<MutationOutcome> {

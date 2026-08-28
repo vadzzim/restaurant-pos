@@ -1,4 +1,9 @@
-import type { ConflictReason, KitchenTicket, KitchenTicketState } from '@pos/contracts';
+import type {
+  ConflictReason,
+  DomainEvent,
+  KitchenTicket,
+  KitchenTicketState,
+} from '@pos/contracts';
 import { KITCHEN_TERMINAL_ID } from '@pos/contracts';
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
@@ -13,6 +18,32 @@ export interface ExpectedTicket {
 }
 
 export type KitchenCommand = 'preparing' | 'ready';
+
+/**
+ * What a socket event entitles the screen to demand of the projection before it gives up waiting.
+ *
+ * **Only `OrderSentToKitchen` can create a ticket.** Every other kitchen event can merely advance
+ * one that already exists — and `OrderCancelled` is routinely broadcast for an order the kitchen
+ * never saw, because `CANCEL` is valid on an `OPEN` order and the projection deliberately records
+ * that event without building anything (`recorded`, not `applied`). Expecting a ticket for such a
+ * cancellation spends the whole retry budget on a row that is never going to be written and ends
+ * in a `PROJECTION LAG` banner reporting a fault that does not exist.
+ *
+ * So: expect a ticket when the event creates one, or when this screen already holds one for that
+ * order. Otherwise refresh and believe whatever comes back.
+ */
+export function expectationFor(
+  event: DomainEvent,
+  held: readonly KitchenTicket[],
+): ExpectedTicket | undefined {
+  const expected: ExpectedTicket = { orderId: event.aggregateId, version: event.version };
+
+  if (event.eventType === 'OrderSentToKitchen') {
+    return expected;
+  }
+
+  return held.some((ticket) => ticket.orderId === event.aggregateId) ? expected : undefined;
+}
 
 /** Whether one read of the projection accounts for every expectation of this round. */
 export function ticketsSatisfy(rows: KitchenTicket[], expectations: ExpectedTicket[]): boolean {

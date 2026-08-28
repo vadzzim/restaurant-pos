@@ -8,7 +8,7 @@ import {
   payments,
   processedMutations,
 } from '@pos/db';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -730,5 +730,141 @@ describe('the kitchen command endpoints (§17)', () => {
     expect(response.json()).toMatchObject({ reason: 'CROSS_TENANT_MUTATION' });
 
     await app.close();
+  });
+});
+
+/**
+ * Block until some backend in this database is waiting on a lock. The suite runs one file at a
+ * time and one test at a time, so the only candidate is the transaction under test.
+ *
+ * This is what makes the test below deterministic rather than a race that usually passes: if the
+ * acknowledgement does not take the lock, nothing ever blocks and this throws.
+ */
+async function waitUntilBlockedOnLock(): Promise<void> {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const result = await db().execute(sql`
+      select count(*)::int as waiting
+      from pg_stat_activity
+      where datname = current_database() and wait_event_type = 'Lock'
+    `);
+
+    if (Number((result.rows[0] as { waiting: number } | undefined)?.waiting ?? 0) > 0) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error('nothing ever blocked on the order row: the acknowledgement is unguarded');
+}
+
+describe('the review found: an already-applied answer asserts state it does not write', () => {
+  it('refuses to acknowledge a removal that a concurrent addition has undone', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'ADD_ITEM', 1, { productId: 'burger', quantity: 1 });
+
+    let acquired = (): void => {};
+    let release = (): void => {};
+    const locked = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    // A concurrent ADD_ITEM for the very product the removal is about, held open so it commits
+    // inside the window between the removal's decision and the removal's acknowledgement.
+    const addingCola = db().transaction(async (tx) => {
+      await tx.execute(sql`select 1 from orders where id = ${orderId} for update`);
+      acquired();
+      await gate;
+
+      await tx.execute(sql`update orders set version = version + 1 where id = ${orderId}`);
+      await tx.execute(sql`
+        insert into order_items (id, order_id, product_id, name, quantity, unit_price_cents)
+        values (${randomUUID()}, ${orderId}, 'cola', 'Cola', 1, 300)
+      `);
+      await tx.execute(sql`update orders set total_cents = 1500 where id = ${orderId}`);
+    });
+
+    await locked;
+
+    // Decided against an order that has no cola, so it rolls back and asks to be acknowledged.
+    const removing = applyMutation(
+      db(),
+      mutation({ orderId, type: 'REMOVE_ITEM', baseVersion: 2, payload: { productId: 'cola' } }),
+    );
+
+    // `finally`, because a failure here would otherwise leave the holding transaction waiting on
+    // a gate nobody opens, and the suite would hang instead of reporting what went wrong.
+    try {
+      await waitUntilBlockedOnLock();
+    } finally {
+      release();
+      await addingCola;
+    }
+
+    const outcome = await removing;
+
+    // Answering ALREADY_APPLIED here would tell the caller their removal is reflected in a
+    // canonical order that visibly still contains the line.
+    expect(outcome.httpStatus).toBe(409);
+    expect(outcome.body).toMatchObject({
+      status: 'CONFLICT',
+      reason: 'ORDER_VERSION_CONFLICT',
+      clientBaseVersion: 2,
+      serverVersion: 3,
+    });
+
+    expect((await itemRows(orderId)).map((row) => row.productId).sort()).toEqual([
+      'burger',
+      'cola',
+    ]);
+  });
+
+  it('names the domain reason when the world moved for a reason worth naming', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'ADD_ITEM', 1, { productId: 'burger', quantity: 1 });
+
+    let acquired = (): void => {};
+    let release = (): void => {};
+    const locked = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const cancelling = db().transaction(async (tx) => {
+      await tx.execute(sql`select 1 from orders where id = ${orderId} for update`);
+      acquired();
+      await gate;
+
+      await tx.execute(sql`
+        update orders set version = version + 1, status = 'CANCELLED'::order_status
+        where id = ${orderId}
+      `);
+    });
+
+    await locked;
+
+    const removing = applyMutation(
+      db(),
+      mutation({ orderId, type: 'REMOVE_ITEM', baseVersion: 2, payload: { productId: 'cola' } }),
+    );
+
+    try {
+      await waitUntilBlockedOnLock();
+    } finally {
+      release();
+      await cancelling;
+    }
+
+    expect((await removing).body).toMatchObject({
+      status: 'CONFLICT',
+      reason: 'ORDER_CANCELLED',
+    });
   });
 });

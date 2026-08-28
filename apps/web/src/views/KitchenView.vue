@@ -5,14 +5,25 @@ import { useRoute } from 'vue-router';
 
 import StateBadge from '../components/StateBadge.vue';
 import { useConnectionStore } from '../stores/connection';
-import { nextCommand, useKitchenStore, type KitchenCommand } from '../stores/kitchen';
+import {
+  expectationFor,
+  nextCommand,
+  useKitchenStore,
+  type KitchenCommand,
+} from '../stores/kitchen';
 
 const route = useRoute();
 const kitchen = useKitchenStore();
 const connection = useConnectionStore();
 
 const restaurantId = computed(() => String(route.query.restaurantId ?? 'demo-restaurant'));
-const busy = ref(false);
+/**
+ * In flight *per ticket*, not for the rail. The store already keeps unresolved commands per order
+ * because that is the aggregate; a single shared flag would throw that away at the last step and
+ * let one slow request stop a kitchen with twelve orders on the pass from touching any of them.
+ */
+const busyOrders = ref(new Set<string>());
+const isBusy = (orderId: string): boolean => busyOrders.value.has(orderId);
 
 const money = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 
@@ -35,19 +46,19 @@ const COMMAND_LABELS: Record<KitchenCommand, string> = {
 const inColumn = (state: KitchenTicketState): KitchenTicket[] =>
   kitchen.tickets.filter((ticket) => ticket.state === state);
 
-async function run(action: () => Promise<unknown>): Promise<void> {
-  busy.value = true;
+async function runFor(orderId: string, action: () => Promise<unknown>): Promise<void> {
+  busyOrders.value.add(orderId);
   try {
     await action();
   } finally {
-    busy.value = false;
+    busyOrders.value.delete(orderId);
   }
 }
 
 const send = (orderId: string, command: KitchenCommand): Promise<void> =>
-  run(() => kitchen.command(orderId, command));
+  runFor(orderId, () => kitchen.command(orderId, command));
 
-const retry = (orderId: string): Promise<void> => run(() => kitchen.retry(orderId));
+const retry = (orderId: string): Promise<void> => runFor(orderId, () => kitchen.retry(orderId));
 
 onMounted(async () => {
   await kitchen.load(restaurantId.value);
@@ -60,11 +71,12 @@ onMounted(async () => {
     heldVersion: (aggregateId) =>
       kitchen.tickets.find((ticket) => ticket.orderId === aggregateId)?.sourceEventVersion ?? 0,
     // The event is passed on so the store can wait for the projection to catch up to it: the
-    // broadcast and the projection are written by two different consumers (ADR 006).
+    // broadcast and the projection are written by two different consumers (ADR 006). Not every
+    // event earns that wait, though — `expectationFor` is what decides.
     refresh: (event: DomainEvent | undefined) =>
       kitchen.load(
         restaurantId.value,
-        event === undefined ? undefined : { orderId: event.aggregateId, version: event.version },
+        event === undefined ? undefined : expectationFor(event, kitchen.tickets),
       ),
   });
 });
@@ -177,7 +189,7 @@ onBeforeUnmount(() => {
                 <button
                   type="button"
                   class="rounded border border-amber-500 px-2 py-1 font-medium disabled:opacity-40"
-                  :disabled="busy"
+                  :disabled="isBusy(ticket.orderId)"
                   @click="retry(ticket.orderId)"
                 >
                   Retry
@@ -185,7 +197,7 @@ onBeforeUnmount(() => {
                 <button
                   type="button"
                   class="rounded border border-amber-400 px-2 py-1 disabled:opacity-40"
-                  :disabled="busy"
+                  :disabled="isBusy(ticket.orderId)"
                   @click="kitchen.discard(ticket.orderId)"
                 >
                   Discard
@@ -197,7 +209,7 @@ onBeforeUnmount(() => {
               v-else-if="nextCommand(ticket.state)"
               type="button"
               class="w-full rounded bg-[#17201c] px-3 py-2 font-medium text-white disabled:opacity-40"
-              :disabled="busy"
+              :disabled="isBusy(ticket.orderId)"
               @click="send(ticket.orderId, nextCommand(ticket.state)!)"
             >
               {{ COMMAND_LABELS[nextCommand(ticket.state)!] }}

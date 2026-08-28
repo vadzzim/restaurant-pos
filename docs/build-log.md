@@ -376,3 +376,56 @@ by hand rather than generated, so a rule that changes has to be changed twice), 
 41 web. §21.4, §21.9 and §21.10 are present and named by their spec number, alongside a lifecycle
 test that walks one order through all nine mutation types and asserts nine outbox rows at versions
 1…9.
+
+## M5 review — the one answer that asserts state without writing it
+
+A Codex pass over `f6888e6` found three, one of them real enough to be worth the whole round.
+
+**P1 — `ALREADY_APPLIED` acknowledged state it had not locked.** A `REMOVE_ITEM` for a line the
+order does not have decides `already-applied`, throws, and **rolls its transaction back**; the
+acknowledgement was then written by a separate, unguarded read-and-insert. An `ADD_ITEM` for that
+very product can commit in the gap. The caller was told their removal was reflected, and handed a
+canonical order that visibly still contained the line.
+
+Every other answer in this system is safe because it is a write: the versioned UPDATE of §6 is
+what decides who wins, and a stale mutation simply fails to match. This one path writes nothing to
+guard — it only asserts — which is exactly why it slipped through the model that protects
+everything else. The fix locks the order row (`select … for update`) and takes the decision again
+under that lock, inside one transaction with the `processed_mutations` insert. It is the only
+pessimistic lock in the write path and it is narrow: one row written, nothing external called.
+
+The revalidation also improves the answer when it fails. `apply` on re-decide means the operation
+is meaningful again at a version this client no longer holds → `ORDER_VERSION_CONFLICT`; a domain
+`conflict` on re-decide is reported by its own reason, so an order cancelled in the gap says
+`ORDER_CANCELLED` rather than a generic version complaint.
+
+Worth noting which cases were _not_ exposed. `CREATE_ORDER` already-applied is stable because no
+mutation changes `table_number`; `CANCEL` on a `CANCELLED` order is stable because `CANCELLED` is
+terminal. Only `REMOVE_ITEM` sits on a non-terminal status whose decision a concurrent write can
+invalidate — which is to say the bug arrived with M5.
+
+**Both regression tests are deterministic, not hopeful.** A held transaction owns the order row
+while the removal runs, and the test polls `pg_stat_activity` until the removal is genuinely
+waiting on that lock before releasing it. If the acknowledgement is unguarded nothing ever blocks
+and the test fails with `nothing ever blocked on the order row`. Verified against the pre-fix
+sources: both fail, with that message. The `finally` around the release is not decoration — the
+first draft left the holding transaction waiting on a gate nobody opened and hung the suite instead
+of reporting the failure.
+
+**P2 — the kitchen expected a ticket that was never going to exist.** M5 added `OrderCancelled` to
+the kitchen room and, in the same commit, a comment on `KITCHEN_EVENT_TYPES` explaining that an
+event which moves no ticket must not reach the kitchen — with `OrderPaid` given as the example. But
+`CANCEL` is valid on an `OPEN` order, the projection then records the event without building
+anything, and `KitchenView` still raised an expectation for that order. `ticketsSatisfy` can never
+be met, so every such cancellation spent the whole retry budget and raised `PROJECTION LAG` over a
+fault that did not exist.
+
+The rule now lives in `expectationFor`, next to the projection knowledge it depends on: only
+`OrderSentToKitchen` can create a ticket, so anything else earns a wait only if this screen already
+holds a ticket for that order. Cancelling an order that _is_ on the rail still waits, as it must.
+
+**P3 — one slow command froze the whole rail.** `KitchenView` had a single `busy` flag disabling
+every command, retry and discard on every card while any one request was in flight. The store
+deliberately tracks unresolved commands per order, and the view threw that away at the last step. A
+`Set` of busy order ids replaces it. Not unit-tested — there are no component tests in this project
+— but the store-level rule it mirrors is.

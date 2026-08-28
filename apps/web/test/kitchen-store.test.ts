@@ -1,4 +1,5 @@
 import type {
+  DomainEvent,
   KitchenTicket,
   KitchenTicketState,
   MutationResponse,
@@ -9,7 +10,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { fetchTickets, postKitchenCommand } from '../src/api/client';
-import { nextCommand, useKitchenStore } from '../src/stores/kitchen';
+import { expectationFor, nextCommand, useKitchenStore } from '../src/stores/kitchen';
 
 vi.mock('../src/api/client', () => ({
   fetchTickets: vi.fn(),
@@ -177,5 +178,77 @@ describe('a kitchen command with no answer', () => {
 
     expect(kitchen.pendingByOrder.has('order-a')).toBe(false);
     expect(kitchen.commandError).toBeUndefined();
+  });
+});
+
+describe('expectationFor (what the projection may be asked to catch up to)', () => {
+  const event = (eventType: string, aggregateId: string, version: number): DomainEvent => ({
+    eventId: 'e1',
+    eventType,
+    aggregateId,
+    restaurantId: 'demo-restaurant',
+    version,
+    occurredAt: '2026-08-28T00:00:00.000Z',
+    payload: {},
+  });
+
+  it('waits for a ticket that the event is going to create', () => {
+    expect(expectationFor(event('OrderSentToKitchen', 'order-a', 4), [])).toEqual({
+      orderId: 'order-a',
+      version: 4,
+    });
+  });
+
+  it('waits for a ticket it already holds to advance', () => {
+    const held = [ticket('order-a', 'SENT_TO_KITCHEN', 4)];
+    expect(expectationFor(event('OrderPreparing', 'order-a', 5), held)).toEqual({
+      orderId: 'order-a',
+      version: 5,
+    });
+  });
+
+  it('expects nothing from a cancellation for an order the kitchen never saw', () => {
+    // CANCEL is valid on an OPEN order, so this event legitimately has no ticket to move. Asking
+    // the projection for one would burn the whole retry budget and raise PROJECTION LAG over a
+    // row that is never going to be written.
+    expect(expectationFor(event('OrderCancelled', 'order-z', 2), [])).toBeUndefined();
+    expect(
+      expectationFor(event('OrderCancelled', 'order-z', 2), [
+        ticket('order-a', 'SENT_TO_KITCHEN', 4),
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('still waits when a cancellation concerns a ticket on the rail', () => {
+    const held = [ticket('order-a', 'PREPARING', 5)];
+    expect(expectationFor(event('OrderCancelled', 'order-a', 6), held)).toEqual({
+      orderId: 'order-a',
+      version: 6,
+    });
+  });
+});
+
+describe('the review found: a load that can never converge', () => {
+  it('does not report projection lag for a cancellation with no ticket', async () => {
+    const kitchen = useKitchenStore();
+    fetchTicketsMock.mockResolvedValue([ticket('order-a', 'SENT_TO_KITCHEN', 4)]);
+    await kitchen.load('demo-restaurant');
+
+    const cancelled: DomainEvent = {
+      eventId: 'e2',
+      eventType: 'OrderCancelled',
+      aggregateId: 'order-z',
+      restaurantId: 'demo-restaurant',
+      version: 2,
+      occurredAt: '2026-08-28T00:00:00.000Z',
+      payload: {},
+    };
+
+    fetchTicketsMock.mockClear();
+    await kitchen.load('demo-restaurant', expectationFor(cancelled, kitchen.tickets));
+
+    // One read, no retry storm, no banner.
+    expect(fetchTicketsMock).toHaveBeenCalledTimes(1);
+    expect(kitchen.lagging).toBe(false);
   });
 });
