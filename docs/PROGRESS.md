@@ -11,8 +11,8 @@ kitchen screen in Vue. **The project is demoable from here on.**
 **Next:** M5 — the remaining six mutation types and the full §8 conflict matrix. Model: Sonnet.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` + the
-review fixes. The tree passes typecheck, lint, build and 74 tests (9 domain, 27 api, 11 worker,
-27 web) against a real PostgreSQL. The seven mandatory M3 tests §21.1, 21.2, 21.3, 21.5, 21.6,
+review fixes. The tree passes typecheck, lint, build and 79 tests (9 domain, 27 api, 11 worker,
+32 web) against a real PostgreSQL. The seven mandatory M3 tests §21.1, 21.2, 21.3, 21.5, 21.6,
 21.11 and 21.15 are still present and named by their spec number.
 
 ## What exists
@@ -78,8 +78,11 @@ review fixes. The tree passes typecheck, lint, build and 74 tests (9 domain, 27 
   `OrderCancelled` there at the same time as it teaches the kitchen consumer to advance `state`.
 - **A mutation whose answer never came back keeps its identity** (`orderId`, `mutationId`,
   `terminalId`, `restaurantId`) and is retried unchanged, so §9 resolves it as `ALREADY_APPLIED`.
-  **One slot means the terminal halts:** while it is occupied every command is refused, because
-  sending another would overwrite the only id that can still settle the first. Resolution is
+  **The slot is per terminal, and it halts that terminal:** while it is occupied every command from
+  it is refused, because sending another would overwrite the only id that can still settle the
+  first. The store is a singleton and the terminal is a route parameter, so the view announces
+  which terminal it renders (`useTerminal`) and only that one's mutation may be shown, retried or
+  adopted — otherwise a POS could paint another tenant's order onto its screen. Resolution is
   explicit — Retry, or Discard and accept an unknown outcome. Same shape as §14.1, which is why M8
   generalises it per aggregate rather than replacing it.
 - **A list that is replaced wholesale is never loaded concurrently.** `createCoalescingLoader` runs
@@ -204,6 +207,18 @@ Full reasoning in `build-log.md`. Ten regression tests were added.
   will see that message. Logged at `error`, not `warn`.
 
 Full reasoning in `build-log.md`. Twelve regression tests were added.
+
+## M4 review round 3 — accepted
+
+An independent Codex pass over `091406f`; both findings were opened by that commit.
+
+- **Pending mutations are keyed by terminal.** A retry from another terminal used to adopt the
+  first restaurant's order into the singleton store, after which every command failed cross-tenant.
+- **A failed read no longer strands the expectations queued behind it.** `refetchUntil` spends a
+  rejected read from the same budget as an unsatisfied one and only throws if none succeeded;
+  `drain` catches, reports through `onError`, and carries on.
+
+Full reasoning in `build-log.md`. Five regression tests were added.
 
 ## Known problems / open questions
 

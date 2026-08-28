@@ -1,4 +1,4 @@
-import type { OrderSnapshot } from '@pos/contracts';
+import type { MutationResponse, OrderSnapshot } from '@pos/contracts';
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -35,6 +35,7 @@ beforeEach(() => {
 describe('an unresolved mutation halts the terminal', () => {
   it('refuses a different command rather than overwriting the only id that can settle the first', async () => {
     const orders = useOrderStore();
+    orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
 
     // The request left the terminal and produced no answer: the outcome is unknown.
@@ -56,6 +57,7 @@ describe('an unresolved mutation halts the terminal', () => {
 
   it('retries with the identical identity and clears on the answer', async () => {
     const orders = useOrderStore();
+    orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
@@ -79,6 +81,7 @@ describe('an unresolved mutation halts the terminal', () => {
 
   it('keeps the pending mutation when the operator starts a new order', async () => {
     const orders = useOrderStore();
+    orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
@@ -96,6 +99,7 @@ describe('an unresolved mutation halts the terminal', () => {
 describe('a refetch that outlives its question', () => {
   it('does not reinstall an order the screen has already left', async () => {
     const orders = useOrderStore();
+    orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
 
     let release: (value: OrderSnapshot | undefined) => void = () => undefined;
@@ -117,6 +121,7 @@ describe('a refetch that outlives its question', () => {
 
   it('does not replace a newer order with a slow read of the previous one', async () => {
     const orders = useOrderStore();
+    orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
 
     let release: (value: OrderSnapshot | undefined) => void = () => undefined;
@@ -135,5 +140,66 @@ describe('a refetch that outlives its question', () => {
     // `acceptsSnapshot` alone would have taken it: a different id is exactly what a freshly
     // created order looks like. Only the caller knows this answers a stale question.
     expect(orders.order?.id).toBe('order-b');
+  });
+});
+
+describe('a pending mutation belongs to the terminal that sent it', () => {
+  it('is neither shown nor retried from another terminal', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockRejectedValueOnce(new Error('network down'));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    expect(orders.blocked).toBe(true);
+
+    // The operator walks to POS-3, which belongs to the *other* restaurant.
+    orders.clear();
+    orders.useTerminal('pos-3');
+
+    expect(orders.pending).toBeUndefined();
+    expect(orders.blocked).toBe(false);
+
+    // POS-3 is free to work, and its own mutation does not disturb POS-1's unresolved one.
+    postMutationMock.mockResolvedValueOnce({
+      status: 'APPLIED',
+      order: snapshot('order-b', 1),
+      serverVersion: 1,
+    });
+    await orders.createOrder('pos-3', 'second-restaurant', '9');
+    expect(orders.order?.id).toBe('order-b');
+
+    // Back at POS-1 the unresolved mutation is still there, and still retriable.
+    orders.useTerminal('pos-1');
+    expect(orders.pending?.terminalId).toBe('pos-1');
+  });
+
+  it('never paints another terminal answer onto the screen that replaced it', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    let release: (value: MutationResponse) => void = () => undefined;
+    postMutationMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    const inFlight = orders.addItem('pos-1', 'demo-restaurant', 'burger');
+
+    // The route changed while the request was outstanding.
+    orders.clear();
+    orders.useTerminal('pos-3');
+
+    release({ status: 'APPLIED', order: snapshot('order-a', 4), serverVersion: 4 });
+    await inFlight;
+
+    // POS-3 would otherwise be showing an order from the first restaurant, and every command it
+    // sent afterwards would come back CROSS_TENANT_MUTATION.
+    expect(orders.order).toBeUndefined();
+    // The answer still resolved the mutation: POS-1 has nothing left pending.
+    orders.useTerminal('pos-1');
+    expect(orders.pending).toBeUndefined();
   });
 });

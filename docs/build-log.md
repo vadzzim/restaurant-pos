@@ -250,3 +250,38 @@ broadcast nobody finds.
 Twelve regression tests were added. Three of them were run against the pre-fix sources and fail
 there; the coalescing-loader tests are structural and the consumer-cleanup path needs a broker, so
 neither of those was demonstrated that way.
+
+## M4 review round 3 — the two holes the round-2 fixes opened
+
+An independent Codex pass over `091406f` found both, and both were created by that commit rather
+than surviving it.
+
+**A retried mutation could paint another restaurant's order onto the screen.** Round 2 made
+`MutationIdentity` self-contained so a retry is re-sent as the terminal that sent it, and made
+`clear()` keep the pending slot. Together, in a store that is a singleton while the terminal is a
+route parameter, that let one browser tab walk from `/pos/pos-1` to `/pos/pos-3` — a different
+tenant — press Retry, and adopt POS-1's order onto POS-3's screen. Every command POS-3 sent after
+that would come back `CROSS_TENANT_MUTATION`: the server right, the screen lying. The pending slot
+is now a map keyed by terminal, which is what it always should have been — an unresolved mutation
+belongs to the device that sent it. `send` refuses an identity whose terminal is not the active
+one, and re-checks after the await, because the route can change mid-request. The response still
+resolves the mutation; it just is not painted onto a terminal that did not ask.
+
+**A failed read stranded the expectations queued behind it.** `drain` had no `catch`, so a rejected
+read threw straight out of the `do/while`; `finally` cleared `running` and nothing restarted the
+loop, leaving whatever had queued during that read unserved forever — and the gate had already
+recorded those events, so no redelivery would come to correct it. Round 1 asked for expectations
+not to be lost and round 2 delivered that only on the happy path.
+
+The fix went one level down rather than only wrapping the call. `refetchUntil` now spends a failed
+read from the same budget as an unsatisfied one: while waiting for a projection, a single blip and
+a slow consumer are indistinguishable and both are answered by trying again. Only if _no_ read
+succeeded does it throw, because there is no value to hand back. `drain` catches that, reports it
+through a new `onError`, gives up on its own batch — the same concession the budget already makes
+when a projection never catches up — and carries on with what is waiting. The kitchen screen shows
+`READ FAILED` with the last good read still on it, rather than looking merely quiet.
+
+`refetch` also grew a `catch`: a socket event calls it without awaiting, so a rejection surfaced as
+an unhandled promise rejection and nowhere else.
+
+Five regression tests were added. Three were run against the pre-fix sources and fail there.

@@ -28,6 +28,10 @@ async function start(): Promise<void> {
     return;
   }
 
+  // The store is a singleton and the terminal is a route parameter, so it has to be told which
+  // terminal's screen this is: only that terminal's unresolved mutation may be shown or retried.
+  orders.useTerminal(terminalId.value);
+
   await menu.load();
   await connection.start({
     restaurantId,

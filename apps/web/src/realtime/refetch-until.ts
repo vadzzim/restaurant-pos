@@ -29,6 +29,11 @@ const wait = (ms: number): Promise<void> =>
  * caught up, and because the client drops repeats by `eventId` there would be no second chance:
  * the ticket would stay invisible until someone reloaded the page.
  *
+ * A read that *fails* is spent from the same budget rather than ending the wait: a single blip
+ * while waiting for a projection is indistinguishable from the projection being slow, and both are
+ * answered by trying again. Only when no read at all succeeded is there nothing to report and the
+ * last error is thrown — the caller cannot be handed a value that was never fetched.
+ *
  * The budget is bounded and its exhaustion is reported rather than swallowed — an unbounded wait
  * would turn a dead consumer into a spinner that never resolves.
  */
@@ -41,16 +46,32 @@ export async function refetchUntil<T>(
   const delayMs = options.delayMs ?? 150;
   const sleep = options.sleep ?? wait;
 
-  let value = await read();
+  let value: T | undefined;
+  let readOnce = false;
+  let lastError: unknown;
 
-  for (let attempt = 1; attempt < attempts; attempt += 1) {
-    if (satisfied(value)) {
-      return { value, converged: true, attempts: attempt };
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(delayMs * attempt);
     }
 
-    await sleep(delayMs * attempt);
-    value = await read();
+    try {
+      value = await read();
+      readOnce = true;
+      lastError = undefined;
+
+      if (satisfied(value)) {
+        return { value, converged: true, attempts: attempt + 1 };
+      }
+    } catch (error) {
+      lastError = error;
+    }
   }
 
-  return { value, converged: satisfied(value), attempts };
+  if (!readOnce) {
+    throw lastError;
+  }
+
+  const last = value as T;
+  return { value: last, converged: lastError === undefined && satisfied(last), attempts };
 }

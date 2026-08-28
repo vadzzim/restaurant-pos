@@ -82,23 +82,43 @@ export const useOrderStore = defineStore('order', () => {
   const lastError = ref<string | undefined>();
   const inFlight = ref(0);
   /**
-   * The one mutation whose fate is unknown: it left this client but no answer came back. It is
-   * kept so the operator's next attempt reuses the same `mutationId` and `orderId` and is resolved
-   * idempotently by §9, instead of being sent as a brand-new mutation. M8 replaces this one slot
-   * with the durable queue; the reasoning is the same, the storage is not.
+   * Mutations whose fate is unknown: they left this client and no answer came back. Each is kept so
+   * the operator's next attempt reuses the same `mutationId` and `orderId` and is resolved
+   * idempotently by §9, instead of being sent as a brand-new mutation. M8 replaces this with the
+   * durable queue; the reasoning is the same, the storage is not.
+   *
+   * **Keyed by terminal, because a pending mutation belongs to the device that sent it.** This
+   * store is a singleton and the terminal is a route parameter, so one browser tab can walk from
+   * `/pos/pos-1` to `/pos/pos-3` — a different restaurant. A single shared slot would let POS-3
+   * retry POS-1's mutation and adopt another tenant's order onto its screen, whereupon every
+   * command it sent would be rejected as cross-tenant. The server would be right and the screen
+   * would be lying.
    */
-  const pending = ref<MutationIdentity | undefined>();
+  const pendingByTerminal = ref(new Map<string, MutationIdentity>());
+  /** Which terminal's screen is on show; set by the view from the route. */
+  const activeTerminalId = ref<string | undefined>();
 
   const version = computed(() => order.value?.version ?? 0);
   const syncing = computed(() => inFlight.value > 0);
+  /** The unresolved mutation of the terminal currently on screen, if it has one. */
+  const pending = computed(() =>
+    activeTerminalId.value === undefined
+      ? undefined
+      : pendingByTerminal.value.get(activeTerminalId.value),
+  );
   /**
-   * One slot means one unresolved mutation at a time. While it is occupied the terminal takes no
-   * new commands: sending one would overwrite the only `mutationId` that can still resolve the
-   * first, and its outcome would become permanently unknowable. This is the same shape as §14.1's
-   * halt-on-conflict — the queue for this aggregate stops until a human decides — and M8 gives it
-   * the durable, per-aggregate form.
+   * One slot per terminal means one unresolved mutation at a time. While it is occupied that
+   * terminal takes no new commands: sending one would overwrite the only `mutationId` that can
+   * still resolve the first, and its outcome would become permanently unknowable. This is the same
+   * shape as §14.1's halt-on-conflict — the queue for this aggregate stops until a human decides —
+   * and M8 gives it the durable, per-aggregate form.
    */
   const blocked = computed(() => pending.value !== undefined);
+
+  /** The view announces which terminal it is rendering; nothing else may resolve that one. */
+  function useTerminal(terminalId: string): void {
+    activeTerminalId.value = terminalId;
+  }
 
   function adopt(snapshot: OrderSnapshot): void {
     if (acceptsSnapshot(order.value, snapshot)) {
@@ -116,7 +136,16 @@ export const useOrderStore = defineStore('order', () => {
       return;
     }
 
-    const snapshot = await fetchOrder(id);
+    // A socket event triggers this without awaiting it, so a rejection here would surface as an
+    // unhandled promise rejection and nowhere else. A failed refresh only means the screen stays
+    // as it is until the next event or reconnect — worth saying, not worth throwing.
+    let snapshot: OrderSnapshot | undefined;
+    try {
+      snapshot = await fetchOrder(id);
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : 'The order could not be read.';
+      return;
+    }
 
     // The screen may have moved to another order — or to none — while this was in flight. Without
     // this check a slow read of the previous order would reinstall it over its successor, because
@@ -127,7 +156,14 @@ export const useOrderStore = defineStore('order', () => {
   }
 
   async function send(identity: MutationIdentity): Promise<MutationResponse | undefined> {
-    const held = pending.value;
+    // A mutation is only ever resolved from the terminal that sent it. Otherwise the response —
+    // another restaurant's order — would land on this screen.
+    if (identity.terminalId !== activeTerminalId.value) {
+      lastError.value = `That mutation belongs to ${identity.terminalId}. Resolve it from that terminal.`;
+      return undefined;
+    }
+
+    const held = pendingByTerminal.value.get(identity.terminalId);
     if (held !== undefined && held.mutationId !== identity.mutationId) {
       lastError.value =
         'A mutation from this terminal has no answer yet. Retry or discard it before sending another.';
@@ -144,13 +180,19 @@ export const useOrderStore = defineStore('order', () => {
     };
 
     inFlight.value += 1;
-    pending.value = identity;
+    pendingByTerminal.value.set(identity.terminalId, identity);
     try {
       const response = await postMutation(identity.orderId, request);
 
       // The server answered, so this mutation's fate is known however it turned out. Only a
       // request that never produced an answer stays pending.
-      pending.value = undefined;
+      pendingByTerminal.value.delete(identity.terminalId);
+
+      // The screen may have moved to another terminal while this was in flight; the answer is
+      // still recorded above, but it must not be painted onto a terminal that did not ask.
+      if (identity.terminalId !== activeTerminalId.value) {
+        return response;
+      }
 
       switch (response.status) {
         case 'APPLIED':
@@ -196,8 +238,9 @@ export const useOrderStore = defineStore('order', () => {
     baseVersion: number,
     payload: MutationRequest['payload'],
   ): MutationIdentity {
-    if (sameMutation(pending.value, type, orderId, baseVersion, payload)) {
-      return pending.value as MutationIdentity;
+    const held = pendingByTerminal.value.get(terminalId);
+    if (sameMutation(held, type, orderId, baseVersion, payload)) {
+      return held as MutationIdentity;
     }
 
     return {
@@ -217,13 +260,14 @@ export const useOrderStore = defineStore('order', () => {
     tableNumber: string,
   ): Promise<void> {
     const payload: CreateOrderPayload = { tableNumber };
-    const retrying = sameMutation(pending.value, 'CREATE_ORDER', undefined, 0, payload);
+    const held = pendingByTerminal.value.get(terminalId);
+    const retrying = sameMutation(held, 'CREATE_ORDER', undefined, 0, payload);
 
     // Reusing the id is the whole point (§5). A lost response plus a fresh `orderId` would create
     // a second order for the same table — the one write in the system that no version check and
     // no `mutationId` could catch afterwards.
     const identity: MutationIdentity = retrying
-      ? (pending.value as MutationIdentity)
+      ? (held as MutationIdentity)
       : {
           orderId: crypto.randomUUID(),
           mutationId: crypto.randomUUID(),
@@ -284,7 +328,9 @@ export const useOrderStore = defineStore('order', () => {
    * never something a screen does on their behalf.
    */
   function discardPending(): void {
-    pending.value = undefined;
+    if (activeTerminalId.value !== undefined) {
+      pendingByTerminal.value.delete(activeTerminalId.value);
+    }
     lastError.value = undefined;
   }
 
@@ -304,6 +350,7 @@ export const useOrderStore = defineStore('order', () => {
     lastError,
     pending,
     blocked,
+    useTerminal,
     version,
     syncing,
     adopt,

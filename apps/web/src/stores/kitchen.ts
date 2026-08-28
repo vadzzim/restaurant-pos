@@ -27,6 +27,8 @@ export const useKitchenStore = defineStore('kitchen', () => {
   const loaded = ref(false);
   /** True when a broadcast outran the projection and the retry budget ran out (see M04.md). */
   const lagging = ref(false);
+  /** Set when a whole round of reads failed, so the screen does not look merely quiet. */
+  const loadError = ref<string | undefined>();
 
   let restaurantId = '';
 
@@ -41,6 +43,11 @@ export const useKitchenStore = defineStore('kitchen', () => {
       tickets.value = rows;
       loaded.value = true;
       lagging.value = !converged;
+      loadError.value = undefined;
+    },
+    onError: (error) => {
+      loadError.value =
+        error instanceof Error ? error.message : 'The kitchen tickets could not be read.';
     },
   });
 
@@ -55,5 +62,5 @@ export const useKitchenStore = defineStore('kitchen', () => {
     await loader.run(expected);
   }
 
-  return { tickets, loaded, lagging, load };
+  return { tickets, loaded, lagging, loadError, load };
 });

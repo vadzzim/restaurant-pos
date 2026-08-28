@@ -54,7 +54,16 @@ onBeforeUnmount(() => {
       />
       <StateBadge :label="connection.transport" :tone="connection.pushEnabled ? 'ok' : 'warn'" />
       <StateBadge v-if="kitchen.lagging" label="PROJECTION LAG" tone="warn" />
+      <StateBadge v-if="kitchen.loadError" label="READ FAILED" tone="bad" />
     </header>
+
+    <p
+      v-if="kitchen.loadError"
+      class="rounded border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900"
+    >
+      The ticket list could not be read: {{ kitchen.loadError }}. What is shown below is the last
+      good read. The next event or a reconnect retries.
+    </p>
 
     <p
       v-if="kitchen.lagging"
