@@ -583,3 +583,50 @@ The lesson generalises the one M6 already had. That one was "ask what arrives at
 is thrown at it". This one is its twin one layer down: **ask what the failure actually emits, not
 what the API has an event named after.** Three of the four findings are the same mistake — trusting
 a signal (`DISCONNECT`, an `onRequest` hook, a race timeout) to fire at a moment it does not cover.
+
+## M6 review round 2 — the liveness that belonged to the wrong object
+
+A second Codex pass, over `e86d611`, found that the previous round's own P1 fix had a hole, plus two
+narrower ones. The pattern from M4 and M5 repeats exactly: **every round's findings were opened by
+the previous round's fix.**
+
+**P1 — the predicate asked the supervisor, not the session.** Round 1 hung the session's death on a
+failed send, then wired the publisher's guard to `broker.current() !== undefined` — the
+_supervisor's_ state. Those are not the same thing for a window that matters: `died()` resolves
+`whenDead`, and the supervisor only clears its `session` after `await fresh.stop()`, which waits for
+`kitchen.stop()` to disconnect a consumer. For that whole window the predicate says "alive" and the
+rest of the batch goes through the transport that just failed — the exact charge the fix existed to
+prevent. Worse, once the supervisor reconnects, the same predicate answers for a _replacement_
+session about a transport the publisher is no longer holding.
+
+The session now carries its own `alive` flag, flipped synchronously inside `die()` before the error
+is rethrown, and the publisher takes the predicate from the same object as the transport:
+`publishOnce(db, connection.transport, { ...options, isTransportAlive: connection.isAlive })`.
+`stop()` calls `die()` before it awaits anything, for the same reason.
+
+**P2 — a poison record was tearing down the whole session.** The wrapper killed the session on _any_
+send failure, which meant `MESSAGE_TOO_LARGE` — a rejection the broker itself sent back, over a
+connection that is perfectly healthy — took down the producer and the kitchen consumer, and
+abandoned every unrelated row in the batch. Once per retry, until the row dead-lettered. This is the
+mirror image of the argument in ADR 011: I insisted `attempt_count` must keep meaning "this event is
+bad", and then let a bad event mean "the broker is gone". `isRecordRejection` splits them —
+`KafkaJSProtocolError` means the broker answered, so the session lives and the per-event failure
+path handles the row. Anything unrecognised still ends the session, because pausing the publisher
+costs a reconnect while carrying on costs an attempt per claimed row.
+
+**P2 — the Redis `status` gate does not cover a half-open socket.** A stalled connection can leave
+ioredis reporting `ready` with nothing moving, and a `ping` on the adapter's client would then enter
+its unbounded retry queue — the accumulation the gate was added to prevent. The two questions are
+different and now have different sources: _is the adapter connected?_ is about the client broadcasts
+travel on, and only its `status` can answer; _is Redis answering?_ has to be a real command, and it
+goes through a third client with `enableOfflineQueue: false` and a `commandTimeout`, so it fails
+instead of hanging.
+
+Both fixes moved out of `index.ts` into `shared/broker-session.ts`, which is what made them
+testable: `guardTransport` and `isRecordRejection` now have unit tests, and the entry point is
+wiring again. Two rounds of P1s lived in that file precisely because nothing there could be
+asserted.
+
+The lesson of round 1 was "ask what the failure actually emits". Round 2 sharpens it: **ask which
+object the answer belongs to.** A liveness flag on the supervisor and a liveness flag on the session
+read identically at the call site and differ exactly during the failure they exist for.

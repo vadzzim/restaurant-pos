@@ -12,8 +12,8 @@ health split with its ADR, the supervised worker, `pnpm verify:integration` and 
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
-M6 `860b064` plus one review commit at `HEAD`. The tree passes typecheck, lint, build and
-**178 tests** (61 domain, 52 api, 17 worker, 47 web) against a real PostgreSQL, plus **one
+M6 `860b064` plus two review commits through `HEAD`. The tree passes typecheck, lint, build and
+**182 tests** (61 domain, 52 api, 21 worker, 47 web) against a real PostgreSQL, plus **one
 integration test** against a real Redpanda that runs only under `pnpm verify:integration`. Ten of the sixteen
 mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3, **21.4**, 21.5,
 21.6, **21.9**, **21.10**, 21.11, 21.15.
@@ -74,10 +74,22 @@ mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3,
   one case the supervision exists for. `publishOnce` also breaks out of a batch through
   `isTransportAlive`, so a blip costs one attempt rather than one per claimed row. **Do not move
   the death signal back onto a KafkaJS event**; the M6 review found exactly that.
+- **Liveness belongs to the session, never to the supervisor.** `broker.current()` still returns a
+  session while its teardown is in flight, and later returns its replacement, so
+  `isTransportAlive` is taken from the same `BrokerConnection` object as the transport being used.
+  Round 2 of the review found the version that asked the supervisor instead.
+- **A record the broker rejected is not a dead broker.** `isRecordRejection` keeps a
+  `KafkaJSProtocolError` — `MESSAGE_TOO_LARGE` and its kind — on the per-event failure path;
+  killing the session for it would take the kitchen consumer down and abandon the batch on every
+  retry. Anything unrecognised still ends the session. Both live in
+  `apps/worker/src/shared/broker-session.ts` **with unit tests** — they were in `index.ts`, where
+  nothing could be asserted, which is why two P1s hid there.
 - **A probe timeout gives up, it does not cancel.** Anything a probe calls has to be bounded at its
-  own client — the pool's `connectionTimeoutMillis`, the Redis probe's `status === 'ready'` gate,
-  the probe broker's disabled retries — or a long outage accumulates one abandoned operation per
-  health request.
+  own client — the pool's `connectionTimeoutMillis`, the probe broker's disabled retries — or a
+  long outage accumulates one abandoned operation per health request. Redis takes **two** sources:
+  the adapter client's `status` says whether broadcasts have a connection, and a third client with
+  `enableOfflineQueue: false` and a `commandTimeout` carries the actual `PING`, because a half-open
+  socket leaves ioredis reporting `ready` with nothing moving.
 - **`decide()` owns §8 and nothing else does.** Nine mutation types, six statuses, one table-driven
   function, one matrix test. A rule added anywhere else is a bug. The order of checks is fixed:
   **domain rule first, version second** — §21.4 fails if that is reversed, because a client at v5
@@ -195,6 +207,11 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   bound in an `onRequest` hook, which runs after Fastify's first log line; the probe race, which
   gives up without cancelling. Each trusted a signal to fire at a moment it does not cover. **Ask
   what the failure actually emits, not what the API has an event named after.**
+- **Round 2 found what round 1's fix opened, exactly as M4 and M5 did.** The new death signal was
+  correct and the guard read it off the wrong object: a liveness flag on the supervisor and one on
+  the session look identical at the call site and differ precisely during the failure they exist
+  for. **Ask which object the answer belongs to.** It also found the mirror of ADR 011's own
+  argument — a bad event was being allowed to mean "the broker is gone".
 
 ## Known problems / open questions
 

@@ -48,11 +48,29 @@ export function createRealtimeServer(
   const pub = new Redis(config.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: null });
   const sub = pub.duplicate();
 
+  /**
+   * A third connection, for the health probe alone. The adapter's two must never drop a command —
+   * `maxRetriesPerRequest: null` holds a broadcast until Redis returns — and that is exactly what a
+   * probe must not do: a command that waits forever is the outage it was sent to detect. This one
+   * refuses to queue and times out on its own, so `/api/debug/dependencies` cannot accumulate
+   * pending pings across an outage, including the half-open case where the socket never closes and
+   * ioredis still believes it is `ready`.
+   */
+  const probe = pub.duplicate({
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false,
+    commandTimeout: config.HEALTH_CHECK_TIMEOUT_MS,
+  });
+
   for (const client of [pub, sub]) {
     client.on('error', (error: Error) => {
       logger.warn({ err: error }, 'redis adapter connection error; broadcast stays instance-local');
     });
   }
+
+  // Its failures are the probe's answer, not news; without a listener ioredis would throw them at
+  // the process instead.
+  probe.on('error', () => undefined);
 
   io.adapter(createAdapter(pub, sub));
 
@@ -103,19 +121,20 @@ export function createRealtimeServer(
     io,
     emitter,
     ping: async () => {
-      // The adapter's clients run with `maxRetriesPerRequest: null`, which is right for broadcasts
-      // — a command issued while Redis is away is retried rather than lost — and wrong for a
-      // probe: every health request during an outage would leave another command queued forever.
-      // The client's own state answers the question without issuing one.
+      // Two questions, two sources. *Is the adapter connected?* is about the client the broadcasts
+      // actually travel on, and only that client's state can answer it. *Is Redis answering?* has
+      // to be a real command, and it goes through the bounded probe client so it can fail instead
+      // of hanging.
       if (pub.status !== 'ready') {
-        throw new Error(`redis client is ${pub.status}`);
+        throw new Error(`redis adapter client is ${pub.status}`);
       }
-      await pub.ping();
+      await probe.ping();
     },
     close: async () => {
       await io.close();
       pub.disconnect();
       sub.disconnect();
+      probe.disconnect();
     },
   };
 }

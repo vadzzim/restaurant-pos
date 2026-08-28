@@ -52,15 +52,31 @@ fail" looks equivalent. It is not: **each failed publish increments `attempt_cou
 current settings an outage of a few minutes would exhaust `OUTBOX_MAX_ATTEMPTS` and **dead-letter
 events that were never bad**. Dead-lettering must keep meaning _this event is bad_; M9 and §18 are
 built on that meaning. So the worker stays alive, retries the connection with backoff, and idles the
-publisher loop while `broker.current()` is undefined. The backlog waits untouched and drains on
-recovery.
+publisher loop whenever there is no live session to publish through. The backlog waits untouched and
+drains on recovery.
 
-**The session dies on a failed send.** KafkaJS emits the producer's `DISCONNECT` instrumentation
-event for an explicit disconnect, not for the broker vanishing under an open socket — which is the
-one case all of this exists for, so that event alone would leave the publisher running through
-exactly the outage it is meant to sit out. A send failure is the signal the worker is guaranteed to
-receive, so it is the one the session hangs on, and `publishOnce` breaks out of the rest of its
-batch rather than charging every remaining row an attempt for the same outage.
+**The session dies on a failed send, and the liveness flag belongs to the session.** KafkaJS emits
+the producer's `DISCONNECT` instrumentation event for an explicit disconnect, not for the broker
+vanishing under an open socket — which is the one case all of this exists for, so that event alone
+would leave the publisher running through exactly the outage it is meant to sit out. A send failure
+is the signal the worker is guaranteed to receive, so it is the one the session hangs on, and
+`publishOnce` breaks out of the rest of its batch rather than charging every remaining row an
+attempt for the same outage.
+
+The flag that says so lives on the `BrokerConnection`, not on the supervisor, and is flipped
+synchronously before the error is rethrown. `broker.current()` still returns a session while its
+teardown is in flight — and later returns its replacement — so a guard written against the
+supervisor would read "alive" for the whole window it exists to close, and then answer for a
+different session than the one the publisher is holding.
+
+**A record the broker rejected does not end the session.** A `KafkaJSProtocolError` —
+`MESSAGE_TOO_LARGE` and its kind — is an answer, not a silence: the connection carried the request
+and brought back a refusal. Tearing the session down for it would take the kitchen consumer with it
+and abandon every unrelated row of the batch, once per retry, until the poison row dead-lettered.
+That is the mirror of this ADR's own argument: `attempt_count` must keep meaning _this event is
+bad_, and a bad event must not be allowed to mean _the broker is gone_. Anything unrecognised still
+ends the session, because pausing the publisher costs a reconnect while carrying on through a dead
+transport costs an attempt on every claimed row.
 
 ## Consequences
 
@@ -84,9 +100,11 @@ batch rather than charging every remaining row an attempt for the same outage.
   for `OUTBOX_LEASE_MS`, so a recovery inside that window waits the lease out before republishing;
   releasing the claim eagerly belongs with M9's lease hardening.
 - **A probe timeout gives up on a check, it cannot cancel one.** Each check is therefore bounded at
-  its own client — the pool's `connectionTimeoutMillis`, the Redis probe refusing to issue a command
-  unless the adapter's client is `ready`, the probe broker's disabled retries. Without that, a long
-  outage would leave one abandoned operation behind per health request.
+  its own client — the pool's `connectionTimeoutMillis`, the probe broker's disabled retries — or a
+  long outage leaves one abandoned operation behind per health request. Redis needs **two** sources
+  rather than one: the adapter client's `status` answers "are broadcasts connected?", and a third
+  client with `enableOfflineQueue: false` and a `commandTimeout` carries the actual `PING`, because
+  a half-open socket leaves ioredis reporting `ready` with nothing moving.
 - Two supervision loops now exist, one in each process, deliberately not shared. They differ in
   logger type, in what a session owns and in why they exist; their only common home would be a new
   runtime package, which is more structure than forty lines of loop earns.
