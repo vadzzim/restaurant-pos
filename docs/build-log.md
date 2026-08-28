@@ -692,3 +692,49 @@ closed, and the remaining budget belongs to M7. The honest summary for the inter
 code was right" but "the invariant was stated precisely and attached to a mechanism imprecisely four
 times, and an external reviewer caught each one" — which is also why ADR 011 now spells out the
 mechanism and not only the rule.
+
+## M7 — IndexedDB persistence
+
+Nothing broke in a way that cost a debugging session, which is itself the observation: the milestone
+was small in code and almost entirely about who is allowed to write what, and that is where the
+thinking went.
+
+**The one real trap, found while writing rather than while debugging: `structuredClone` refuses a
+Vue proxy.** Everything crossing into Dexie comes out of a store, so it arrives as a reactive proxy
+and IndexedDB raises `DataCloneError` on it. Handled in one `plain()` helper in the repository —
+the one place that knows the provenance of the values — with a test that stores a `reactive()`
+snapshot for real, because `fake-indexeddb` implements structured cloning rather than pretending to.
+A mocked Dexie would have passed either way.
+
+**`SYNCING` before the request, `PENDING` after a lost answer, and no write in between.** The first
+draft wrote `PENDING` on the way out and flipped to `SYNCING`, which is two IndexedDB round trips in
+front of every command to record a distinction that has no gap to describe: M7 forms an intent and
+attempts it in the same breath. One write, with the states meaning what they will still mean in M8 —
+`PENDING` is an intent nobody is currently attempting, which is what M8's queue picks up, and a row
+found as `SYNCING` at startup is a tab that died mid-request. M8 introduces the gap; it does not
+have to redefine the words.
+
+**`persistenceError` is deliberately not cleared by a later success.** It was, in the first version,
+and a test showed what that means: a failed `savePending` followed by a successful `deletePending`
+in the same `send()` leaves the badge off, having told the operator nothing about the write that was
+lost. A failed write is never retried, so the fact it states stays true. The badge is about whether
+this device can be trusted to survive a reload, not about whether the database is currently up.
+
+**Two guards on hydration, and only one of them is load-bearing in the test.** Hydration calls
+`adopt`, so the monotonic-version rule applies, _and_ it refuses to install anything when the store
+already holds an order. The second is the one that matters: `adopt` accepts a snapshot for a
+_different_ order unconditionally, because that is how a `CREATE_ORDER` response installs a new
+aggregate, so without the emptiness check a slow read of the cached order would replace the order the
+operator created while it was in flight. This is `refetch`'s guard restated for a second slow
+reader — the same finding M4's review round made three times, arriving through the door M7 opened.
+The test races the two on purpose: it starts `hydrate`, adopts a different order during its read,
+and asserts the cache lost.
+
+**The kitchen's tenant filter is not symmetry with the POS, it is a different rule.** A POS pending
+row can be read by terminal alone, because a terminal belongs to one restaurant. Every kitchen row
+carries the same `terminalId` — there is one display id and every restaurant shares it — so kitchen
+hydration must filter on `restaurantId` too, or `/kitchen?restaurantId=b` restores restaurant A's
+unresolved commands onto B's rail and offers to retry them.
+
+Web tests went from 47 to 76. `pnpm verify:integration` was run unchanged and passed: no server code
+moved, and that is worth demonstrating rather than assuming.

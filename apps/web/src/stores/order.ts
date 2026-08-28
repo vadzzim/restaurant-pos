@@ -16,6 +16,7 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 
 import { fetchOrder, postMutation } from '../api/client';
+import { localStore } from '../persistence/local-store';
 
 export interface ConflictBanner {
   reason: ConflictReason;
@@ -132,10 +133,76 @@ export const useOrderStore = defineStore('order', () => {
     activeTerminalId.value = terminalId;
   }
 
-  function adopt(snapshot: OrderSnapshot): void {
-    if (acceptsSnapshot(order.value, snapshot)) {
-      order.value = snapshot;
+  /**
+   * Install a canonical snapshot and cache it (§14: update local state, then persist).
+   *
+   * Asynchronous because the persist is part of the action rather than a side effect of it: a
+   * reload a millisecond later must show what the operator was just shown. The cache is keyed by
+   * the terminal on screen, and with no terminal claimed there is nobody to hydrate it for, so
+   * nothing is written — a stored snapshot with no owner is exactly what this milestone must not
+   * create.
+   */
+  async function adopt(snapshot: OrderSnapshot): Promise<void> {
+    if (!acceptsSnapshot(order.value, snapshot)) {
+      return;
     }
+
+    order.value = snapshot;
+
+    const terminalId = activeTerminalId.value;
+    if (terminalId !== undefined) {
+      await localStore.saveOrder(terminalId, snapshot);
+    }
+  }
+
+  /**
+   * Restore this terminal's state after a reload.
+   *
+   * **Hydration is a second writer for state that already has an owner**, and every one of those
+   * rules has to hold across a reload as well as across a screen:
+   *
+   * - the snapshot goes through `adopt`, so the monotonic-version rule still refuses a cached
+   *   snapshot older than one a refetch has already installed;
+   * - it also checks that no order is held at all. `adopt` accepts a snapshot for a *different*
+   *   order unconditionally — that is how a `CREATE_ORDER` response installs a new aggregate — so
+   *   without this check a slow read of the cached order would silently replace the order the
+   *   operator created while it was in flight. This is `refetch`'s guard restated for a second
+   *   slow reader; `adopt` cannot tell its callers apart;
+   * - the pending slot is filled only if it is empty. A mutation sent since hydration began is the
+   *   more recent intent and must not be overwritten by a record of an older one;
+   * - and nothing is written at all if the screen has moved to another terminal, which here is a
+   *   move to another restaurant.
+   *
+   * **The restored `mutationId` is the one that was stored.** Minting a fresh one would turn the
+   * operator's Retry into a second mutation at a stale `baseVersion`: a duplicate order, or a
+   * conflict reported over an operation that in fact succeeded. Nothing downstream could catch
+   * it — the identity is the only thing §9 has to work with.
+   */
+  async function hydrate(terminalId: string): Promise<void> {
+    const restored = await localStore.readTerminalState(terminalId);
+
+    if (activeTerminalId.value !== terminalId) {
+      return;
+    }
+
+    const held = restored.pending;
+    if (held !== undefined && !pendingByTerminal.value.has(terminalId)) {
+      pendingByTerminal.value.set(terminalId, {
+        orderId: held.orderId,
+        mutationId: held.mutationId,
+        terminalId: held.terminalId,
+        restaurantId: held.restaurantId,
+        type: held.type,
+        baseVersion: held.baseVersion,
+        payload: held.payload,
+      });
+    }
+
+    if (restored.order !== undefined && order.value === undefined) {
+      await adopt(restored.order);
+    }
+
+    await localStore.pruneOrders();
   }
 
   /**
@@ -169,7 +236,7 @@ export const useOrderStore = defineStore('order', () => {
     // `adopt` cannot see that this snapshot answers a question nobody is asking any more.
     if (snapshot !== undefined && order.value?.id === id) {
       readError.value = undefined;
-      adopt(snapshot);
+      await adopt(snapshot);
     }
   }
 
@@ -199,12 +266,20 @@ export const useOrderStore = defineStore('order', () => {
 
     inFlight.value += 1;
     pendingByTerminal.value.set(identity.terminalId, identity);
+
+    // §14's ordering: the intent is durable *before* it is attempted. A row written after the
+    // request would be missing for precisely the window this milestone exists to cover — the one
+    // where the tab dies with no answer. `SYNCING` is what a row is while a request for it is in
+    // the air; the catch below puts it back to `PENDING` when no answer arrives.
+    await localStore.savePending({ ...identity, status: 'SYNCING' });
+
     try {
       const response = await postMutation(identity.orderId, request);
 
       // The server answered, so this mutation's fate is known however it turned out. Only a
       // request that never produced an answer stays pending.
       pendingByTerminal.value.delete(identity.terminalId);
+      await localStore.deletePending(identity.mutationId);
 
       // The screen may have moved to another terminal while this was in flight; the answer is
       // still recorded above, but it must not be painted onto a terminal that did not ask.
@@ -217,7 +292,7 @@ export const useOrderStore = defineStore('order', () => {
         case 'ALREADY_APPLIED':
           conflict.value = undefined;
           lastError.value = undefined;
-          adopt(response.order);
+          await adopt(response.order);
           break;
         case 'CONFLICT':
           // The server's version of the truth replaces ours immediately; resolving the *queue* is
@@ -227,7 +302,7 @@ export const useOrderStore = defineStore('order', () => {
             clientBaseVersion: response.clientBaseVersion,
             serverVersion: response.serverVersion,
           };
-          adopt(response.canonicalOrder);
+          await adopt(response.canonicalOrder);
           break;
         default:
           lastError.value = response.reason;
@@ -235,7 +310,10 @@ export const useOrderStore = defineStore('order', () => {
 
       return response;
     } catch (error) {
-      // `pending` deliberately survives: the mutation may well have been applied.
+      // `pending` deliberately survives, and so does the row — back to `PENDING`, which is what
+      // an intent nobody is currently attempting looks like. The mutation may well have been
+      // applied; the id that can still settle it is the one thing that must not be lost.
+      await localStore.setPendingStatus(identity.mutationId, 'PENDING');
       lastError.value = error instanceof Error ? error.message : 'The mutation failed.';
       return undefined;
     } finally {
@@ -299,6 +377,10 @@ export const useOrderStore = defineStore('order', () => {
     if (!retrying) {
       order.value = undefined;
       conflict.value = undefined;
+      // The terminal has left the previous order. Without this the pointer would still name it if
+      // the creation never got an answer, and the reload would restore the order the operator had
+      // already walked away from.
+      await localStore.clearCurrentOrder(terminalId);
     }
 
     await send(identity);
@@ -423,9 +505,16 @@ export const useOrderStore = defineStore('order', () => {
    * is asserting they will live with either outcome, which is why this is a deliberate action and
    * never something a screen does on their behalf.
    */
-  function discardPending(): void {
-    if (activeTerminalId.value !== undefined) {
-      pendingByTerminal.value.delete(activeTerminalId.value);
+  async function discardPending(): Promise<void> {
+    const terminalId = activeTerminalId.value;
+    if (terminalId !== undefined) {
+      const held = pendingByTerminal.value.get(terminalId);
+      pendingByTerminal.value.delete(terminalId);
+      if (held !== undefined) {
+        // Durable too: a discard that only cleared memory would be undone by the next reload, and
+        // the operator would be asked the same unanswerable question again.
+        await localStore.deletePending(held.mutationId);
+      }
     }
     lastError.value = undefined;
   }
@@ -434,11 +523,18 @@ export const useOrderStore = defineStore('order', () => {
    * Start over on this screen. `pending` deliberately survives: pressing "New order" is not an
    * answer to "did that mutation apply?", and dropping the identity here would make it unknowable.
    */
-  function clear(): void {
+  async function clear(): Promise<void> {
     order.value = undefined;
     conflict.value = undefined;
     lastError.value = undefined;
     readError.value = undefined;
+
+    // The pointer goes; the cached snapshot and any pending row stay. Only the pointer was ever
+    // about this screen — `pruneOrders` collects the snapshot once nothing refers to it any more.
+    const terminalId = activeTerminalId.value;
+    if (terminalId !== undefined) {
+      await localStore.clearCurrentOrder(terminalId);
+    }
   }
 
   return {
@@ -449,6 +545,7 @@ export const useOrderStore = defineStore('order', () => {
     pending,
     blocked,
     useTerminal,
+    hydrate,
     version,
     syncing,
     adopt,

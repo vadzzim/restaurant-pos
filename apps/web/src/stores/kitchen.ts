@@ -3,12 +3,14 @@ import type {
   DomainEvent,
   KitchenTicket,
   KitchenTicketState,
+  MutationType,
 } from '@pos/contracts';
 import { KITCHEN_TERMINAL_ID } from '@pos/contracts';
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 
 import { fetchTickets, postKitchenCommand } from '../api/client';
+import { localStore } from '../persistence/local-store';
 import { createCoalescingLoader } from '../realtime/coalescing-loader';
 
 /** What the socket told us to expect, so a lagging projection can be waited out. */
@@ -89,6 +91,29 @@ export interface KitchenCommandIdentity {
   command: KitchenCommand;
   mutationId: string;
   baseVersion: number;
+}
+
+/**
+ * A kitchen command is a real mutation (§5), and it is stored as one.
+ *
+ * The kitchen and the POS share a single `pendingMutations` table because M8 syncs a single queue:
+ * two tables would mean two sync engines and two places for §14.1's halt to be implemented. So the
+ * rail's `'preparing' | 'ready'` — a label for a button — is translated to and from the mutation
+ * type at the storage boundary and nowhere else.
+ */
+const MUTATION_TYPE_BY_COMMAND = {
+  preparing: 'START_PREPARING',
+  ready: 'MARK_READY',
+} as const satisfies Record<KitchenCommand, MutationType>;
+
+export const mutationTypeFor = (command: KitchenCommand): MutationType =>
+  MUTATION_TYPE_BY_COMMAND[command];
+
+export function commandFor(type: MutationType): KitchenCommand | undefined {
+  if (type === 'START_PREPARING') {
+    return 'preparing';
+  }
+  return type === 'MARK_READY' ? 'ready' : undefined;
 }
 
 /** The kitchen screen reads the projection (§12.1, §16), never the `orders` aggregate. */
@@ -182,13 +207,77 @@ export const useKitchenStore = defineStore('kitchen', () => {
    * that, which is why it is a deliberate action. The projection is the tiebreaker: whatever the
    * next read shows is what happened.
    */
-  function discard(orderId: string): void {
+  async function discard(orderId: string): Promise<void> {
+    const held = pendingByOrder.value.get(orderId);
     pendingByOrder.value.delete(orderId);
     commandError.value = undefined;
+
+    if (held !== undefined) {
+      await localStore.deletePending(held.mutationId);
+    }
+  }
+
+  /**
+   * Restore this rail's unresolved commands after a reload.
+   *
+   * **Filtered by restaurant, and that filter is load-bearing.** Every kitchen row carries the
+   * same `terminalId` — there is one display id and every restaurant shares it — so reading by
+   * terminal alone would put restaurant A's commands on B's rail. Retrying one would then send a
+   * cross-tenant mutation that the server would rightly refuse, while the screen insisted the
+   * ticket was its own.
+   *
+   * Like the POS's `hydrate`, this is a second writer: it re-checks its claim after the await, and
+   * it fills only slots that are still empty — a command sent since hydration began is the more
+   * recent intent.
+   */
+  async function hydrateCommands(forRestaurantId: string): Promise<void> {
+    restaurantId = forRestaurantId;
+
+    const rows = await localStore.readPendingForTerminalInRestaurant(
+      KITCHEN_TERMINAL_ID,
+      forRestaurantId,
+    );
+
+    if (restaurantId !== forRestaurantId) {
+      return;
+    }
+
+    for (const row of rows) {
+      const command = commandFor(row.type);
+      // A row for some other mutation type is not this screen's to resolve. It cannot happen
+      // today — only the two transitions are stored under the kitchen terminal — and dropping it
+      // silently is still right: the POS's queue owns everything else.
+      if (command === undefined || pendingByOrder.value.has(row.orderId)) {
+        continue;
+      }
+
+      // The stored `mutationId` and `baseVersion`, unchanged. A fresh id here would send a second
+      // command at a stale version instead of the §9 repeat that resolves the first.
+      pendingByOrder.value.set(row.orderId, {
+        orderId: row.orderId,
+        restaurantId: row.restaurantId,
+        command,
+        mutationId: row.mutationId,
+        baseVersion: row.baseVersion,
+      });
+    }
   }
 
   async function dispatch(identity: KitchenCommandIdentity): Promise<void> {
     pendingByOrder.value.set(identity.orderId, identity);
+
+    // Durable before it is attempted, for the same reason as the POS: the window this covers is
+    // the one where the tab dies with no answer.
+    await localStore.savePending({
+      mutationId: identity.mutationId,
+      restaurantId: identity.restaurantId,
+      terminalId: KITCHEN_TERMINAL_ID,
+      orderId: identity.orderId,
+      baseVersion: identity.baseVersion,
+      type: mutationTypeFor(identity.command),
+      payload: {},
+      status: 'SYNCING',
+    });
 
     let response;
     try {
@@ -199,13 +288,16 @@ export const useKitchenStore = defineStore('kitchen', () => {
         baseVersion: identity.baseVersion,
       });
     } catch (error) {
-      // The identity deliberately survives: the command may well have been applied.
+      // The identity deliberately survives, in memory and on disk: the command may well have been
+      // applied, and the id is the only thing that can still settle it under §9.
+      await localStore.setPendingStatus(identity.mutationId, 'PENDING');
       commandError.value = error instanceof Error ? error.message : 'The command failed.';
       return;
     }
 
     // The server answered, so this command's fate is known however it turned out.
     pendingByOrder.value.delete(identity.orderId);
+    await localStore.deletePending(identity.mutationId);
     commandError.value = undefined;
 
     switch (response.status) {
@@ -234,6 +326,7 @@ export const useKitchenStore = defineStore('kitchen', () => {
     conflictByOrder,
     commandError,
     load,
+    hydrateCommands,
     command,
     retry,
     discard,

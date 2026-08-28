@@ -37,6 +37,7 @@ What was evaluated and why it was rejected.
 | `005-transactional-outbox.md` | M5 | the dual-write problem, and ordering within a partition |
 | `012-kitchen-command-base-version.md` | M5 | commanding from an eventually consistent projection |
 | `011-health-and-degradation.md` | M6 | why readiness ignores the broker, and why the worker waits |
+| `013-client-persistence.md` | M7 | the three Dexie tables, and who may write them at hydration |
 | `002-offline-first.md` | M8 | including why a conflict halts the queue |
 | `010-db-outbox-retries.md` | M9 | why retries live in Postgres and not in BullMQ |
 | `008-feature-flags.md` | M13 | why the flag gates transport, not the write path |

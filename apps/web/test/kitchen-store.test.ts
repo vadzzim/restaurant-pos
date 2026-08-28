@@ -174,7 +174,7 @@ describe('a kitchen command with no answer', () => {
     await kitchen.command('order-a', 'preparing');
     expect(kitchen.pendingByOrder.has('order-a')).toBe(true);
 
-    kitchen.discard('order-a');
+    await kitchen.discard('order-a');
 
     expect(kitchen.pendingByOrder.has('order-a')).toBe(false);
     expect(kitchen.commandError).toBeUndefined();

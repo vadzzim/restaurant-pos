@@ -5,6 +5,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 
 import StateBadge from '../components/StateBadge.vue';
+import { persistenceError } from '../persistence/local-store';
 import { useConnectionStore } from '../stores/connection';
 import { useMenuStore } from '../stores/menu';
 import { useOrderStore } from '../stores/order';
@@ -46,6 +47,11 @@ async function start(): Promise<void> {
   // The store is a singleton and the terminal is a route parameter, so it has to be told which
   // terminal's screen this is: only that terminal's unresolved mutation may be shown or retried.
   orders.useTerminal(terminalId.value);
+
+  // Before anything reads the network. Hydration is the only writer that must not lose a race
+  // against a refetch, and the cheapest way to keep it honest is to let it run first — its own
+  // guards then cover the case where it does not (a slow IndexedDB, a terminal switched mid-read).
+  await orders.hydrate(terminalId.value);
 
   await menu.load();
   await connection.start({
@@ -134,13 +140,13 @@ const cancel = (): Promise<void> =>
 onMounted(start);
 onBeforeUnmount(() => {
   connection.stop();
-  orders.clear();
+  void orders.clear();
 });
 
 // Switching terminals in the URL is switching restaurants: rebuild the whole connection.
 watch(terminalId, async () => {
   connection.stop();
-  orders.clear();
+  void orders.clear();
   await start();
 });
 </script>
@@ -172,7 +178,17 @@ watch(terminalId, async () => {
       <StateBadge v-if="orders.syncing" label="SYNCING" tone="warn" />
       <StateBadge v-if="orders.pending" label="PENDING" tone="warn" />
       <StateBadge v-if="orders.readError" label="READ FAILED" tone="bad" />
+      <StateBadge v-if="persistenceError" label="NOT DURABLE" tone="bad" />
     </header>
+
+    <p
+      v-if="persistenceError"
+      class="rounded border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900"
+    >
+      <strong>This device is not storing anything locally.</strong>
+      {{ persistenceError }}. Commands still reach the server, but a reload will lose the order on
+      screen and — worse — the identity of any mutation that has no answer yet.
+    </p>
 
     <p
       v-if="orders.pending"

@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 
 import StateBadge from '../components/StateBadge.vue';
+import { persistenceError } from '../persistence/local-store';
 import { useConnectionStore } from '../stores/connection';
 import {
   expectationFor,
@@ -61,6 +62,10 @@ const send = (orderId: string, command: KitchenCommand): Promise<void> =>
 const retry = (orderId: string): Promise<void> => runFor(orderId, () => kitchen.retry(orderId));
 
 onMounted(async () => {
+  // The rail's unresolved commands come back before its tickets do: a ticket without its pending
+  // command would offer the operator the same button again, and pressing it would mint a second
+  // `mutationId` for a command that may already have applied.
+  await kitchen.hydrateCommands(restaurantId.value);
   await kitchen.load(restaurantId.value);
   await connection.start({
     restaurantId: restaurantId.value,
@@ -98,7 +103,17 @@ onBeforeUnmount(() => {
       <StateBadge :label="connection.transport" :tone="connection.pushEnabled ? 'ok' : 'warn'" />
       <StateBadge v-if="kitchen.lagging" label="PROJECTION LAG" tone="warn" />
       <StateBadge v-if="kitchen.loadError" label="READ FAILED" tone="bad" />
+      <StateBadge v-if="persistenceError" label="NOT DURABLE" tone="bad" />
     </header>
+
+    <p
+      v-if="persistenceError"
+      class="rounded border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900"
+    >
+      <strong>This display is not storing anything locally.</strong>
+      {{ persistenceError }}. Commands still reach the server, but a reload will lose the identity
+      of any command that has no answer yet.
+    </p>
 
     <p
       v-if="kitchen.loadError"
