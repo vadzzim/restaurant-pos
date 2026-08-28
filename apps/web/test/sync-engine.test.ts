@@ -2,6 +2,7 @@ import type { MutationRequest, MutationResponse, OrderSnapshot } from '@pos/cont
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { OfflineError } from '../src/api/offline';
+import { db } from '../src/persistence/db';
 import { localStore } from '../src/persistence/local-store';
 import { createSyncEngine } from '../src/sync/engine';
 
@@ -106,6 +107,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe('§21.7 — offline queue ordering', () => {
@@ -211,6 +213,37 @@ describe('§21.8 — a conflict halts the queue for that order and only that ord
     expect(post).toHaveBeenCalledTimes(1);
   });
 
+  it('blocks only the followers of the terminal that conflicted', async () => {
+    // The database is shared by every tab on the origin, so two terminals can hold queued
+    // mutations for one order. The order is the consistency boundary on the server; a queue
+    // belongs to the device that formed it.
+    await queueMutation('a', 'order-1', 5, '2026-08-28T10:00:00.000Z');
+    await queueMutation('b', 'order-1', 6, '2026-08-28T10:00:01.000Z');
+    vi.setSystemTime(new Date('2026-08-28T10:00:02.000Z'));
+    await localStore.savePending({
+      mutationId: 'other-terminal',
+      restaurantId: 'demo-restaurant',
+      terminalId: 'pos-2',
+      orderId: 'order-1',
+      baseVersion: 6,
+      type: 'ADD_ITEM',
+      payload: { productId: 'burger', quantity: 1 },
+      status: 'PENDING',
+    });
+
+    const { post, engine } = harness();
+    post.mockResolvedValueOnce(conflicted('order-1', 5, 6));
+    await engine.run('pos-1');
+
+    // pos-2 had no conflict of its own, and could not resolve one: its Discard and Rebase act on
+    // rows it does not own.
+    expect((await localStore.readQueue('pos-2'))[0]?.status).toBe('PENDING');
+    expect((await localStore.readQueue('pos-1')).map((row) => row.status)).toEqual([
+      'CONFLICT',
+      'BLOCKED',
+    ]);
+  });
+
   it('halts on MUTATION_ID_REUSED too, because it is not retryable either', async () => {
     await queueMutation('a', 'order-1', 5, '2026-08-28T10:00:00.000Z');
     await queueMutation('b', 'order-1', 6, '2026-08-28T10:00:01.000Z');
@@ -262,6 +295,25 @@ describe('§14.1 resolutions', () => {
     expect(rebased.map((request) => request.mutationId)).toEqual(['rebased-1', 'rebased-2']);
     expect(rebased.map((request) => request.baseVersion)).toEqual([9, 10]);
     expect(await localStore.readQueue('pos-1')).toEqual([]);
+  });
+
+  it('does not send a re-issued mutation whose swap never committed', async () => {
+    await queueMutation('a', 'order-1', 5, '2026-08-28T10:00:00.000Z');
+
+    const { post, engine } = harness(9);
+    post.mockResolvedValueOnce(conflicted('order-1', 5, 9));
+    await engine.run('pos-1');
+
+    vi.spyOn(db.pendingMutations, 'put').mockRejectedValueOnce(new Error('QuotaExceededError'));
+    expect(await engine.rebase('pos-1', 'order-1')).toBe('failed');
+
+    // Posting a replacement that was never stored would leave the old CONFLICT row on disk, so a
+    // later reload could rebase the same intent again under yet another fresh id — one intent,
+    // applied twice. The transaction is atomic, so the halted group is exactly as it was.
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(
+      (await localStore.readQueue('pos-1')).map((row) => [row.mutationId, row.status]),
+    ).toEqual([['a', 'CONFLICT']]);
   });
 
   it('rebase stops on a second conflict and leaves the rest blocked', async () => {

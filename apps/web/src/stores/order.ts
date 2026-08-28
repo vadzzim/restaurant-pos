@@ -212,7 +212,12 @@ export const useOrderStore = defineStore('order', () => {
     onCanonical: async (terminalId, snapshot) => {
       // Cached unconditionally: the answer is true whatever the screen is showing, and it is keyed
       // by the terminal that asked, which may no longer be the terminal on screen.
-      await localStore.saveOrder(terminalId, snapshot);
+      //
+      // **`cacheOrder`, not `saveOrder`.** The engine drains every order this terminal queued,
+      // including ones the screen left, and an answer for one of those says nothing about which
+      // order the device is on. Moving the pointer here would send the next reload to an order the
+      // operator finished and strand the one they are ringing up.
+      await localStore.cacheOrder(terminalId, snapshot);
 
       // Displayed only if this screen is the one that asked, and is still on that order.
       if (terminalId === activeTerminalId.value && currentOrderId.value === snapshot.id) {

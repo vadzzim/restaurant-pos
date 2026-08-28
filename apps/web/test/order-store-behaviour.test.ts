@@ -169,6 +169,41 @@ describe('§14.1 on the screen', () => {
     expect(orders.projected?.version).toBe(6);
   });
 
+  it('does not move the durable pointer when a background order is answered', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+
+    // The operator is on order B, which is fully synced.
+    postMutationMock.mockImplementationOnce((orderId) =>
+      Promise.resolve({ status: 'APPLIED', order: snapshot(orderId, 1), serverVersion: 1 }),
+    );
+    await orders.createOrder('pos-1', 'demo-restaurant', '14');
+    const onScreen = orders.currentOrderId;
+
+    // They step back to an older order A, queue a mutation there that gets no answer, and return
+    // to B. A's queue keeps draining in the background — that is what per-aggregate buys.
+    fetchOrderMock.mockResolvedValueOnce(snapshot('order-a', 3));
+    await orders.focusOrder('order-a');
+    postMutationMock.mockRejectedValueOnce(new Error('network down'));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+
+    fetchOrderMock.mockResolvedValueOnce(snapshot(onScreen ?? '', 1));
+    await orders.focusOrder(onScreen ?? '');
+
+    postMutationMock.mockImplementationOnce((orderId) =>
+      Promise.resolve({ status: 'APPLIED', order: snapshot(orderId, 4), serverVersion: 4 }),
+    );
+    await orders.sync();
+
+    // A's answer is a fact about A and nothing else. Moving the pointer with it would send the
+    // next reload to the order the operator finished, and strand the one they are ringing up.
+    const restored = await localStore.readTerminalState('pos-1');
+    expect(restored.currentOrderId).toBe(onScreen);
+    expect(orders.currentOrderId).toBe(onScreen);
+    // A is still cached, just not pointed at.
+    expect((await localStore.readOrder('order-a'))?.version).toBe(4);
+  });
+
   it('keeps a halt reachable after the screen has moved to another order', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');

@@ -898,3 +898,50 @@ from.
 its transactions on real timers — every engine test timed out. `vi.useFakeTimers({ toFake: ['Date'] })`
 is what gives the queue distinct, controlled `createdAt` values without freezing the database the
 tests exist to run against.
+
+## M8 review round 1 — three P1s, all in the seams the queue opened
+
+A Codex pass over `8f72739` found five things. The three P1s are fixed here; the two P2s are in
+`PROGRESS.md` under Known problems with the fix each needs.
+
+**P1 — the background answer moved the durable pointer.** This is the same shape as the finding
+that opened this session, one milestone later. In the M7 review I established that `saveOrder`
+moves `syncMetadata.currentOrderId` even when it refuses the snapshot, and the reasoning was
+sound _for the callers that existed_: two answers for the same order, the stale one still evidence
+that the terminal is working on it. M8 then gave that function a new caller — a sync engine that
+answers for every order the terminal ever queued, including ones the screen left — and the rule
+came along without its precondition. Order A finishing in the background moved the pointer off
+order B, and the next reload came back to the wrong till.
+
+The fix splits the write rather than adding a flag: `cacheOrder` writes the snapshot,
+`saveOrder` writes the snapshot and the pointer, and the monotonic comparison lives in one
+`putSnapshotIfNewer` that both call inside their own transaction. The pointer now belongs to the
+three actions that move the screen, plus a caller that has just read the order on screen.
+
+**The lesson, and it is the same one twice.** M7's review round 2 was "the write moved and the rule
+did not". This is "the rule stayed and its caller changed". Both are a conditional invariant whose
+condition is written only in a comment. The habit that would have caught it: when a function gains
+a caller of a _kind_ it did not have before — here, one with no screen behind it — re-read every
+"because" in its doc comment and ask whether the new caller satisfies it. Two of the four sentences
+in `saveOrder`'s comment silently assumed a screen.
+
+**P1 — the halt blocked another terminal's rows.** `haltQueue` selected followers by `orderId`
+alone. Two tabs on one origin share the database, and two terminals can hold queued mutations for
+one order, so a conflict on POS-1 marked POS-2's later rows `BLOCKED` — halting a terminal that had
+no conflict of its own and could not resolve one, because its Discard and Rebase act on rows it
+does not own. The rest of the queue is strictly per terminal; this predicate was the one place that
+forgot. The order is the consistency boundary on the _server_; a queue belongs to the device.
+
+**P1 — a re-issued mutation was sent even when its swap had not committed.** `reissue` returned the
+synthetic row unconditionally, and `guarded` had already swallowed the failure. The old `CONFLICT`
+row then survives, so a later reload and rebase re-issues the same intent under yet another fresh
+id: one intent applied twice, which is the exact failure a stable `mutationId` exists to prevent.
+It now returns `undefined` and the rebase loop stops. This is the second place in M8 where
+`guarded`'s neutral value is not neutral — `savePending` was the first — and both were found by
+asking what the caller does with a write that silently did not happen.
+
+All three regression tests were checked by reverting each fix and watching them fail. The pointer
+one needed rewriting to do so: the first version let the current order's own answer land last and
+put the pointer back, which hid the bug. The sequence that exposes it is the one the operator
+actually performs — step back to an older order, queue something there, return to the current one,
+and let the background drain.

@@ -74,7 +74,20 @@ old id there would be answered `ALREADY_APPLIED` for something that never applie
 leaving the row `PENDING` would spin; and for a reused id, rebase is exactly the right resolution,
 because it mints the fresh id the server objected to the absence of.
 
-### 4. The send gate is derived, not read
+### 4. The pointer is written by the screen, the cache by anyone
+
+`syncMetadata.currentOrderId` answers "which order is this device on", so only the actions that
+move the screen write it — `createOrder`, `focusOrder`, `clearCurrentOrder`, and `saveOrder` on
+behalf of a caller that has just read the order on screen. The sync engine caches through
+`cacheOrder`, which writes the snapshot and leaves the pointer alone.
+
+This is the correction the first review round of M8 forced. The engine drains every order the
+terminal queued, so it answers for orders the screen left long ago; a cache write that also moved
+the pointer sent the next reload to the order the operator had finished and stranded the one they
+were ringing up. The rule "the pointer moves even when the snapshot is refused" is still right, and
+its scope is a pair of answers for the _same_ order — not any answer at all.
+
+### 5. The send gate is derived, not read
 
 A group of queued mutations may be sent only when **every** row in it is `PENDING` or `SYNCING`.
 The `CONFLICT`/`BLOCKED` labels are written in one transaction, but the gate does not depend on
@@ -82,14 +95,14 @@ that transaction having completed: a crash mid-halt, or a rebase that stopped pa
 a group the derivation still refuses. The labels are what the operator reads; the derivation is
 what the engine obeys.
 
-### 5. `SYNCING` is not durable state
+### 6. `SYNCING` is not durable state
 
 It means "this tab, right now". A crash between marking a row and its request leaving would
 otherwise leave a mutation the next pass believes somebody else is attempting, so hydration
 rewrites every `SYNCING` row for that terminal back to `PENDING` before the first pass. Re-sending
 a mutation that did apply is safe — that is what the stable `mutationId` is for.
 
-### 6. `Simulate Offline` intercepts in the API client, per terminal, on reads as well as writes
+### 7. `Simulate Offline` intercepts in the API client, per terminal, on reads as well as writes
 
 Not in the stores, which would grow a second code path for a demo control, and not via DevTools,
 which §14 rules out because the demo has to be deterministic. Reads are cut off too: §19.3 depends

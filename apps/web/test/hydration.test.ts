@@ -164,10 +164,16 @@ describe('a reload keeps the order and the identity of what was in flight', () =
     release(applied(4));
     await sending;
 
-    // The answer belongs to pos-1 and is cached for pos-1. Keying it by the screen would put
-    // another tenant's order behind pos-3's pointer.
-    expect((await localStore.readTerminalState('pos-1')).order?.version).toBe(4);
+    // The answer belongs to pos-1 and is cached under pos-1. Keying it by the screen would put
+    // another tenant's order into pos-3's cache.
+    const cached = await db.orders.get('order-a');
+    expect(cached?.snapshot.version).toBe(4);
+    expect(cached?.terminalId).toBe('pos-1');
+
+    // And no pointer moved. The engine caches; only an action that moves the screen moves the
+    // pointer, so pos-3 is not sent to another restaurant's order by the next reload.
     expect((await localStore.readTerminalState('pos-3')).order).toBeUndefined();
+    expect(await db.syncMetadata.get('pos-3')).toBeUndefined();
   });
 
   it('puts a SYNCING row back to PENDING, because that label means "this tab, right now"', async () => {

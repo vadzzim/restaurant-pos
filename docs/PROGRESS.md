@@ -16,8 +16,9 @@ delay controls, §21.12, §21.13, §21.16. Model: **Opus**. Size: **L**.
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
-`2666d4a` and its second at `6349dce`, M8 in this commit. The tree passes typecheck, lint,
-build and **240 tests** (61 domain, 52 api, 22 worker, **105 web**) against a real PostgreSQL, plus
+`2666d4a` and its second at `6349dce`, M8 `8f72739` plus its first review round in this commit.
+The tree passes typecheck, lint,
+build and **243 tests** (61 domain, 52 api, 22 worker, **108 web**) against a real PostgreSQL, plus
 **one integration test** against a real Redpanda that runs only under `pnpm verify:integration`
 (re-run at the end of M8 and green; M8 changed no server file).
 **Twelve** of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1, 21.2,
@@ -197,6 +198,14 @@ build and **240 tests** (61 domain, 52 api, 22 worker, **105 web**) against a re
   half of the rule going missing when the write moved out of `adopt`. The **pointer** is not under
   the rule: `syncMetadata.currentOrderId` moves even when the snapshot is refused, because it says
   which order this device is on, not which version of it is newest.
+- **The pointer belongs to the actions that move the screen, and to nothing else.**
+  `createOrder`, `focusOrder` and `clearCurrentOrder` write it; `saveOrder` also writes it, and its
+  callers are the ones that have established the screen is on that order. The sync engine uses
+  **`cacheOrder`**, which writes the snapshot and not the pointer — it drains every order this
+  terminal queued, including ones the screen left, and an answer for one of those says nothing
+  about which order the device is on. M8's first review round found exactly that: order A answered
+  in the background moved the pointer off the order B the operator was ringing up, and the next
+  reload came back to the wrong one.
 - **`hydrate` ends with a canonical read, and that belongs to the store, not the view.** The
   socket's `onConnected` refetch does not run when `realtime.websocket_push` is off or
   `GET /api/config` fails, so a view-level refresh would leave the cache on screen indefinitely on
@@ -410,6 +419,22 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **The client has no backoff and no automatic retry.** By design (ADR 002): the engine runs on
   explicit triggers so the demo is deterministic. A server that is down and a socket that never
   reconnects therefore leave the queue sitting until the operator presses **Sync now**.
+- **OPEN P2 — a permanent API error is retried like a transport outage.** `postMutation` throws
+  `ApiRequestError` for the §17 envelope, and the engine's catch cannot tell `PRODUCT_NOT_FOUND` or
+  `VALIDATION_FAILED` from a socket hang-up: the row goes back to `PENDING`, every later trigger
+  re-sends it, and the pass returns before the orders behind it are tried. The queue is not halted,
+  so the screen offers no Discard or Rebase either. **The fix** is to classify the envelope's
+  `ApiErrorCode` — the non-retryable ones halt the aggregate exactly as `MUTATION_ID_REUSED` does,
+  and only a genuine transport failure keeps the row `PENDING`. Reachable today only through a
+  malformed request or a deleted product; §18's `Duplicate Next Mutation` and friends (M12) will
+  make it easy to hit, so it should be closed before then.
+- **OPEN P2 — a terminal switch during a pass can leave the new terminal's queue undrained.**
+  `engine.run(newTerminal)` joins a pass already running for the old one and only sets the
+  coalescing flag, so every iteration keeps using the terminal the pass started with. Hydration of
+  the new screen can therefore finish without sending its queue, and with `realtime.websocket_push`
+  off there is no reconnect trigger to save it. **The fix** is to coalesce per terminal, or to carry
+  the newly requested terminal into the next iteration. Narrow — it needs the route to change
+  inside the window of a single pass — and **Sync now** recovers it.
 - **A poison message on the realtime topic is lost to that consumer group permanently.** A
   consumer-side dead-letter topic is the real answer and is not built. The publish side already
   dead-letters through `outbox_events`.

@@ -65,6 +65,33 @@ async function guarded<T>(what: string, run: () => Promise<T>, fallback: T): Pro
 const now = (): string => new Date().toISOString();
 
 /**
+ * The monotonic half of a cache write, shared by `saveOrder` and `cacheOrder` so the rule has one
+ * home here as well as one home in `acceptsSnapshot`. **Must be called inside a transaction that
+ * holds `orders`** — the read and the compare are only sound under the same lock as the write.
+ */
+async function putSnapshotIfNewer(
+  terminalId: string,
+  snapshot: OrderSnapshot,
+  updatedAt: string,
+): Promise<void> {
+  // Read by the incoming id, so `acceptsSnapshot`'s "a different order is always accepted" branch
+  // cannot fire here: what is left of the rule is the version comparison, which is exactly the
+  // half a cache needs.
+  const held = await db.orders.get(snapshot.id);
+  if (!acceptsSnapshot(held?.snapshot, snapshot)) {
+    return;
+  }
+
+  const record: PersistedOrderRecord = {
+    id: snapshot.id,
+    terminalId,
+    snapshot: plain(snapshot),
+    updatedAt,
+  };
+  await db.orders.put(record);
+}
+
+/**
  * Queue order is `createdAt`, with `mutationId` as a tiebreak so two intents formed in the same
  * millisecond still have a total order — without it a "later than the head" filter could match
  * both of them, or neither.
@@ -92,10 +119,12 @@ export const localStore = {
    * taken **inside** the transaction: a caller that read the stored version and then wrote in a
    * second call would only move the same race down one level.
    *
-   * The pointer moves either way. It records which order this device is on, not which version of
-   * it is newest, and that is equally true of the stale answer — both callers were working on this
-   * order when they asked. Refusing to move it would leave a terminal pointed at nothing, or at
-   * the order before this one, because two answers arrived in an unlucky order.
+   * The pointer moves either way — **but only because this caller has established that the screen
+   * is on this order.** Between two answers for the *same* order, the stale one is still evidence
+   * that the terminal is working on it, so refusing to move the pointer would leave a terminal
+   * pointed at nothing because two answers arrived in an unlucky sequence. That reasoning does not
+   * extend to an answer for an order the screen has left, which is why the sync engine uses
+   * `cacheOrder` instead: see the note there.
    */
   async saveOrder(terminalId: string, snapshot: OrderSnapshot): Promise<void> {
     await guarded(
@@ -103,26 +132,38 @@ export const localStore = {
       () =>
         db.transaction('rw', db.orders, db.syncMetadata, async () => {
           const updatedAt = now();
-          // Read by the incoming id, so `acceptsSnapshot`'s "a different order is always accepted"
-          // branch cannot fire here: what is left of the rule is the version comparison, which is
-          // exactly the half a cache needs.
-          const held = await db.orders.get(snapshot.id);
-
-          if (acceptsSnapshot(held?.snapshot, snapshot)) {
-            const record: PersistedOrderRecord = {
-              id: snapshot.id,
-              terminalId,
-              snapshot: plain(snapshot),
-              updatedAt,
-            };
-            await db.orders.put(record);
-          }
-
+          await putSnapshotIfNewer(terminalId, snapshot, updatedAt);
           await db.syncMetadata.put({
             terminalId,
             currentOrderId: snapshot.id,
             updatedAt,
           });
+        }),
+      undefined,
+    );
+  },
+
+  /**
+   * Cache a canonical snapshot **without saying anything about which order the terminal is on.**
+   *
+   * The sync engine drains every order this terminal queued, including ones the screen left long
+   * ago — that is what "the halt is per aggregate" buys. An answer for one of those is a fact
+   * about the order and nothing else. Writing the pointer with it moves `currentOrderId` to an
+   * order nobody is looking at, and the next reload hydrates that one instead: the operator comes
+   * back to a till showing an order they finished, while the one they were ringing up is reachable
+   * only through the halted-elsewhere list — or, if it is still only queued and the device is
+   * offline, not at all.
+   *
+   * The pointer therefore belongs to the three actions that actually move the screen —
+   * `createOrder`, `focusOrder` and `clearCurrentOrder` — plus `saveOrder`, whose caller has just
+   * read the order the screen is on.
+   */
+  async cacheOrder(terminalId: string, snapshot: OrderSnapshot): Promise<void> {
+    await guarded(
+      'Caching the order',
+      () =>
+        db.transaction('rw', db.orders, async () => {
+          await putSnapshotIfNewer(terminalId, snapshot, now());
         }),
       undefined,
     );
@@ -302,6 +343,12 @@ export const localStore = {
    *
    * "After it" is by `createdAt`, the queue's own order, with `mutationId` as a tiebreak so two
    * intents formed in the same millisecond still have a total order.
+   *
+   * **And by the same terminal.** This database is shared by every tab on the origin, so two
+   * terminals can hold queued mutations for one order — the order is the consistency boundary on
+   * the *server*, but a queue belongs to the device that formed it. Blocking by `orderId` alone
+   * halts a terminal that had no conflict of its own and cannot resolve one: its Discard and
+   * Rebase act on rows it does not own.
    */
   async haltQueue(head: PendingMutationRecord): Promise<void> {
     await guarded(
@@ -312,7 +359,7 @@ export const localStore = {
           await db.pendingMutations
             .where('orderId')
             .equals(head.orderId)
-            .filter((row) => isLaterInQueue(row, head))
+            .filter((row) => row.terminalId === head.terminalId && isLaterInQueue(row, head))
             .modify({ status: 'BLOCKED' });
         }),
       undefined,
@@ -356,12 +403,19 @@ export const localStore = {
    *
    * **`createdAt` is carried over.** The re-issued mutation is still in front of the ones it is
    * blocking; moving it to the back of the queue would reorder the operator's actions.
+   *
+   * **Returns `undefined` when the swap did not commit**, and the caller must then not send it.
+   * This is the second place in M8 where `guarded`'s neutral value is not neutral: the old
+   * `CONFLICT` row is still on disk, so posting a replacement that was never stored would let a
+   * later reload rebase the same intent again under yet another fresh id — the same intent applied
+   * twice, which is precisely what a stable `mutationId` exists to prevent. Dexie's transaction is
+   * atomic, so a failure leaves the halted group exactly as it was and the operator can try again.
    */
   async reissue(
     previous: PendingMutationRecord,
     mutationId: string,
     baseVersion: number,
-  ): Promise<PendingMutationRecord> {
+  ): Promise<PendingMutationRecord | undefined> {
     const reissued: PendingMutationRecord = {
       ...previous,
       payload: plain(previous.payload),
@@ -370,17 +424,17 @@ export const localStore = {
       status: 'PENDING',
     };
 
-    await guarded(
+    return guarded(
       'Re-issuing the mutation',
-      () =>
-        db.transaction('rw', db.pendingMutations, async () => {
+      async () => {
+        await db.transaction('rw', db.pendingMutations, async () => {
           await db.pendingMutations.put(reissued);
           await db.pendingMutations.delete(previous.mutationId);
-        }),
+        });
+        return reissued;
+      },
       undefined,
     );
-
-    return reissued;
   },
 
   /**
