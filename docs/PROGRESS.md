@@ -8,8 +8,9 @@
 **Last completed milestone:** M10 — the BullMQ print job: a fake printer that fails on demand and
 honours an idempotency key, `print_jobs` written by the *processor*, `ticket_hash` deduplicating the
 record, bounded backoff and a dead-letter state owned by BullMQ, and a reconciliation sweep that
-reads `kitchen_tickets` and repairs every way an enqueue can be lost. Plus three review rounds (four
-findings fixed; a fifth was investigated and rejected — see `build-log.md`).
+reads `kitchen_tickets` and repairs every way an enqueue can be lost. Plus **three review rounds
+and a clean fourth report**: findings 2 → 2 → 2 → 0, of which five were fixed and one was
+investigated and rejected (`build-log.md`, round 3).
 **The entire order lifecycle is demoable end to end, a broker outage is demoable, reloading the tab
 mid-order is demoable, §19.2, §19.3 and now §19.9 are demoable, and the publisher and the printer
 can both be driven from a terminal — the buttons for them are M12's.**
@@ -21,8 +22,8 @@ M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, 
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
 `2666d4a` and its second at `6349dce`, M8 `8f72739` plus two review rounds through `5414676`,
-M9 `ed9a0b7` plus its review round at `4718bc4`, M10 `5909867` plus review rounds at `5e1a6d7`,
-`00c5925` and this commit.
+M9 `ed9a0b7` plus its review round at `4718bc4`, M10 `5909867` plus three review rounds at
+`5e1a6d7`, `00c5925` and `4107966`, and this documentation commit.
 The tree passes typecheck, lint,
 build and **286 tests** (61 domain, **57 api**, **55 worker**, 113 web) against a real PostgreSQL,
 plus **three integration tests** that run only under `pnpm verify:integration` — two against a real
@@ -30,6 +31,27 @@ Redpanda (§21.12's round trip and §21.13's offset window) and one new one agai
 a real BullMQ worker. All green at the end of M10.
 **All sixteen** mandatory §21 tests now exist and are named by their spec number: 21.1, 21.2, 21.3,
 21.4, 21.5, 21.6, 21.7, 21.8, 21.9, 21.10, 21.11, 21.12, 21.13, **21.14**, 21.15, 21.16.
+
+### M10's three review rounds, in one place
+
+Every one of them was about a **wait nobody was watching**, and each was opened by the previous
+one's fix — the seventh milestone in a row where that has been true.
+
+| Round | Finding | Where the rule was attached wrongly |
+|-------|---------|-------------------------------------|
+| 1 | `maxRetriesPerRequest: null` on the queue's *producer* connection meant an `add` that never settles, inside `eachMessage` — a soft dependency able to stop the kitchen | one helper built both connections, so BullMQ's requirement for the connection its **worker blocks on** landed on the one a **consumer awaits** |
+| 1 | the Compose `app` profile pointed `PRINTER_URL` at `localhost`, which inside that container is the worker | a default that is right for `pnpm dev` and wrong everywhere else, and no test starts that profile |
+| 2 | the abandoned `add` still held the ticket: BullMQ waits inside `waitUntilReady`, one retained job per event for the length of the outage | **a timeout is a statement about the caller, never about the callee** |
+| 2 | shutdown could hang for ever — `close()` and `quit()` against an unreachable Redis wait rather than fail, so `closeDb()` and the exit were unreachable | round 1's own test already worked around it with `disconnect()` before `close()`, and that knowledge never travelled twenty lines |
+| 3 | `printer retry` was refused against a healthy Redis, *after* resetting the dead letter to `PENDING` | round 2's readiness guard was justified by "the worker connects at boot" — true of one caller, and the CLI is the other |
+| 3 | *(rejected)* force-close the print worker so BullMQ's duplicated connection cannot hang the shutdown | implemented, then reverted: two tests could not tell the fixed version from the unfixed one, because `Worker.close()` disconnects that socket locally before any `QUIT` |
+
+The honest line for the interview is not that the print job was right, but that **its one invariant —
+"Redis is soft, and nothing about printing may stop an order or a kitchen ticket" — was stated
+correctly in an ADR and attached to the wrong mechanism three times**, and that the fourth round
+returned nothing. The rejected finding is worth telling too: a fix whose test cannot distinguish it
+from its absence is a fix for something that is not happening, and removing it took out more risk
+than it left behind.
 
 ## What exists
 
@@ -473,6 +495,9 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   second half is newer: bounding it needed *two* guards, because a connection that broke and a
   connection that was never ready fail at different layers — and the obvious single fix covers only
   the first.
+- **M10: 2 → 2 → 2 → 0, the second cycle in this repository to converge to a clean report.** The
+  table under **Current state** has all six findings; the shared shape is that every one was a wait
+  nobody was watching, in a milestone whose ADR is about a dependency being soft.
 - **Round 3 broke the streak in a useful way: one finding was real and one was not.** The real one
   was round 2's own fix applied to a caller it was not written for. The other — force-close BullMQ's
   worker so its duplicated connection cannot hang the shutdown — was implemented, then tested, and
