@@ -11,7 +11,12 @@ import { createPrintQueue } from '../src/modules/printing/print-queue.js';
 import { startPrintWorker } from '../src/modules/printing/print-worker.js';
 import type { Printer } from '../src/modules/printing/printer-client.js';
 import { ticketHash, type PrintableTicket } from '../src/modules/printing/ticket-hash.js';
-import { BLOCKING_CONNECTION, connectRedis, producerConnection } from '../src/shared/redis.js';
+import {
+  BLOCKING_CONNECTION,
+  connectRedis,
+  producerConnection,
+  waitUntilReady,
+} from '../src/shared/redis.js';
 import { db, useTestDatabase } from './helpers.js';
 
 useTestDatabase();
@@ -91,8 +96,9 @@ describe('the print queue against a real Redis', () => {
 
     try {
       // The enqueue refuses a client that is not ready yet (review round 2), and this one was
-      // opened a line ago. The worker connects at boot, long before an event can arrive.
-      await queueRedis.ping();
+      // opened a line ago. The worker connects at boot, long before an event can arrive; a
+      // short-lived caller waits, exactly as the CLI does.
+      await waitUntilReady(queueRedis, config.PRINT_ENQUEUE_TIMEOUT_MS);
 
       await queue.enqueue(printable);
       await queue.enqueue(printable);

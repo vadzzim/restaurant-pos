@@ -4,7 +4,7 @@ import pino from 'pino';
 
 import { createPrintQueue } from '../src/modules/printing/print-queue.js';
 import { retryDeadLetteredTicket } from '../src/modules/printing/reconcile.js';
-import { connectRedis, producerConnection } from '../src/shared/redis.js';
+import { connectRedis, producerConnection, waitUntilReady } from '../src/shared/redis.js';
 import { settleWithin } from '../src/shared/timeout.js';
 
 /**
@@ -60,6 +60,12 @@ async function main(): Promise<void> {
         enqueueTimeoutMs: config.PRINT_ENQUEUE_TIMEOUT_MS,
       });
       try {
+        // Before anything is written. The enqueue refuses a client that is not ready yet, and this
+        // one was opened microseconds ago — without this wait the command would reset the row to
+        // PENDING against a healthy Redis and then report that it could not queue the job, leaving
+        // the ticket to the sweep. The worker needs no such wait: it connects at boot.
+        await waitUntilReady(redis, config.PRINT_ENQUEUE_TIMEOUT_MS);
+
         const result = await retryDeadLetteredTicket(db, queue, argument);
         process.stdout.write(`${RETRY_MESSAGES[result] ?? result}\n`);
       } finally {

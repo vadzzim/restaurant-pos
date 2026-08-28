@@ -1260,3 +1260,53 @@ behaviour is reporting a bug.
 `settleWithin` in `apps/worker/src/shared/timeout.ts` is now the one place that pattern lives —
 three call sites, the enqueue, the shutdown and the CLI — and it keeps the "attach a handler up
 front so an abandoned rejection is never unhandled" rule with it.
+
+## M10 review round 3 — one finding fixed, one investigated and rejected
+
+Two findings this round. The interesting outcome is that only one of them was real, and proving the
+other one wrong took longer than fixing the first.
+
+**P1 — `printer retry` fast-failed against a healthy Redis.** Round 2's rule is that `enqueue`
+refuses while the client is not `ready`, and the justification was written for a long-running
+process: the worker opens its connection at boot, so by the time a Kafka event arrives the client
+has been ready for seconds. The CLI has no such head start — it connects and enqueues microseconds
+apart — so `printer retry` would almost always be refused, **after** having reset the dead-lettered
+row to `PENDING`. The command reported failure, the ticket waited for the stale-row sweep, and
+§19.9's last step was broken by a guard written for a different caller.
+
+The fix separates the two lifetimes explicitly: `waitUntilReady` in `shared/redis.ts` for
+short-lived callers, the status check for long-lived ones, and the CLI waits **before** it writes
+anything, so an unreachable Redis leaves the row untouched. The general lesson is one this
+repository keeps relearning: a rule justified by "the caller will have connected by then" is a rule
+about _one_ caller, and it belongs where that assumption is checkable.
+
+**P2 — the duplicated blocking connection: investigated, does not reproduce.** The report was that
+`printWorker.close()` can overrun, because BullMQ duplicates the ioredis client it is given for its
+blocking commands, so disconnecting ours does not reach the duplicate; the suggested fix was a
+forced worker teardown. It is a good hypothesis — the duplicate is real (`worker.js` builds it with
+`.duplicate()`), it is `private` in the typings, and `Worker.close` memoises its promise, so a
+graceful attempt genuinely cannot be escalated afterwards.
+
+It does not happen, and the reason is two lines inside BullMQ. `close(false)` runs
+`whenCurrentJobsFinished(false)` first, and that calls `blockingConnection.disconnect(true)` — a
+**local** socket destroy, no Redis round trip — before anything sends a `QUIT`. By the time
+`blockingConnection.close(false)` reaches `_client.quit()`, that client is already at status `end`,
+so the call rejects immediately and BullMQ swallows it as a connection error. The duplicate is
+ended either way, and no reconnect timer survives to keep the process alive.
+
+This was checked rather than argued. A forced close was implemented first, and it needed two extra
+mechanisms to be safe — an in-flight counter to replace the graceful wait, and a `process.on
+('unhandledRejection')` guard, because disconnecting under an outstanding `BZPOPMIN` leaves a
+rejection with no owner. Then two tests were written to prove the fix was necessary, and **neither
+could tell the two versions apart**: not a Redis that was never reachable, and not one that stops
+answering mid-connection, which was simulated with a TCP proxy in front of the real Redis that
+keeps the sockets open and drops the bytes. Both close paths finished in milliseconds. The whole
+change was reverted: it was a forced teardown, an unhandled-rejection handler and an abandoned
+print attempt per restart, all to fix something that was not happening.
+
+What survives is one cheap unit test asserting the _property_ — closing the print worker finishes
+even when Redis was never reachable — because the mechanism belongs to BullMQ and may change. The
+ready-then-unreachable half of that property is **not** covered: the proxy that reproduces it also
+produces unhandled `Connection is closed.` rejections from the fault itself, which would make the
+suite red for a reason that has nothing to do with this code. That gap is recorded in
+`PROGRESS.md` rather than papered over with a test that ignores errors.

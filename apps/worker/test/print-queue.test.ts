@@ -5,14 +5,25 @@ import pino from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { createPrintQueue, type PrintQueue } from '../src/modules/printing/print-queue.js';
+import { startPrintWorker } from '../src/modules/printing/print-worker.js';
+import type { Printer } from '../src/modules/printing/printer-client.js';
 import type { PrintableTicket } from '../src/modules/printing/ticket-hash.js';
-import { connectRedis, producerConnection } from '../src/shared/redis.js';
+import {
+  BLOCKING_CONNECTION,
+  connectRedis,
+  producerConnection,
+  waitUntilReady,
+} from '../src/shared/redis.js';
+import { db, useTestDatabase } from './helpers.js';
+
+useTestDatabase();
 
 const logger = pino({ level: 'silent' });
 
 /**
- * A port nothing listens on, so every connection attempt is refused immediately. That makes these
- * unit tests rather than integration ones: they need no Redis, only the absence of one.
+ * A port nothing listens on, so every connection attempt is refused immediately: these tests need
+ * no Redis, only the absence of one. (They still use the test database, like every other suite
+ * here, because `startPrintWorker` takes one — it never reaches it.)
  */
 const UNREACHABLE_REDIS = 'redis://127.0.0.1:1';
 
@@ -97,5 +108,52 @@ describe('the print queue with Redis unreachable', () => {
     }
 
     expect(Date.now() - started).toBeLessThan(ENQUEUE_TIMEOUT_MS);
+  });
+});
+
+describe('waiting for a Redis that is not there', () => {
+  it('gives up within the bound instead of holding a command-line tool open', async () => {
+    const redis = connectRedis(
+      UNREACHABLE_REDIS,
+      producerConnection(ENQUEUE_TIMEOUT_MS),
+      'test',
+      logger,
+    );
+
+    try {
+      const started = Date.now();
+      await expect(waitUntilReady(redis, ENQUEUE_TIMEOUT_MS)).rejects.toThrow(/did not become/);
+      expect(Date.now() - started).toBeLessThan(ENQUEUE_TIMEOUT_MS * 10);
+    } finally {
+      redis.disconnect();
+    }
+  });
+});
+
+/**
+ * BullMQ's `Worker` duplicates the client it is given for its blocking commands, and that duplicate
+ * is not reachable from here: if closing the worker did not end it, its reconnect timers would keep
+ * the process alive after a deliberate shutdown. Review round 3 raised that; it holds today because
+ * `Worker.close()` disconnects the duplicate locally rather than sending it a `QUIT`. This asserts
+ * the property rather than the mechanism, because the mechanism is BullMQ's to change.
+ */
+describe('closing the print worker with Redis unreachable', () => {
+  it('finishes rather than waiting on a connection it cannot reach', async () => {
+    const redis = connectRedis(UNREACHABLE_REDIS, BLOCKING_CONNECTION, 'test', logger);
+    const printer: Printer = {
+      print: async () => {
+        throw new Error('the device is never reached in this test');
+      },
+    };
+    const worker = startPrintWorker(redis, db(), printer, logger, {
+      queueName: `print-unreachable-${randomUUID()}`,
+      maxAttempts: 3,
+    });
+
+    const started = Date.now();
+    await worker.close();
+    redis.disconnect();
+
+    expect(Date.now() - started).toBeLessThan(ENQUEUE_TIMEOUT_MS * 10);
   });
 });

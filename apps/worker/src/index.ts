@@ -199,6 +199,12 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
  * So every step is bounded, and the fallback is `disconnect()`: it is local and synchronous, it
  * closes the socket without asking Redis anything, and it is what the tests already had to do.
  * Sequential rather than concurrent, so one stalled step does not hide the next.
+ *
+ * BullMQ's worker duplicates the client it was given for its blocking commands, so dropping *our*
+ * two sockets does not reach that one — review round 3 raised it, and it turns out not to need
+ * anything here: `Worker.close()` disconnects that duplicate locally before it tries to `QUIT` it,
+ * so the first step below already ends it. The integration suite holds that property against a
+ * Redis that has stopped answering, because it is BullMQ's to change and not ours.
  */
 async function stopPrinting(): Promise<void> {
   const steps: [string, () => Promise<unknown>][] = [

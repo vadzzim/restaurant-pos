@@ -8,8 +8,8 @@
 **Last completed milestone:** M10 — the BullMQ print job: a fake printer that fails on demand and
 honours an idempotency key, `print_jobs` written by the *processor*, `ticket_hash` deduplicating the
 record, bounded backoff and a dead-letter state owned by BullMQ, and a reconciliation sweep that
-reads `kitchen_tickets` and repairs every way an enqueue can be lost. Plus two review rounds (one P1
-and one P2 each, all fixed).
+reads `kitchen_tickets` and repairs every way an enqueue can be lost. Plus three review rounds (four
+findings fixed; a fifth was investigated and rejected — see `build-log.md`).
 **The entire order lifecycle is demoable end to end, a broker outage is demoable, reloading the tab
 mid-order is demoable, §19.2, §19.3 and now §19.9 are demoable, and the publisher and the printer
 can both be driven from a terminal — the buttons for them are M12's.**
@@ -21,10 +21,10 @@ M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, 
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
 `2666d4a` and its second at `6349dce`, M8 `8f72739` plus two review rounds through `5414676`,
-M9 `ed9a0b7` plus its review round at `4718bc4`, M10 `5909867` plus its first review round at
-`5e1a6d7` and its second in this commit.
+M9 `ed9a0b7` plus its review round at `4718bc4`, M10 `5909867` plus review rounds at `5e1a6d7`,
+`00c5925` and this commit.
 The tree passes typecheck, lint,
-build and **284 tests** (61 domain, **57 api**, **53 worker**, 113 web) against a real PostgreSQL,
+build and **286 tests** (61 domain, **57 api**, **55 worker**, 113 web) against a real PostgreSQL,
 plus **three integration tests** that run only under `pnpm verify:integration` — two against a real
 Redpanda (§21.12's round trip and §21.13's offset window) and one new one against a real Redis and
 a real BullMQ worker. All green at the end of M10.
@@ -366,6 +366,16 @@ a real BullMQ worker. All green at the end of M10.
   before BullMQ reads it. None of them ends the connection, so the queue recovers on its own.
   **A timeout is a statement about the caller, not about the callee** — that is the round 2 lesson
   and it applies to anything else that walks away from work in this repository.
+- **That refusal is for long-lived callers only.** A process that connects at boot can refuse an
+  enqueue while the client is not ready, because by the time work arrives it will be. A short-lived
+  one — the `printer` CLI — connects and enqueues microseconds apart, so it calls
+  `waitUntilReady()` first, and **before** it writes anything: round 3 found `printer retry`
+  resetting a dead letter to `PENDING` and then failing to queue it against a healthy Redis.
+- **BullMQ's worker duplicates the Redis client it is given**, for its blocking commands, and that
+  duplicate is `private`. Shutdown depends on `Worker.close()` ending it — which it does, by
+  disconnecting it locally before any `QUIT` — and `Worker.close` memoises its promise, so a
+  graceful close can never be escalated to a forced one afterwards. Round 3 proposed forcing it;
+  the investigation is in `build-log.md` and the answer was no.
 - **Nothing in the print pipeline's shutdown may be unbounded.** `close()` and `quit()` against an
   unreachable Redis wait rather than fail, so `stopPrinting()` bounds every step by
   `PRINT_SHUTDOWN_TIMEOUT_MS` and then calls `disconnect()` — local and synchronous — on both
@@ -463,6 +473,15 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   second half is newer: bounding it needed *two* guards, because a connection that broke and a
   connection that was never ready fail at different layers — and the obvious single fix covers only
   the first.
+- **Round 3 broke the streak in a useful way: one finding was real and one was not.** The real one
+  was round 2's own fix applied to a caller it was not written for. The other — force-close BullMQ's
+  worker so its duplicated connection cannot hang the shutdown — was implemented, then tested, and
+  **neither of two tests could tell the fixed version from the unfixed one**, because BullMQ already
+  disconnects that socket locally before trying to `QUIT` it. It was reverted along with the
+  in-flight counter and the `unhandledRejection` guard it had needed. **A fix whose test cannot
+  distinguish it from its absence is a fix for something that is not happening** — and reverting it
+  removed more risk than it added, because the forced close abandoned an in-flight print on every
+  restart.
 - **Round 2 was opened by round 1's fix, as every round has been since M4.** The timeout freed the
   caller and left BullMQ holding a ticket per event for the length of the outage: **a timeout is a
   statement about the caller, never about the callee.** Its second finding is worse to have written
@@ -511,6 +530,11 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   command. The `jobId` is the ticket hash, so a late `add` is a no-op — but "the worker reported a
   failed enqueue" and "nothing was queued" are not the same statement, exactly as with the outbox's
   `sendWithinLease`.
+- **Shutdown against a Redis that has gone quiet mid-connection is not covered by a test.** The
+  never-reachable half is (`print-queue.test.ts`). Reproducing the other half needs a TCP proxy
+  that swallows bytes, and the fault itself produces unhandled `Connection is closed.` rejections
+  from ioredis, which would fail the suite for a reason unrelated to this code. The reasoning that
+  it is bounded is in `build-log.md`, round 3.
 - **A Redis outage is invisible until M11.** Nothing prints, the sweep logs a warning every
   `PRINT_RECONCILE_MS`, readiness stays green (ADR 014), and no screen says why.
 - Infrastructure URLs intentionally have development defaults. M14 production images must require

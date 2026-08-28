@@ -53,3 +53,38 @@ export function connectRedis(
   });
   return redis;
 }
+
+/**
+ * Waits for a freshly opened client to report `ready`, and rejects when it has not within the
+ * bound.
+ *
+ * This is for **short-lived** callers — the `printer` CLI — and deliberately not for the worker.
+ * A long-running process opens its connection at boot and can refuse an enqueue outright while the
+ * client is not ready, because by the time an event arrives it will be (and refusing keeps the
+ * consumer at full speed through an outage). A command-line tool has no such head start: it
+ * connects and enqueues microseconds apart, so refusing on status would fail against a perfectly
+ * healthy Redis. Review round 3 found `printer retry` doing exactly that.
+ */
+export async function waitUntilReady(redis: Redis, timeoutMs: number): Promise<void> {
+  if (redis.status === 'ready') {
+    return;
+  }
+
+  let onReady: (() => void) | undefined;
+  let timer: NodeJS.Timeout | undefined;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      onReady = resolve;
+      redis.once('ready', resolve);
+      timer = setTimeout(() => {
+        reject(new Error(`Redis did not become reachable within ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+  } finally {
+    clearTimeout(timer);
+    if (onReady !== undefined) {
+      redis.removeListener('ready', onReady);
+    }
+  }
+}
