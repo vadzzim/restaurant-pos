@@ -10,8 +10,8 @@ the §12.2 realtime consumer inside the API process, four read endpoints, and a 
 kitchen screen in Vue. **The project is demoable from here on.**
 **Next:** M5 — the remaining six mutation types and the full §8 conflict matrix. Model: Sonnet.
 
-M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` + the
-review fixes. The tree passes typecheck, lint, build and 82 tests (9 domain, 27 api, 11 worker,
+M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
+four review commits through `50d4ac7`. The tree passes typecheck, lint, build and 82 tests (9 domain, 27 api, 11 worker,
 35 web) against a real PostgreSQL. The seven mandatory M3 tests §21.1, 21.2, 21.3, 21.5, 21.6,
 21.11 and 21.15 are still present and named by their spec number.
 
@@ -85,6 +85,11 @@ review fixes. The tree passes typecheck, lint, build and 82 tests (9 domain, 27 
   adopted — otherwise a POS could paint another tenant's order onto its screen. Resolution is
   explicit — Retry, or Discard and accept an unknown outcome. Same shape as §14.1, which is why M8
   generalises it per aggregate rather than replacing it.
+- **Client state that outlives a screen has an explicit owner.** `adopt` refuses a snapshot older
+  than the one held for that order; `refetch` re-checks that the order it asked about is still
+  current before applying either a result or an error (`readError`, kept separate from `lastError`
+  because the two have different lifetimes); `connection.start`/`stop` claim a generation so a slow
+  bootstrap cannot outlive the `stop` that cancelled it.
 - **A list that is replaced wholesale is never loaded concurrently.** `createCoalescingLoader` runs
   one read at a time and folds in whatever arrived meanwhile. The rule it encodes: an expectation
   may only be judged by a read *issued after* it was raised — an in-flight read predates the event
@@ -176,66 +181,22 @@ review fixes. The tree passes typecheck, lint, build and 82 tests (9 domain, 27 
   the same ports twice. CI now calls `pnpm verify:integration` and declares no services.
 - Arithmetic: M0–M19 is twenty milestones, not nineteen. Corrected everywhere.
 
-## M4 review — accepted
+## M4 reviews — four rounds, all findings fixed
 
-- **A broadcast can outrun the projection it points at.** Two consumer groups, no ordering between
-  them; the kitchen screen now reads until the projection reaches the event's version, bounded, and
-  shows `PROJECTION LAG` if it does not. The POS needs no such wait and does not have one.
-- **`GET /api/orders/:id` reads at `repeatable read`.** Two SELECTs at READ COMMITTED could return
-  one version's header with another's items.
-- **The realtime consumer is supervised, and validates its envelopes.** A poison message used to be
-  able to kill it permanently while the API kept serving.
-- **A retried `CREATE_ORDER` reuses its `orderId` and `mutationId`.** Minting fresh ones made a lost
-  response into a second order — the exact hole that dropping `POST /api/orders` was meant to close.
-- **`adopt` refuses a snapshot older than the one held**, and `start` claims a generation so a slow
-  bootstrap cannot outlive the `stop` that was supposed to cancel it.
+One external review and three Codex passes, over `afc77c5` … `50d4ac7`. The narrative is in
+`build-log.md`; every invariant that must survive M5 is in **Facts M5 depends on** above. Two
+things are worth carrying as habits rather than as facts:
 
-Full reasoning in `build-log.md`. Ten regression tests were added.
-
-## M4 review round 2 — accepted
-
-- **Kitchen loads are coalesced,** not run in parallel; overlapping reads could take a visible
-  ticket back off the screen.
-- **An unresolved mutation halts the terminal** instead of being overwritten by the next command or
-  dropped by "New order".
-- **`refetch` checks that the order it asked about is still on screen.** `adopt` cannot tell a
-  stale read from a newly created order.
-- **`connectConsumer` cleans up after itself** if `subscribe` or `run` throws after `connect`.
-- **`resolveTransport` has no side effects;** `start` writes `transport` only after its generation
-  check.
-- **The poison-message skip is terminal and now says so.** The offset is committed; no later build
-  will see that message. Logged at `error`, not `warn`.
-
-Full reasoning in `build-log.md`. Twelve regression tests were added.
-
-## M4 review round 3 — accepted
-
-An independent Codex pass over `091406f`; both findings were opened by that commit.
-
-- **Pending mutations are keyed by terminal.** A retry from another terminal used to adopt the
-  first restaurant's order into the singleton store, after which every command failed cross-tenant.
-- **A failed read no longer strands the expectations queued behind it.** `refetchUntil` spends a
-  rejected read from the same budget as an unsatisfied one and only throws if none succeeded;
-  `drain` catches, reports through `onError`, and carries on.
-
-Full reasoning in `build-log.md`. Five regression tests were added.
-
-## M4 review round 4 — accepted
-
-A second Codex pass over `56d8c94`, one P2, again opened by the round it followed.
-
-- **A failed canonical read has its own field and its own owner.** `refetch`'s `catch` lacked the
-  staleness guard its success path had, so an error about the order the operator had left appeared
-  under whatever replaced it, and a later successful read never cleared it. `readError` is set only
-  while that order is still on screen and cleared when it reads successfully.
-
-Across four rounds, three findings were the same mistake: state outliving the screen that created
-it with no explicit owner. The pending mutation now belongs to its terminal, the read failure to
-its order.
+- **Three of the findings were one mistake:** client state that outlives the screen which created
+  it, with no explicit owner. The pending mutation now belongs to its terminal, a failed canonical
+  read to its order, a socket to its generation. **M7 and M8 add durable client state** — IndexedDB
+  and the mutation queue — which is exactly where this class reappears.
+- **Every round's findings were opened by the previous round's fix.** A fifth pass over the same
+  code is worth less than one after M5, when the remaining six mutation types exist.
 
 ## Known problems / open questions
 
-- Scope grew across both reviews and nothing was cut, by explicit choice. Watch the usage budget;
+- Scope grew across the reviews and nothing was cut, by explicit choice. Watch the usage budget;
   the drop order is recorded above.
 - M10 (print job) survives mainly because BullMQ was wanted as a résumé keyword. Both reviewers
   independently flagged it as an invented responsibility, and it is first on the drop list.
