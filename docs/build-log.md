@@ -815,3 +815,35 @@ down, which is the whole shape of the finding a second time.
 responsibilities means asking which of its invariants belonged to which half. `adopt` held two: a
 display rule and a durability rule that happened to be the same check. I moved the code and did not
 ask, and the check stayed with the half that no longer needed it.
+
+## M7 review round 2, fixed — the cache write that was not monotonic
+
+The fix is the one the previous session specified, with one addition it did not.
+
+`acceptsSnapshot` moved out of `stores/order.ts` into `apps/web/src/domain/order-snapshot.ts`.
+The alternative — leaving it where it was and importing it from the repository — would have made
+`persistence/` depend on `stores/`, which is a layering inversion and, because `order.ts` already
+imports `local-store.ts`, a real ESM cycle. It happens to work (the function is hoisted and nothing
+touches `localStore` at module evaluation), and "happens to work" is not a reason. The rule is
+about order snapshots, not about screens, so it now lives where both layers can reach it and
+neither owns it.
+
+`saveOrder` takes the comparison inside its existing `readwrite` transaction: read `orders` by the
+incoming id, apply `acceptsSnapshot`, write only if it passes. Inside, not around — a caller that
+read the version and then wrote would move the same race down one level, which is the finding
+again. The read is by the incoming id, so the "a different order is always accepted" branch cannot
+fire here; what is left of the rule is the version comparison, which is exactly the half a cache
+needs. That asymmetry is why the same function serves both callers without a flag.
+
+**The pointer is not under the rule, and that was the decision worth making explicitly.**
+`saveOrder` writes two facts and only one of them is versioned. `syncMetadata.currentOrderId`
+answers "which order is this device on", and the stale answer is evidence for that just as much as
+the fresh one — both callers were working on this order when they asked. Refusing to move the
+pointer alongside a refused snapshot would leave a terminal pointing at nothing after `createOrder`
+cleared it, purely because two answers arrived in an unlucky sequence. So the snapshot write is
+conditional and the pointer write is unconditional, in one transaction.
+
+Three tests, all checked by neutralising the guard and watching them fail: the out-of-order pair
+(v5 then v4 stays at v5), the ordinary pair (v4 then v5 moves), and the pointer moving under a
+refused snapshot. The second exists because the cheapest way to pass the first is to make the
+cache refuse everything.

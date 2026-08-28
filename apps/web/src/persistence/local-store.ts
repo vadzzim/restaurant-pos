@@ -1,6 +1,7 @@
 import type { MutationRequest, MutationType, OrderSnapshot } from '@pos/contracts';
 import { ref, toRaw } from 'vue';
 
+import { acceptsSnapshot } from '../domain/order-snapshot';
 import {
   db,
   type PendingMutationRecord,
@@ -63,27 +64,50 @@ const now = (): string => new Date().toISOString();
 
 export const localStore = {
   /**
-   * Cache a canonical snapshot and point the terminal at it. One write, because the two facts are
-   * only ever true together: this device is working on this order, and this is what it last knew
-   * about it.
+   * Cache a canonical snapshot and point the terminal at it.
+   *
+   * **The snapshot write is monotonic and the pointer write is not**, because they answer
+   * different questions. Both callers that reach here — `send` with a mutation response and
+   * `refetch` with a canonical read — can answer out of order: two overlapping refetches returning
+   * v5 then v4, or a mutation response landing behind a newer refetch. `adopt` already refuses the
+   * older one on screen, so an unguarded write here would leave memory at v5 and disk at v4, and
+   * the next reload would hydrate the order backwards.
+   *
+   * The comparison is `acceptsSnapshot`'s — the same function `adopt` uses, imported rather than
+   * restated, so memory and disk cannot come to disagree about which snapshot is newer. It is
+   * taken **inside** the transaction: a caller that read the stored version and then wrote in a
+   * second call would only move the same race down one level.
+   *
+   * The pointer moves either way. It records which order this device is on, not which version of
+   * it is newest, and that is equally true of the stale answer — both callers were working on this
+   * order when they asked. Refusing to move it would leave a terminal pointed at nothing, or at
+   * the order before this one, because two answers arrived in an unlucky order.
    */
   async saveOrder(terminalId: string, snapshot: OrderSnapshot): Promise<void> {
-    const record: PersistedOrderRecord = {
-      id: snapshot.id,
-      terminalId,
-      snapshot: plain(snapshot),
-      updatedAt: now(),
-    };
-
     await guarded(
       'Caching the order',
       () =>
         db.transaction('rw', db.orders, db.syncMetadata, async () => {
-          await db.orders.put(record);
+          const updatedAt = now();
+          // Read by the incoming id, so `acceptsSnapshot`'s "a different order is always accepted"
+          // branch cannot fire here: what is left of the rule is the version comparison, which is
+          // exactly the half a cache needs.
+          const held = await db.orders.get(snapshot.id);
+
+          if (acceptsSnapshot(held?.snapshot, snapshot)) {
+            const record: PersistedOrderRecord = {
+              id: snapshot.id,
+              terminalId,
+              snapshot: plain(snapshot),
+              updatedAt,
+            };
+            await db.orders.put(record);
+          }
+
           await db.syncMetadata.put({
             terminalId,
             currentOrderId: snapshot.id,
-            updatedAt: record.updatedAt,
+            updatedAt,
           });
         }),
       undefined,

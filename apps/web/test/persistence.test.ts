@@ -48,6 +48,38 @@ describe('the cached order and the terminal pointer', () => {
     expect(restored.order?.items).toHaveLength(1);
   });
 
+  it('refuses a snapshot older than the one already cached', async () => {
+    // Two overlapping refetches answering v5 then v4, or a mutation response landing behind a
+    // newer read. `adopt` refuses the late one on screen; before the rule moved into this
+    // transaction, disk kept it and the next reload hydrated the order backwards.
+    await localStore.saveOrder('pos-1', snapshot('order-a', 5));
+    await localStore.saveOrder('pos-1', snapshot('order-a', 4));
+
+    expect((await localStore.readTerminalState('pos-1')).order?.version).toBe(5);
+  });
+
+  it('still takes a newer one', async () => {
+    await localStore.saveOrder('pos-1', snapshot('order-a', 4));
+    await localStore.saveOrder('pos-1', snapshot('order-a', 5));
+
+    expect((await localStore.readTerminalState('pos-1')).order?.version).toBe(5);
+  });
+
+  it('moves the pointer even when it refuses the snapshot', async () => {
+    // The pointer answers "which order is this device on", not "which version is newest". The
+    // stale answer was still about this order, so a terminal that has no pointer — it pressed New
+    // order, or this is the first answer after a reload — must not be left pointing at nothing
+    // because two answers arrived in an unlucky sequence.
+    await localStore.saveOrder('pos-1', snapshot('order-a', 5));
+    await localStore.clearCurrentOrder('pos-1');
+
+    await localStore.saveOrder('pos-1', snapshot('order-a', 4));
+
+    const restored = await localStore.readTerminalState('pos-1');
+    expect(restored.order?.id).toBe('order-a');
+    expect(restored.order?.version).toBe(5);
+  });
+
   it('is not visible to another terminal', async () => {
     await localStore.saveOrder('pos-1', snapshot('order-a', 4));
 

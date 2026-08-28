@@ -9,14 +9,14 @@
 hydration at startup under the ownership rules M4's review established.
 **The entire order lifecycle is demoable end to end, a broker outage is demoable, and now so is
 reloading the tab mid-order.**
-**Next:** one open P2 from the M7 review's second round — the cache write is not monotonic — and
-then M8: offline queue, sequential sync, §14.1 halt-on-conflict. Model: **Opus**. Size: **L**.
+**Next:** M8 — offline queue, sequential sync, §14.1 halt-on-conflict. Model: **Opus**.
+Size: **L**. The M7 review's open P2 is closed: the cache write is monotonic.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
-`2666d4a`. The tree passes typecheck, lint,
-build and **216 tests** (61 domain, 52 api, 22 worker, **80 web**) against a real PostgreSQL, plus
+`2666d4a` and its second in this commit. The tree passes typecheck, lint,
+build and **219 tests** (61 domain, 52 api, 22 worker, **83 web**) against a real PostgreSQL, plus
 **one integration test** against a real Redpanda that runs only under `pnpm verify:integration`.
 Ten of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3,
 **21.4**, 21.5, 21.6, **21.9**, **21.10**, 21.11, 21.15.
@@ -47,8 +47,9 @@ Ten of the sixteen mandatory §21 tests exist and are named by their spec number
   order, kitchen and connection. `/debug` and `/demo` are still the M1 placeholder (M11, M16).
 - **The client's durable state (M7):** `apps/web/src/persistence/db.ts` — the Dexie database, schema
   version 1, `orders / pendingMutations / syncMetadata`; `local-store.ts` — the repository, the
-  `persistenceError` ref and the `plain()` unwrapper; `hydrate` on the order store and
-  `hydrateCommands` on the kitchen store; `fake-indexeddb` in the vitest setup.
+  `persistenceError` ref and the `plain()` unwrapper; `domain/order-snapshot.ts` — the one
+  `acceptsSnapshot` both memory and disk obey; `hydrate` on the order store and `hydrateCommands`
+  on the kitchen store; `fake-indexeddb` in the vitest setup.
 - **The operational surface (M6):** `/api/health/{live,ready}` and `/api/debug/dependencies`; the
   §17 envelope produced in one handler with `ApiErrorCode` closed in contracts; `requestId` and
   `traceId` on every request log line; `scripts/verify-integration.mjs`; `.github/workflows/ci.yml`.
@@ -177,10 +178,13 @@ Ten of the sixteen mandatory §21 tests exist and are named by their spec number
   writes are not atomic. Deleting first leaves the one state that loses money: a `CREATE_ORDER`
   with no row, no snapshot and no pointer, so the reload shows an empty till and the operator rings
   the order up twice. **Do not reorder these two writes.**
-- **The cache write is not yet monotonic, and that is the one open defect in the tree.** Round 2 of
-  the M7 review: `acceptsSnapshot` guards memory, and pulling the write out of `adopt` left the
-  disk unguarded. Two overlapping refetches returning v5 then v4 leave `order.value` at v5 and
-  `orders` at v4. See Known problems for what it costs and how it must be fixed.
+- **The cache write is monotonic, and the rule that makes it so has exactly one home.**
+  `acceptsSnapshot` lives in `apps/web/src/domain/order-snapshot.ts`; `adopt` applies it to memory
+  and `saveOrder` applies it to disk, inside the one `readwrite` transaction that reads, compares
+  and writes. **Do not restate it in a caller** — round 2 of the M7 review was exactly the disk
+  half of the rule going missing when the write moved out of `adopt`. The **pointer** is not under
+  the rule: `syncMetadata.currentOrderId` moves even when the snapshot is refused, because it says
+  which order this device is on, not which version of it is newest.
 - **`hydrate` ends with a canonical read, and that belongs to the store, not the view.** The
   socket's `onConnected` refetch does not run when `realtime.websocket_push` is off or
   `GET /api/config` fails, so a view-level refresh would leave the cache on screen indefinitely on
@@ -353,16 +357,6 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **A cached snapshot is briefly stale after a reload**, between hydration and the first refetch.
   That is what the cache is for, and it is visibly wrong for a moment against a server that moved
   on while the tab was closed.
-- **OPEN P2 — `localStore.saveOrder` overwrites unconditionally, so the cache is not monotonic.**
-  `adopt` refuses a snapshot older than the one held; the two callers that persist —
-  `send` and `refetch` — do not. Two socket-triggered refetches in flight, v5 answering before v4,
-  leave the screen right and the disk at v4. A mutation response racing a newer refetch is the same
-  shape. **What it actually costs:** not the screen after a reload, because `hydrate` now ends with
-  a canonical read — but in the window between hydration and that read's answer, the screen shows
-  v4, and a command sent in that window carries `baseVersion: 4` and comes back `409`. A conflict
-  the client invented, presented to the operator as a real one. **How to fix it:** the comparison
-  belongs in the repository, inside one `readwrite` transaction over `orders` — a caller that reads
-  the stored version and then writes in two calls reproduces the same race one level down.
 - **A poison message on the realtime topic is lost to that consumer group permanently.** A
   consumer-side dead-letter topic is the real answer and is not built. The publish side already
   dead-letters through `outbox_events`.

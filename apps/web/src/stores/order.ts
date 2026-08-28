@@ -16,6 +16,7 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 
 import { fetchOrder, postMutation } from '../api/client';
+import { acceptsSnapshot } from '../domain/order-snapshot';
 import { localStore } from '../persistence/local-store';
 
 export interface ConflictBanner {
@@ -39,25 +40,6 @@ export interface MutationIdentity {
   type: MutationType;
   baseVersion: number;
   payload: MutationRequest['payload'];
-}
-
-/**
- * A snapshot may only move forward. Socket events fire refetches without waiting for each other,
- * so two `GET /api/orders/:id` calls can be in flight at once and the older response can land
- * last; adopting it unconditionally would roll the screen back to a state the server has already
- * left. The version is monotonic per order, which makes this check exact rather than heuristic.
- *
- * A snapshot for a *different* order is accepted, because that is how a mutation response installs
- * a newly created order. That is right for a response and wrong for a refetch, so `refetch` checks
- * separately that the order it asked about is still the one on screen — `adopt` alone cannot tell
- * the two callers apart.
- */
-export function acceptsSnapshot(held: OrderSnapshot | undefined, incoming: OrderSnapshot): boolean {
-  if (held === undefined || held.id !== incoming.id) {
-    return true;
-  }
-
-  return incoming.version >= held.version;
 }
 
 /**

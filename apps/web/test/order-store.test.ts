@@ -2,7 +2,8 @@ import type { KitchenTicket, OrderSnapshot } from '@pos/contracts';
 import { describe, expect, it } from 'vitest';
 
 import { ticketsSatisfy } from '../src/stores/kitchen';
-import { acceptsSnapshot, sameMutation, type MutationIdentity } from '../src/stores/order';
+import { acceptsSnapshot } from '../src/domain/order-snapshot';
+import { sameMutation, type MutationIdentity } from '../src/stores/order';
 
 function snapshot(id: string, version: number): OrderSnapshot {
   return {
