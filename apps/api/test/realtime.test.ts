@@ -6,7 +6,11 @@ import { and, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 
 import { roomsFor, type RealtimeEmitter } from '../src/modules/realtime/broadcast.js';
-import { handleRealtimeEvent, REALTIME_CONSUMER } from '../src/modules/realtime/consumer.js';
+import {
+  handleRealtimeEvent,
+  parseDomainEvent,
+  REALTIME_CONSUMER,
+} from '../src/modules/realtime/consumer.js';
 import { DEMO_RESTAURANT, db, useTestDatabase } from './helpers.js';
 
 useTestDatabase();
@@ -88,5 +92,26 @@ describe('§12.2 the realtime consumer', () => {
       .from(processedEvents)
       .where(eq(processedEvents.eventId, shared.eventId));
     expect(rows.map((row) => row.consumerName).sort()).toEqual(['kitchen', 'realtime']);
+  });
+});
+
+describe('poison messages', () => {
+  const silent = { warn: () => undefined } as unknown as Parameters<typeof parseDomainEvent>[1];
+
+  it('accepts a well-formed envelope', () => {
+    const good = event();
+    expect(parseDomainEvent(JSON.stringify(good), silent)?.eventId).toBe(good.eventId);
+  });
+
+  it('skips a message that is not JSON instead of crashing the consumer', () => {
+    expect(parseDomainEvent('{ not json', silent)).toBeUndefined();
+  });
+
+  it('skips a message that is JSON but not a DomainEvent', () => {
+    expect(parseDomainEvent(JSON.stringify({ hello: 'world' }), silent)).toBeUndefined();
+    // A plausible-looking envelope with a non-uuid aggregate is still not one of ours.
+    expect(
+      parseDomainEvent(JSON.stringify({ ...event(), aggregateId: 'order-1' }), silent),
+    ).toBeUndefined();
   });
 });

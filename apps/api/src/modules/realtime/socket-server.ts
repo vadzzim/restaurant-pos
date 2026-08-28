@@ -60,13 +60,17 @@ export function createRealtimeServer(
 
       const { restaurantId, role, orderId } = parsed.data;
 
-      // Room membership is derived here, never taken from the client as a raw string.
-      const wanted = new Set<string>([restaurantRoom(restaurantId)]);
+      // Room membership is derived here, never taken from the client as a raw string. The kitchen
+      // joins *only* its own room: it renders the projection, and the restaurant room carries
+      // every event of every order, none of which it could act on.
+      const wanted = new Set<string>();
       if (role === 'kitchen') {
         wanted.add(kitchenRoom(restaurantId));
-      }
-      if (orderId !== undefined) {
-        wanted.add(orderRoom(orderId));
+      } else {
+        wanted.add(restaurantRoom(restaurantId));
+        if (orderId !== undefined) {
+          wanted.add(orderRoom(orderId));
+        }
       }
 
       for (const room of socket.rooms) {

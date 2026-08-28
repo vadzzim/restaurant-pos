@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { DomainEvent } from '@pos/contracts';
 import { computed, onBeforeUnmount, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 
@@ -27,7 +28,13 @@ onMounted(async () => {
     // that guards the POS works here without a second rule (§12.1, §12.2).
     heldVersion: (aggregateId) =>
       kitchen.tickets.find((ticket) => ticket.orderId === aggregateId)?.sourceEventVersion ?? 0,
-    refresh: () => kitchen.load(restaurantId.value),
+    // The event is passed on so the store can wait for the projection to catch up to it: the
+    // broadcast and the projection are written by two different consumers (ADR 006).
+    refresh: (event: DomainEvent | undefined) =>
+      kitchen.load(
+        restaurantId.value,
+        event === undefined ? undefined : { orderId: event.aggregateId, version: event.version },
+      ),
   });
 });
 
@@ -46,7 +53,17 @@ onBeforeUnmount(() => {
         :tone="connection.socketState === 'CONNECTED' ? 'ok' : 'warn'"
       />
       <StateBadge :label="connection.transport" :tone="connection.pushEnabled ? 'ok' : 'warn'" />
+      <StateBadge v-if="kitchen.lagging" label="PROJECTION LAG" tone="warn" />
     </header>
+
+    <p
+      v-if="kitchen.lagging"
+      class="rounded border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+    >
+      A broadcast arrived before the kitchen consumer had written its projection, and the retry
+      budget ran out. The ticket appears as soon as the projection catches up and the next event
+      lands — or on a reload.
+    </p>
 
     <p class="text-sm text-stone-600">
       Read from the <code>kitchen_tickets</code> projection. <strong>Start Preparing</strong> and

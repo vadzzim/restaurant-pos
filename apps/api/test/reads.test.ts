@@ -110,6 +110,45 @@ describe('GET /api/kitchen/tickets', () => {
   });
 });
 
+describe('GET /api/orders/:orderId under concurrent writes', () => {
+  it('never returns a total that disagrees with the items it returned', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+
+    const app = testApp();
+    const products = ['burger', 'cola', 'pizza', 'coffee', 'french-fries'];
+
+    // The snapshot is two SELECTs. Read at READ COMMITTED they can straddle a commit and return
+    // one version's header with another version's items. This asserts the invariant that makes
+    // that visible — it does not force the interleaving, so it can only fail truthfully.
+    for (const productId of products) {
+      const [, response] = await Promise.all([
+        applyMutation(db(), {
+          orderId,
+          mutationId: randomUUID(),
+          terminalId: 'pos-1',
+          restaurantId: DEMO_RESTAURANT,
+          baseVersion: (
+            await app.inject({ method: 'GET', url: `/api/orders/${orderId}` })
+          ).json<OrderSnapshot>().version,
+          type: 'ADD_ITEM',
+          payload: { productId, quantity: 2 },
+        }),
+        app.inject({ method: 'GET', url: `/api/orders/${orderId}` }),
+      ]);
+
+      const snapshot = response.json<OrderSnapshot>();
+      const summed = snapshot.items.reduce(
+        (total, item) => total + item.quantity * item.unitPriceCents,
+        0,
+      );
+      expect(summed).toBe(snapshot.totalCents);
+    }
+
+    await app.close();
+  });
+});
+
 describe('GET /api/config', () => {
   it('reflects the feature_flags row', async () => {
     const app = testApp();

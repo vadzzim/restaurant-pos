@@ -131,3 +131,65 @@ template rules that were already off for the same reason.
 **Vite had to proxy the WebSocket upgrade.** Socket.IO shares the API's HTTP server, so
 `'/socket.io': { target, ws: true }` sits next to the `/api` proxy; without it the client falls
 back to polling against the Vite dev server and never connects.
+
+## M4 review — four correctness holes between consumers and inside the client
+
+**A broadcast can outrun the projection it tells you to read.** The realtime consumer and the
+kitchen consumer read the same topic on independent groups, so nothing orders them. When realtime
+won, the kitchen screen did its one refresh against a `kitchen_tickets` table that had not been
+written yet — and because the gate had already recorded that `eventId`, a redelivery would have
+been dropped and there is no periodic refresh in M4. The ticket stayed invisible until a reload.
+The refresh callback now receives the event, and the kitchen store reads until the projection
+reports `source_event_version >= event.version`, on a bounded backoff, surfacing `PROJECTION LAG`
+when the budget runs out rather than spinning. The POS deliberately does _not_ do this: it reads
+`orders`, written by the same transaction that wrote the outbox row, so one read always suffices.
+
+The same finding exposed a second cost: the kitchen was joining `restaurant:{id}` as well as
+`kitchen:{id}`, so every `OrderItemAdded` woke a refetch that could never converge. The kitchen now
+joins only its own room, and `roomsFor` routes through a named `KITCHEN_EVENT_TYPES` set that M5
+extends when `OrderPreparing` and `OrderReady` arrive.
+
+**`GET /api/orders/:id` was not a consistent read.** `loadOrderSnapshot` issues two SELECTs. The
+mutation handler calls it inside the transaction that wrote both tables, so it is consistent there
+— but the new read route called it bare, and under PostgreSQL's default READ COMMITTED every
+statement takes a fresh snapshot. A mutation committing between the two returned the old header
+with the new items: a `totalCents` matching neither version, shown to the operator as fact. The
+route now reads in a `repeatable read`, `read only` transaction. A wrapping transaction alone would
+not have fixed it — the isolation level is the fix.
+
+**The realtime consumer never recovered from a crash.** The start loop exited on first success and
+nothing watched the consumer afterwards. A malformed message would throw out of `eachMessage`,
+KafkaJS would exhaust its retries and stop the consumer, and the API would go on serving reads and
+writes with every screen silently frozen until someone restarted the process — the half-dead state
+this architecture exists to avoid. Two fixes: `parseDomainEvent` validates the envelope with zod
+and _skips_ what it cannot understand (logged, and deliberately not recorded in `processed_events`,
+so a later build can reprocess it), and `superviseRealtimeConsumer` listens for
+`consumer.events.CRASH` and rebuilds the consumer when KafkaJS reports `restart: false`.
+
+**A retried creation could produce a second order.** The client minted a fresh `orderId` _and_ a
+fresh `mutationId` on every attempt, so a lost response followed by a second press created a second
+order — the one write neither the version check nor `mutationId` can catch after the fact, and
+exactly the hole that the decision to drop `POST /api/orders` was supposed to close. The client now
+keeps the identity of a mutation whose answer never arrived and reuses it, so the retry resolves as
+`ALREADY_APPLIED` under §9. It applies to every type, not just creation: retrying `ADD_ITEM` with a
+new `mutationId` would report a conflict over an operation that had in fact succeeded — safe, and a
+lie to the operator. The pending mutation is shown as `PENDING` with a Retry button; M8 replaces
+the single slot with the durable queue, same reasoning, different storage.
+
+**An older refetch could roll the screen back.** Socket events fire refetches without waiting for
+each other, so two `GET /api/orders/:id` calls can overlap and the older answer can land last.
+`adopt` now refuses a snapshot older than the one held for the same order — exact, because the
+version is monotonic per aggregate. The gate checks the _event_'s version; nothing was checking the
+_response_'s.
+
+**A slow `start` leaked past `stop`.** `start` awaits `GET /api/config` before opening a socket,
+and in that gap the component can unmount or the terminal in the URL can change. The late `start`
+then installed a socket nobody would close, and two overlapping `start`s overwrote each other's
+handle, leaving the first socket open forever. Both now claim a generation; a `start` whose claim
+has been superseded closes what it built instead of installing it.
+
+Ten regression tests were added: envelope validation and poison-message handling, the bounded
+projection wait and its backoff, the monotonic snapshot rule, mutation-identity matching, and a
+snapshot invariant asserted while writes run concurrently. That last one checks that the total
+always agrees with the items returned alongside it; it does not force the interleaving, so it can
+only ever fail truthfully.

@@ -36,6 +36,8 @@ async function start(): Promise<void> {
     // Anything about another order is news by definition, so the version we hold for it is 0.
     heldVersion: (aggregateId) =>
       orders.order?.id === aggregateId ? (orders.order?.version ?? 0) : 0,
+    // The POS reads `orders`, written by the very transaction that wrote the outbox row, so the
+    // event it was woken by is already visible: one read is always enough here.
     refresh: () => orders.refetch(),
   });
 }
@@ -48,6 +50,14 @@ async function run(action: () => Promise<unknown>): Promise<void> {
     busy.value = false;
   }
 }
+
+const retryPending = (): Promise<void> =>
+  run(async () => {
+    const restaurantId = terminal.value?.restaurantId;
+    if (restaurantId !== undefined) {
+      await orders.retryPending(terminalId.value, restaurantId);
+    }
+  });
 
 const createOrder = (): Promise<void> =>
   run(async () => {
@@ -115,7 +125,27 @@ watch(terminalId, async () => {
         :tone="orders.syncing ? 'warn' : 'ok'"
       />
       <StateBadge v-if="orders.syncing" label="SYNCING" tone="warn" />
+      <StateBadge v-if="orders.pending" label="PENDING" tone="warn" />
     </header>
+
+    <p
+      v-if="orders.pending"
+      class="flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+    >
+      <span>
+        <strong>{{ orders.pending.type }} left this terminal but no answer came back.</strong>
+        Retrying reuses the same <code>mutationId</code>, so if the server did apply it the answer
+        is <code>ALREADY_APPLIED</code> rather than a second one.
+      </span>
+      <button
+        type="button"
+        class="rounded border border-amber-500 px-3 py-1 font-medium"
+        :disabled="busy"
+        @click="retryPending"
+      >
+        Retry
+      </button>
+    </p>
 
     <p
       v-if="orders.conflict"

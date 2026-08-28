@@ -10,10 +10,10 @@ the §12.2 realtime consumer inside the API process, four read endpoints, and a 
 kitchen screen in Vue. **The project is demoable from here on.**
 **Next:** M5 — the remaining six mutation types and the full §8 conflict matrix. Model: Sonnet.
 
-M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 this commit.
-The tree passes typecheck, lint, build and 47 tests (9 domain, 23 api, 11 worker, 4 web) against a
-real PostgreSQL. The seven mandatory M3 tests §21.1, 21.2, 21.3, 21.5, 21.6, 21.11 and 21.15 are
-still present and named by their spec number.
+M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` + the
+review fixes. The tree passes typecheck, lint, build and 62 tests (9 domain, 27 api, 11 worker,
+15 web) against a real PostgreSQL. The seven mandatory M3 tests §21.1, 21.2, 21.3, 21.5, 21.6,
+21.11 and 21.15 are still present and named by their spec number.
 
 ## What exists
 
@@ -68,6 +68,17 @@ still present and named by their spec number.
 - **The browser filters what the socket delivers**: dedup by `eventId`, ignore `version` not
   greater than what it holds, refetch the snapshot on reconnect. A socket message never carries
   state into the UI — it only triggers `GET /api/orders/:id` or `GET /api/kitchen/tickets`.
+- **Nothing orders the two consumer groups against each other.** A broadcast can arrive before the
+  projection it refers to has been written, so the kitchen store reads until
+  `source_event_version >= event.version` on a bounded backoff. Any future screen that reads a
+  projection built by a different consumer needs the same wait; a screen reading `orders` does not,
+  because that row is written by the transaction that wrote the outbox row.
+- **The kitchen socket joins only `kitchen:{restaurantId}`,** and `roomsFor` decides which event
+  types reach it through `KITCHEN_EVENT_TYPES`. M5 adds `OrderPreparing`, `OrderReady` and
+  `OrderCancelled` there at the same time as it teaches the kitchen consumer to advance `state`.
+- **A mutation whose answer never came back keeps its identity** (`orderId` + `mutationId`) and is
+  retried unchanged, so §9 resolves it as `ALREADY_APPLIED`. M8 replaces that one slot with the
+  durable queue — the reasoning carries over, the storage does not.
 - **The publisher claims only an order's earliest unpublished event**, so that order's events reach
   Redpanda in version order regardless of retries or how many workers run. A pass that published
   something immediately runs again instead of waiting out the poll interval.
@@ -89,8 +100,12 @@ still present and named by their spec number.
   is what turns that adapter claim into a tested fact, and it only means something because the
   group is shared.
 - **Redpanda and Redis are soft dependencies of the API.** `buildApp()` is routes-only; the socket
-  server and the consumer are wired in `index.ts`, and the consumer start is retried in the
-  background and never blocks `listen()`. Readiness still checks PostgreSQL only (§17).
+  server and the consumer are wired in `index.ts`, and the consumer is *supervised* — retried both
+  when it cannot start and when it dies later — so it never blocks `listen()` and never leaves the
+  API alive with frozen screens. Readiness still checks PostgreSQL only (§17).
+- **Reads that span two tables are `repeatable read`.** `GET /api/orders/:id` reads `orders` and
+  `order_items`; at READ COMMITTED those two statements can straddle a commit and return a total
+  that matches neither version.
 - **A socket message is a hint, never data.** The client refetches the canonical snapshot; it does
   not rebuild order state from event payloads (§13 forbids event-replay infrastructure). This is
   also why M13's polling transport is the same code on a different trigger.
@@ -151,6 +166,22 @@ still present and named by their spec number.
   the same ports twice. CI now calls `pnpm verify:integration` and declares no services.
 - Arithmetic: M0–M19 is twenty milestones, not nineteen. Corrected everywhere.
 
+## M4 review — accepted
+
+- **A broadcast can outrun the projection it points at.** Two consumer groups, no ordering between
+  them; the kitchen screen now reads until the projection reaches the event's version, bounded, and
+  shows `PROJECTION LAG` if it does not. The POS needs no such wait and does not have one.
+- **`GET /api/orders/:id` reads at `repeatable read`.** Two SELECTs at READ COMMITTED could return
+  one version's header with another's items.
+- **The realtime consumer is supervised, and validates its envelopes.** A poison message used to be
+  able to kill it permanently while the API kept serving.
+- **A retried `CREATE_ORDER` reuses its `orderId` and `mutationId`.** Minting fresh ones made a lost
+  response into a second order — the exact hole that dropping `POST /api/orders` was meant to close.
+- **`adopt` refuses a snapshot older than the one held**, and `start` claims a generation so a slow
+  bootstrap cannot outlive the `stop` that was supposed to cancel it.
+
+Full reasoning in `build-log.md`. Ten regression tests were added.
+
 ## Known problems / open questions
 
 - Scope grew across both reviews and nothing was cut, by explicit choice. Watch the usage budget;
@@ -177,6 +208,16 @@ still present and named by their spec number.
 - **The socket has no authentication.** Any browser can subscribe to any restaurant's rooms. That
   is deliberate for a demo with no auth anywhere, and is worth saying out loud in the interview
   rather than leaving for someone to notice.
+- **The projection wait is bounded and can still lose.** If the kitchen consumer is down, the
+  kitchen screen shows `PROJECTION LAG` and the ticket appears only when a later event lands or the
+  page is reloaded. M13's polling transport removes the reload as the last resort; M11's `/debug`
+  is where consumer lag becomes visible as a number.
+- **One pending mutation slot, not a queue.** Only the most recent unanswered mutation keeps its
+  identity, and it lives in memory. M7 and M8 make it durable and ordered; until then, closing the
+  tab loses it.
+- **The concurrent-read test asserts an invariant, it does not force the interleaving.** It cannot
+  fail falsely, but it is not a proof that the old code was broken — the reasoning in
+  `build-log.md` is. A deterministic version would need statement-level hooks.
 - `outbox_events` and `processed_mutations` grow without bound. Archiving is out of scope and
   worth saying out loud in the interview rather than pretending otherwise.
 

@@ -18,17 +18,75 @@ export interface ConflictBanner {
   serverVersion: number;
 }
 
+/**
+ * Everything that makes a mutation *the same* mutation on a retry. `orderId` belongs here as much
+ * as `mutationId` does: for `CREATE_ORDER` it is the aggregate's identity, and generating a fresh
+ * one is what turns a retry into a second order.
+ */
+export interface MutationIdentity {
+  orderId: string;
+  mutationId: string;
+  type: SupportedMutationType;
+  baseVersion: number;
+  payload: MutationRequest['payload'];
+}
+
+/**
+ * A snapshot may only move forward. Socket events fire refetches without waiting for each other,
+ * so two `GET /api/orders/:id` calls can be in flight at once and the older response can land
+ * last; adopting it unconditionally would roll the screen back to a state the server has already
+ * left. The version is monotonic per order, which makes this check exact rather than heuristic.
+ */
+export function acceptsSnapshot(held: OrderSnapshot | undefined, incoming: OrderSnapshot): boolean {
+  if (held === undefined || held.id !== incoming.id) {
+    return true;
+  }
+
+  return incoming.version >= held.version;
+}
+
+/**
+ * Whether a pending identity describes the action being attempted now. The payloads are built here
+ * in a fixed key order, so comparing their serialisations is sound.
+ */
+export function sameMutation(
+  pending: MutationIdentity | undefined,
+  type: SupportedMutationType,
+  orderId: string | undefined,
+  baseVersion: number,
+  payload: MutationRequest['payload'],
+): boolean {
+  if (pending === undefined || pending.type !== type || pending.baseVersion !== baseVersion) {
+    return false;
+  }
+
+  if (orderId !== undefined && pending.orderId !== orderId) {
+    return false;
+  }
+
+  return JSON.stringify(pending.payload) === JSON.stringify(payload);
+}
+
 export const useOrderStore = defineStore('order', () => {
   const order = ref<OrderSnapshot | undefined>();
   const conflict = ref<ConflictBanner | undefined>();
   const lastError = ref<string | undefined>();
   const inFlight = ref(0);
+  /**
+   * The one mutation whose fate is unknown: it left this client but no answer came back. It is
+   * kept so the operator's next attempt reuses the same `mutationId` and `orderId` and is resolved
+   * idempotently by §9, instead of being sent as a brand-new mutation. M8 replaces this one slot
+   * with the durable queue; the reasoning is the same, the storage is not.
+   */
+  const pending = ref<MutationIdentity | undefined>();
 
   const version = computed(() => order.value?.version ?? 0);
   const syncing = computed(() => inFlight.value > 0);
 
   function adopt(snapshot: OrderSnapshot): void {
-    order.value = snapshot;
+    if (acceptsSnapshot(order.value, snapshot)) {
+      order.value = snapshot;
+    }
   }
 
   /**
@@ -48,25 +106,27 @@ export const useOrderStore = defineStore('order', () => {
   }
 
   async function send(
-    orderId: string,
+    identity: MutationIdentity,
     terminalId: string,
     restaurantId: string,
-    type: SupportedMutationType,
-    baseVersion: number,
-    payload: MutationRequest['payload'],
-  ): Promise<MutationResponse> {
+  ): Promise<MutationResponse | undefined> {
     const request: MutationRequest = {
-      mutationId: crypto.randomUUID(),
+      mutationId: identity.mutationId,
       terminalId,
       restaurantId,
-      baseVersion,
-      type,
-      payload,
+      baseVersion: identity.baseVersion,
+      type: identity.type,
+      payload: identity.payload,
     };
 
     inFlight.value += 1;
+    pending.value = identity;
     try {
-      const response = await postMutation(orderId, request);
+      const response = await postMutation(identity.orderId, request);
+
+      // The server answered, so this mutation's fate is known however it turned out. Only a
+      // request that never produced an answer stays pending.
+      pending.value = undefined;
 
       switch (response.status) {
         case 'APPLIED':
@@ -91,8 +151,9 @@ export const useOrderStore = defineStore('order', () => {
 
       return response;
     } catch (error) {
+      // `pending` deliberately survives: the mutation may well have been applied.
       lastError.value = error instanceof Error ? error.message : 'The mutation failed.';
-      throw error;
+      return undefined;
     } finally {
       inFlight.value -= 1;
     }
@@ -102,21 +163,29 @@ export const useOrderStore = defineStore('order', () => {
     terminalId: string,
     restaurantId: string,
     tableNumber: string,
-  ): Promise<string> {
-    // The client generates the id (§5): there is no POST /api/orders, so creation is a mutation
-    // like any other and a lost response can be retried without creating a second order.
-    const orderId = crypto.randomUUID();
-    order.value = undefined;
-    conflict.value = undefined;
-
+  ): Promise<void> {
     const payload: CreateOrderPayload = { tableNumber };
-    const response = await send(orderId, terminalId, restaurantId, 'CREATE_ORDER', 0, payload);
+    const retrying = sameMutation(pending.value, 'CREATE_ORDER', undefined, 0, payload);
 
-    if (response.status !== 'APPLIED' && response.status !== 'ALREADY_APPLIED') {
-      throw new Error(`CREATE_ORDER did not apply: ${response.status}`);
+    // Reusing the id is the whole point (§5). A lost response plus a fresh `orderId` would create
+    // a second order for the same table — the one write in the system that no version check and
+    // no `mutationId` could catch afterwards.
+    const identity: MutationIdentity = retrying
+      ? (pending.value as MutationIdentity)
+      : {
+          orderId: crypto.randomUUID(),
+          mutationId: crypto.randomUUID(),
+          type: 'CREATE_ORDER',
+          baseVersion: 0,
+          payload,
+        };
+
+    if (!retrying) {
+      order.value = undefined;
+      conflict.value = undefined;
     }
 
-    return orderId;
+    await send(identity, terminalId, restaurantId);
   }
 
   async function addItem(
@@ -131,7 +200,11 @@ export const useOrderStore = defineStore('order', () => {
     }
 
     const payload: AddItemPayload = { productId, quantity };
-    await send(current.id, terminalId, restaurantId, 'ADD_ITEM', current.version, payload);
+    await send(
+      identityFor('ADD_ITEM', current.id, current.version, payload),
+      terminalId,
+      restaurantId,
+    );
   }
 
   async function sendToKitchen(terminalId: string, restaurantId: string): Promise<void> {
@@ -140,19 +213,51 @@ export const useOrderStore = defineStore('order', () => {
       return;
     }
 
-    await send(current.id, terminalId, restaurantId, 'SEND_TO_KITCHEN', current.version, {});
+    await send(
+      identityFor('SEND_TO_KITCHEN', current.id, current.version, {}),
+      terminalId,
+      restaurantId,
+    );
+  }
+
+  /**
+   * Retrying with the same `mutationId` turns a lost response into `ALREADY_APPLIED` (§9). With a
+   * fresh one the retry is a new mutation at a stale `baseVersion`, so it comes back as a conflict
+   * over an operation that in fact succeeded — technically safe, and a lie to the operator.
+   */
+  function identityFor(
+    type: SupportedMutationType,
+    orderId: string,
+    baseVersion: number,
+    payload: MutationRequest['payload'],
+  ): MutationIdentity {
+    if (sameMutation(pending.value, type, orderId, baseVersion, payload)) {
+      return pending.value as MutationIdentity;
+    }
+
+    return { orderId, mutationId: crypto.randomUUID(), type, baseVersion, payload };
+  }
+
+  /** Re-send the mutation whose answer never arrived, unchanged. */
+  async function retryPending(terminalId: string, restaurantId: string): Promise<void> {
+    const identity = pending.value;
+    if (identity !== undefined) {
+      await send(identity, terminalId, restaurantId);
+    }
   }
 
   function clear(): void {
     order.value = undefined;
     conflict.value = undefined;
     lastError.value = undefined;
+    pending.value = undefined;
   }
 
   return {
     order,
     conflict,
     lastError,
+    pending,
     version,
     syncing,
     adopt,
@@ -160,6 +265,7 @@ export const useOrderStore = defineStore('order', () => {
     createOrder,
     addItem,
     sendToKitchen,
+    retryPending,
     clear,
   };
 });
