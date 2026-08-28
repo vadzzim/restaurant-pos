@@ -22,6 +22,8 @@ const TABLES = [
   'conflict_log',
   'feature_flags',
   'print_jobs',
+  'outbox_controls',
+  'printer_controls',
 ] as const;
 
 const OUTBOX_PENDING_INDEX = 'outbox_events_pending_idx';

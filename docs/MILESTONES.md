@@ -30,8 +30,8 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M7 | Dexie / IndexedDB persistence | M | Sonnet | yes | done |
 | M8 | Offline queue + sync + halt-on-conflict | **L** | **Opus** | yes | done |
 | M9 | Outbox hardening + crash-window tests | **L** | **Opus** | yes | done |
-| M10 | BullMQ print job | M | Sonnet | yes | next |
-| M11 | Debug dashboard + counters + presence | M | Sonnet | yes | |
+| M10 | BullMQ print job | M | Sonnet | yes | done |
+| M11 | Debug dashboard + counters + presence | M | Sonnet | yes | next |
 | M12 | Failure simulator | M | Sonnet | yes | |
 | M13 | Feature flags + polling fallback | M | Sonnet | yes | |
 | M14 | Production images + multi-instance smoke | M | Sonnet | yes | |
@@ -44,11 +44,12 @@ The **Demo** column answers: after this session, can the project be shown to som
 **Twenty milestones, M0 through M19 — thirteen still to run.** The scope grew from the review's
 additions and nothing was cut; that was a deliberate call, recorded in `docs/PROGRESS.md`.
 
-If the interview date closes in, drop in this order: **M10** (the print job — an invented
-responsibility that exists mainly to justify BullMQ), then **M16** (`/demo`, a wizard over
-functionality that already works), then **M17** (PWA, which adds nothing the IndexedDB layer does
-not already do). Do **not** drop M15 or M18 first: the role is *Full-Stack* with Vue in the title,
-and rush-speed POS UX plus a browser-level E2E test are the two milestones that demonstrate
+**M10 was first on this list and was built anyway** — see ADR 014 for what it turned out to be
+worth: the one component here where a job and its record may disagree, and the reconciler that
+makes that safe. If the interview date closes in from here, drop in this order: **M16** (`/demo`, a
+wizard over functionality that already works), then **M17** (PWA, which adds nothing the IndexedDB
+layer does not already do). Do **not** drop M15 or M18 first: the role is *Full-Stack* with Vue in
+the title, and rush-speed POS UX plus a browser-level E2E test are the two milestones that demonstrate
 frontend maturity rather than backend theory.
 
 ---

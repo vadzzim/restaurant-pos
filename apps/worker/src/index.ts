@@ -2,10 +2,15 @@ import { hostname } from 'node:os';
 
 import { loadConfig } from '@pos/config';
 import { closeDb, getDb } from '@pos/db';
+import { Redis } from 'ioredis';
 import pino from 'pino';
 
 import { readOutboxControls, watchOutboxControls } from './modules/events/outbox-controls.js';
 import { maxPublishDelayMs, publishOnce } from './modules/events/outbox-publisher.js';
+import { createPrintQueue } from './modules/printing/print-queue.js';
+import { startPrintWorker } from './modules/printing/print-worker.js';
+import { httpPrinter } from './modules/printing/printer-client.js';
+import { startPrintReconciler } from './modules/printing/reconcile.js';
 import { connectBroker } from './shared/broker-session.js';
 import { supervise } from './shared/broker-supervisor.js';
 import { createKafka } from './shared/kafka.js';
@@ -26,6 +31,50 @@ const publisherOptions = {
 
 const kafka = createKafka(config);
 
+/**
+ * Two connections, because BullMQ's worker blocks on Redis and a blocked client cannot also serve
+ * the queue's writes. `maxRetriesPerRequest: null` is BullMQ's own requirement, and it is the right
+ * shape here anyway: a command held until Redis returns beats a command that fails while it is away.
+ *
+ * The `error` listeners are not optional. ioredis emits connection failures as events, and an
+ * `error` event with no listener is thrown — which would kill the worker, and with it the outbox
+ * publisher, over a dependency that is deliberately soft (ADR 011, ADR 014).
+ */
+function connectRedis(role: string): Redis {
+  const redis = new Redis(config.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: null });
+  redis.on('error', (error: unknown) => {
+    logger.warn({ err: error, role }, 'redis connection error');
+  });
+  return redis;
+}
+
+const queueRedis = connectRedis('print-queue');
+const printWorkerRedis = connectRedis('print-worker');
+
+const printQueue = createPrintQueue(queueRedis, {
+  queueName: config.PRINT_QUEUE_NAME,
+  maxAttempts: config.PRINT_MAX_ATTEMPTS,
+  backoffBaseMs: config.PRINT_BACKOFF_BASE_MS,
+});
+
+const printWorker = startPrintWorker(
+  printWorkerRedis,
+  db,
+  httpPrinter({ url: config.PRINTER_URL, timeoutMs: config.PRINTER_TIMEOUT_MS }),
+  logger,
+  { queueName: config.PRINT_QUEUE_NAME, maxAttempts: config.PRINT_MAX_ATTEMPTS },
+);
+
+// The repair for every lost enqueue (§12.3). It reads `kitchen_tickets`, so it works whether the
+// job was lost to a crash, to a redelivery that deduplicated, or to Redis being empty.
+const printReconciler = startPrintReconciler(
+  db,
+  printQueue,
+  config.PRINT_RECONCILE_MS,
+  { staleAfterMs: config.PRINT_STALE_MS, limit: config.PRINT_RECONCILE_LIMIT },
+  logger,
+);
+
 // Awaited before the loop starts, so a worker that boots while the publisher is paused honours the
 // pause on its very first pass instead of draining a backlog a human deliberately stopped.
 const controls = await watchOutboxControls(
@@ -38,7 +87,7 @@ const broker = supervise({
   name: 'redpanda',
   retryMs: config.WORKER_BROKER_RETRY_MS,
   logger,
-  connect: async () => connectBroker(kafka, db, config, logger),
+  connect: async () => connectBroker(kafka, db, config, logger, printQueue.enqueue),
 });
 
 logger.info({ workerId, topic: config.KAFKA_ORDER_EVENTS_TOPIC }, 'Worker started');
@@ -128,9 +177,15 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   running = false;
   clearInterval(heartbeat);
   controls.stop();
+  printReconciler.stop();
   try {
     await publisherLoop;
     await broker.stop();
+    // The print worker first: closing it lets an attempt in flight finish and its outcome reach
+    // `print_jobs` before the pool it writes through is gone.
+    await printWorker.close();
+    await printQueue.close();
+    await Promise.all([queueRedis.quit(), printWorkerRedis.quit()]);
     await closeDb();
   } catch (error) {
     logger.error({ err: error, signal }, 'Failed to shut down worker cleanly');

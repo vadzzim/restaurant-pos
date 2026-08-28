@@ -111,8 +111,12 @@ async function main() {
     ['Build packages', 'pnpm', ['run', 'build:packages']],
     ['API suite', 'pnpm', ['--filter', '@pos/api', 'run', 'test']],
     ['Worker suite', 'pnpm', ['--filter', '@pos/worker', 'run', 'test']],
-    // The one suite that needs a live broker rather than only PostgreSQL.
-    ['Broker round trip', 'pnpm', ['--filter', '@pos/worker', 'run', 'test:integration']],
+    // The suites that need a live broker or a live Redis rather than only PostgreSQL.
+    [
+      'Broker and queue round trips',
+      'pnpm',
+      ['--filter', '@pos/worker', 'run', 'test:integration'],
+    ],
   ];
 
   for (const [name, command, args] of steps) {

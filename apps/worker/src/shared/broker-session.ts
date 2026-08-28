@@ -4,7 +4,7 @@ import { KafkaJSProtocolError, type Kafka } from 'kafkajs';
 import type { Logger } from 'pino';
 
 import type { EventTransport } from '../modules/events/outbox-publisher.js';
-import { startKitchenConsumer } from '../modules/kitchen/consumer.js';
+import { startKitchenConsumer, type PrintEnqueue } from '../modules/kitchen/consumer.js';
 import type { BrokerSession } from './broker-supervisor.js';
 import { createKafkaTransport, ensureOrderEventsTopic } from './kafka.js';
 
@@ -89,12 +89,17 @@ export function guardTransport(inner: EventTransport, die: () => void): EventTra
  * Everything the worker needs from Redpanda, built and torn down as one unit: the topic, the
  * producer the publisher writes through, and the kitchen consumer. They share a fate on purpose —
  * a worker with a producer but no consumer would publish events nobody projects.
+ *
+ * `enqueuePrint` is threaded through rather than owned here: the print queue outlives any broker
+ * session — it is a different dependency, failing at different times (ADR 014) — and the consumer
+ * is simply the thing that happens to enqueue.
  */
 export async function connectBroker(
   kafka: Kafka,
   db: Db,
   config: AppConfig,
   logger: Logger,
+  enqueuePrint?: PrintEnqueue,
 ): Promise<BrokerSession<BrokerConnection>> {
   await ensureOrderEventsTopic(kafka, config);
 
@@ -115,7 +120,7 @@ export async function connectBroker(
   producer.on(producer.events.DISCONNECT, die);
   await producer.connect();
 
-  const kitchen = await startKitchenConsumer(kafka, db, config, logger, die).catch(
+  const kitchen = await startKitchenConsumer(kafka, db, config, logger, die, enqueuePrint).catch(
     async (error: unknown) => {
       // The producer is already connected; a consumer that fails to start must not leave it open.
       await producer.disconnect().catch(() => undefined);

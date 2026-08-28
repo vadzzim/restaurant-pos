@@ -9,6 +9,7 @@
     "build": "tsup src/index.ts --format esm --sourcemap --clean",
     "start": "node --env-file-if-exists=../../.env dist/index.js",
     "outbox": "tsx --env-file-if-exists=../../.env scripts/outbox-control.ts",
+    "printer": "tsx --env-file-if-exists=../../.env scripts/printer-control.ts",
     "test": "vitest run",
     "test:integration": "vitest run -c vitest.integration.config.ts"
   },
@@ -17,7 +18,9 @@
     "@pos/contracts": "workspace:*",
     "@pos/db": "workspace:*",
     "@pos/domain": "workspace:*",
+    "bullmq": "^5.63.0",
     "drizzle-orm": "^0.45.2",
+    "ioredis": "^5.11.1",
     "kafkajs": "^2.2.4",
     "pino": "^10.3.1"
   },

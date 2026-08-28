@@ -5,50 +5,55 @@
 
 ## Current state
 
-**Last completed milestone:** M9 — outbox hardening: the lease now bounds the send itself, an
-abandoned claim is handed back instead of expiring, a reclaim is counted, and §18's two publisher
-switches are real operational state. Plus review round 1 (one P1, three P2s, all fixed).
+**Last completed milestone:** M10 — the BullMQ print job: a fake printer that fails on demand and
+honours an idempotency key, `print_jobs` written by the *processor*, `ticket_hash` deduplicating the
+record, bounded backoff and a dead-letter state owned by BullMQ, and a reconciliation sweep that
+reads `kitchen_tickets` and repairs every way an enqueue can be lost.
 **The entire order lifecycle is demoable end to end, a broker outage is demoable, reloading the tab
-mid-order is demoable, §19.2 and §19.3 are demoable, and now the publisher can be paused, delayed
-and watched from a terminal — the buttons for it are M12's.**
-**Next:** M10 — the BullMQ print job: a fake printer that fails on demand and honours an
-idempotency key, `print_jobs`, `ticket_hash` deduplication, bounded backoff, a dead-letter state,
-and a reconciliation sweep. Test §21.14, scenario §19.9. Model: **Sonnet**. Size: **M**.
-**M10 is the first milestone to cut if the budget is tight** — see `MILESTONES.md`.
+mid-order is demoable, §19.2, §19.3 and now §19.9 are demoable, and the publisher and the printer
+can both be driven from a terminal — the buttons for them are M12's.**
+**Next:** M11 — the debug dashboard: every §20 counter, `/api/debug/{events,conflicts,outbox,
+dependencies,metrics}`, terminal presence in Redis, and the `/debug` page with all of §16's
+sections, including dead-lettered outbox rows and print job state. Model: **Sonnet**. Size: **M**.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
 `2666d4a` and its second at `6349dce`, M8 `8f72739` plus two review rounds through `5414676`,
-M9 `ed9a0b7` plus its review round in this commit.
+M9 `ed9a0b7` plus its review round at `4718bc4`, M10 in this commit.
 The tree passes typecheck, lint,
-build and **262 tests** (61 domain, 52 api, **36 worker**, 113 web) against a real PostgreSQL, plus
-**two integration tests** against a real Redpanda that run only under `pnpm verify:integration`
-(both green at the end of M9; the second one is §21.13 and is new).
-**Fifteen** of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1,
-21.2, 21.3, 21.4, 21.5, 21.6, 21.7, 21.8, 21.9, 21.10, 21.11, **21.12**, **21.13**, 21.15,
-**21.16**. Only **21.14** — print job deduplication — is left, and it is M10's.
+build and **282 tests** (61 domain, **57 api**, **51 worker**, 113 web) against a real PostgreSQL,
+plus **three integration tests** that run only under `pnpm verify:integration` — two against a real
+Redpanda (§21.12's round trip and §21.13's offset window) and one new one against a real Redis and
+a real BullMQ worker. All green at the end of M10.
+**All sixteen** mandatory §21 tests now exist and are named by their spec number: 21.1, 21.2, 21.3,
+21.4, 21.5, 21.6, 21.7, 21.8, 21.9, 21.10, 21.11, 21.12, 21.13, **21.14**, 21.15, 21.16.
 
 ## What exists
 
 - `CLAUDE.md`, `docs/spec.md`, `docs/MILESTONES.md`, `docs/build-log.md`.
-- `docs/milestones/M01.md` … `M09.md` — the completed briefs.
-- ADRs 001, **002**, 003, 004, 005, 006, 007, 009, **010**, 011, 012, 013 accepted. Only 008 (M13) is
-  left unwritten.
-- `packages/config` — zod environment, `TEST_DATABASE_URL`, Kafka topics, outbox tuning.
+- `docs/milestones/M01.md` … `M10.md` — the completed briefs.
+- ADRs 001, **002**, 003, 004, 005, 006, 007, 009, **010**, 011, 012, 013, **014** accepted. Only
+  008 (M13) is left unwritten.
+- `packages/config` — zod environment, `TEST_DATABASE_URL`, Kafka topics, outbox tuning, and the
+  `PRINTER_*` / `PRINT_*` block M10 added.
 - `packages/contracts` — statuses, the nine `MUTATION_TYPES`, the nine event types, every mutation
   and event payload, the §5 request/response shapes, `ConflictReason`, `PaymentMethod`,
   `KitchenTicketState`, `KITCHEN_TERMINAL_ID`, menu and config DTOs, socket names, `TERMINALS`.
 - `packages/domain` — `calculateTotalCents`, `isValidTransition`, and `decide()`: **the whole of
   §8**, table-driven, no database and no HTTP.
-- `packages/db` — schema (fourteen tables: M9 added `outbox_controls`), two migrations, seed,
-  `db:check`, `@pos/db/testing`.
+- `packages/db` — schema (**fifteen** tables: M9 added `outbox_controls`, M10 added
+  `printer_controls` and gave `print_jobs` its `restaurant_id` and `printed_at`), **three**
+  migrations, seed, `db:check`, `@pos/db/testing`, and `printer-controls.ts` — the one reader and
+  writer of the `Fail Printer` switch, in `@pos/db` because the API obeys it and the worker's CLI
+  writes it.
   **No schema change was needed in M5**; M2 wrote it in full, and `payments` and the rest of
   `kitchen_tickets.state` finally got used.
 - `apps/api` — `POST /api/orders/:orderId/mutations` with nine zod branches; the two §17 kitchen
   adapters `POST /api/kitchen/orders/:orderId/{preparing,ready}`; the reads `GET /api/menu`,
   `/api/orders/:orderId`, `/api/kitchen/tickets`, `/api/config`; `src/modules/realtime/` — the
-  Socket.IO server with the Redis adapter, `roomsFor()`, and the §12.2 consumer.
+  Socket.IO server with the Redis adapter, `roomsFor()`, and the §12.2 consumer; and, since M10,
+  `src/modules/printer/` — the fake device behind `POST /api/printer/print`.
 - `apps/worker` — the §10 three-step outbox publisher with lease, backoff and dead-lettering; the
   Kafka producer and topic bootstrap; the kitchen consumer and its transactional projection, which
   now **advances** `state` from `OrderPreparing`, `OrderReady` and `OrderCancelled`.
@@ -57,6 +62,13 @@ build and **262 tests** (61 domain, 52 api, **36 worker**, 113 web) against a re
   abandoned claims, bounds each send by what is left of its lease (`sendWithinLease`), honours a
   pause between rows *and* across a delay, and counts reclaims; `apps/worker/scripts/
   outbox-control.ts` behind `pnpm -F @pos/worker outbox`. ADR 010.
+- **The print job (M10):** `apps/worker/src/modules/printing/` — `ticket-hash.ts` (the identity both
+  the live path and the sweep compute), `printer-client.ts` (the HTTP device, non-2xx throws),
+  `print-processor.ts` (the **only** writer of `print_jobs`, plus `resetDeadLetteredJob`),
+  `print-queue.ts` and `print-worker.ts` (BullMQ, `jobId` = ticket hash, terminal jobs never
+  retained), `reconcile.ts` (the sweep and the manual retry). The kitchen consumer enqueues after
+  its commit and never fails on it; `apps/worker/scripts/printer-control.ts` sits behind
+  `pnpm -F @pos/worker printer`. ADR 014.
 - `apps/web` — a POS screen with all six of its commands (add, ±quantity, remove, send, pay,
   cancel) and a kitchen screen with four columns and two command buttons. Pinia stores for menu,
   order, kitchen and connection. `/debug` and `/demo` are still the M1 placeholder (M11, M16).
@@ -331,6 +343,19 @@ build and **262 tests** (61 domain, 52 api, **36 worker**, 113 web) against a re
 - Workspace packages resolve through their `exports` to `dist`, so `pnpm run build:packages` runs
   before dev, typecheck, build, test and the db scripts. Vitest aliases the sources instead.
 - Root `pnpm test` runs the suites with `--workspace-concurrency=1`; they share one test database.
+- **`print_jobs` is written by the print processor and by nothing else** (ADR 014). That is what
+  gives the sweep an exact question: a `kitchen_tickets` row with no `print_jobs` row means nothing
+  has ever tried to print that ticket. Anything M11 adds must read that table, never write it — the
+  one exception is `resetDeadLetteredJob`, which is a human's decision and lives behind the CLI.
+- **BullMQ owns the print schedule; the row owns the verdict.** `attempt_count` and BullMQ's
+  `attemptsMade` are allowed to differ, and only the first one dead-letters anything.
+- **The print queue's `jobId` is the ticket hash, and terminal jobs are never retained.** A retained
+  completed or failed job under that id would silently swallow every later `add` for the ticket,
+  including the sweep's repair and a human's retry.
+- **Redis is still soft** and readiness still checks PostgreSQL only, print queue or not (ADR 014).
+- **The worker pins `ioredis@5`** to match the copy BullMQ bundles; the API stays on `ioredis@6` for
+  the Socket.IO adapter. Mixing them is a type error, not a runtime one, and the error names a
+  protected field on `AbstractConnector` rather than the version skew.
 
 ## Decisions already made
 
@@ -403,6 +428,12 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   the persist out of `adopt` moved the write and left the rule behind: `acceptsSnapshot` still
   guards memory and no longer guards the disk. Splitting a function into two responsibilities means
   asking which of its invariants belonged to which half, and I moved the code without asking.
+- **M10's lesson came from the pair question a third time, and it moved a write rather than fixing
+  one.** The obvious place to insert the `print_jobs` row is where the job is enqueued; putting it
+  in the *processor* instead is what makes "a ticket with no row" mean "nothing has ever tried to
+  print this". The same table, the same column, one step later in the sequence, and the difference
+  is that the reconciler stops having to guess. **When a repair mechanism needs a timeout to tell
+  two states apart, suspect the write that created the ambiguity, not the repair.**
 
 ## Known problems / open questions
 
@@ -416,8 +447,28 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   consumer that is down freezes the versions the rail commands at. M11's `/debug` is where that lag
   becomes a number.
 - Scope grew across the reviews and nothing was cut, by explicit choice. Watch the usage budget.
-- M10 (print job) survives mainly because BullMQ was wanted as a résumé keyword; it is first on the
-  drop list.
+- **A duplicate ticket can physically print, and nothing in this repository can prevent it**
+  (§12.3, ADR 014). If the device emits the ticket and the worker dies before writing `PRINTED`, the
+  retry prints it again. `ticket_hash` deduplicates the record, the `Idempotency-Key` deduplicates
+  the request within the device's own memory, and the kitchen screen says so in those words.
+- **The fake printer's idempotency ledger is in memory and holds 500 keys.** Restarting the API
+  forgets every key, so a retry arriving afterwards prints a second ticket; so does a key evicted by
+  the 501st print. Deliberate — a real device's dedup window is its own memory — and it means
+  §21.14 proves a property of the endpoint, never of the paper.
+- **`print_jobs.attempt_count` and BullMQ's `attemptsMade` can disagree**, on purpose. A BullMQ
+  dashboard would show a different number from the one that decides anything.
+- **`PRINT_STALE_MS` is coupled to `PRINT_BACKOFF_BASE_MS` and `PRINT_MAX_ATTEMPTS`**, and nothing
+  enforces it. Set the staleness below the longest backoff a healthy retry can be waiting out and
+  the sweep will enqueue jobs that are merely slow. The defaults leave a wide margin (60 s against a
+  16 s worst case) and a check would need the sweep to know the queue's configuration.
+- **The sweep skips `CANCELLED` tickets and the live path does not**, so an order cancelled a second
+  after being sent to the kitchen can still print, while one cancelled before the sweep runs will
+  not. The rule cannot be made symmetric without delaying every ticket.
+- **The print worker is fleet-wide and single-device.** One queue, one fake printer, no
+  per-restaurant routing, `concurrency` left at one. Two workers would race on the same
+  `print_jobs` row and spend attempts twice as fast.
+- **A Redis outage is invisible until M11.** Nothing prints, the sweep logs a warning every
+  `PRINT_RECONCILE_MS`, readiness stays green (ADR 014), and no screen says why.
 - Infrastructure URLs intentionally have development defaults. M14 production images must require
   explicit values rather than inheriting localhost defaults.
 - **Kafka is in the test path twice, and only twice.** `kafka-roundtrip.integration.test.ts` runs
@@ -497,8 +548,10 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **A cached snapshot is briefly stale after a reload**, between hydration and the first refetch.
   That is what the cache is for, and it is visibly wrong for a moment against a server that moved
   on while the tab was closed.
-- **`Simulate Offline` is on the POS header, not on `/debug`.** §18 wants the eleven controls in one
-  place; M12 moves it. The other ten do not exist yet.
+- **§18's eleven controls are in three places, and none of them is `/debug`.** `Simulate Offline` is
+  on the POS header, `Pause Outbox Publisher` and `Delay Outbox Publishing` are behind
+  `pnpm -F @pos/worker outbox`, and `Fail Printer` is behind `pnpm -F @pos/worker printer`. M12
+  gathers all of them into one page; the remaining seven do not exist yet.
 - **The client has no backoff and no automatic retry.** By design (ADR 002): the engine runs on
   explicit triggers so the demo is deterministic. A server that is down and a socket that never
   reconnects therefore leave the queue sitting until the operator presses **Sync now**.
@@ -513,40 +566,44 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 ## First command of the next session
 
 ```
-Read docs/PROGRESS.md, then expand M10 from docs/MILESTONES.md into docs/milestones/M10.md and
-implement M10 only. Stop when the M10 Verification block passes.
+Read docs/PROGRESS.md, then expand M11 from docs/MILESTONES.md into docs/milestones/M11.md and
+implement M11 only. Stop when the M11 Verification block passes.
 
-M10 is the BullMQ print job: a fake local printer that can be made to fail on demand and that
-honours an idempotency key, `print_jobs` as the durable record, `ticket_hash` for deduplicating
-it, bounded backoff, a dead-letter state, and a periodic sweep that reconciles jobs missing
-against `kitchen_tickets`. Test §21.14, scenario §19.9. Model: Sonnet. Size: M.
+M11 is the debug dashboard: every counter from §20, the five read endpoints
+`GET /api/debug/{events,conflicts,outbox,dependencies,metrics}`, terminal presence in Redis, and
+the `/debug` page with all the sections §16 asks for — including dead-lettered outbox rows, print
+job state, and hard-versus-soft dependency marking. Verification: every section populates against
+live traffic. Model: Sonnet. Size: M.
 
 Six things worth knowing before you plan:
 
-1. **This is the milestone to cut.** `MILESTONES.md` names M10 first on the drop list, and
-   `PROGRESS.md` says why: it survives mainly because BullMQ was wanted as a résumé keyword. If
-   the usage budget is tight, say so and skip to M11 rather than half-building it.
-2. **BullMQ has exactly one justified job here, and ADR 010 says why.** The outbox does *not*
-   use it: retries there live in PostgreSQL because a job and a row would be two sources of
-   truth for one fact. Do not "unify" the two retry mechanisms — the ADR is accepted, and the
-   contrast between them is the interview point.
-3. **The guarantee is at-least-once and a duplicate ticket can physically print** (§12.3). The
-   UI and the docs must say that, not imply exactly-once. `ticket_hash` deduplicates the
-   *record*; the idempotency key deduplicates what the *endpoint* accepts; neither can promise
-   anything about paper. M9's ADR 010 is the model for writing that honestly.
-4. **The enqueue happens after the kitchen consumer's transaction commits**, never inside it —
-   §7 forbids the network call, and M9's §21.13 test is the reason the redelivery path has to
-   stay idempotent. So ask the pair question again: the projection commits, then the job is
-   enqueued, and a crash between them is what the reconciliation sweep exists to repair. Write
-   that table in the brief before writing code.
-5. **Redis becomes load-bearing for the first time.** Everywhere else it is a soft dependency
-   (ADR 011) and readiness ignores it. Decide explicitly whether a print queue changes that, and
-   record the answer — the default should be no.
-6. **`print_jobs` already exists in the schema** (`packages/db/src/schema.ts`, since M2) with
-   `ticket_hash` unique, `attempt_count`, `last_error` and `state`. Check whether it needs a
-   migration at all before generating one. `pnpm db:generate` works again as of M9; it had been
-   pointing at a schema path that does not exist.
+1. **`/debug` is the first screen that reads across every subsystem**, so its risk is not the SQL
+   but the shape: five endpoints, one page, and a temptation to let the page query whatever it
+   likes. Decide up front what each endpoint owns, and keep the counters in one module rather
+   than incremented at twenty call sites.
+2. **§20's counter list is long and half of it does not exist yet.** API requests and errors,
+   active sockets, mutations received/applied, duplicates prevented, id reuse rejected,
+   cross-tenant rejections, conflicts, blocked mutations, outbox pending/published/dead-lettered,
+   Kafka events consumed, duplicate events prevented, print jobs succeeded/failed/dead-lettered,
+   offline sync successes and failures. Some are database queries (outbox, conflicts, print jobs)
+   and some are in-process counters that reset on restart. **Say which is which on the page** —
+   a number that silently resets is worse than no number.
+3. **The counters live in two processes.** The worker publishes and prints; the API serves
+   `/debug`. An in-process counter in the worker is not readable from the API without either a
+   shared store (Redis) or a database read. Prefer deriving from the database where the fact is
+   already there — `outbox_events`, `print_jobs`, `conflict_log` all carry their own history —
+   and reach for Redis only for what genuinely has no row.
+4. **Consumer lag is the one dependency number that needs a Kafka admin client.**
+   `/api/debug/dependencies` has been reporting everything except lag since M6, and PROGRESS
+   names it as the gap. It belongs here.
+5. **Terminal presence in Redis is new state with a lifetime.** Decide what writes it (the
+   Socket.IO connection handler), what expires it (a TTL, refreshed on activity), and what a
+   stale entry means on screen. A presence list that only grows is a bug that looks like a
+   feature for the first ten minutes.
+6. **Read-only, and no new switches.** M12 owns §18's controls, including moving `Simulate
+   Offline`, `Pause Outbox Publisher`, `Delay Outbox Publishing` and `Fail Printer` onto this
+   page. M11 builds the page and the numbers; it does not build a single button.
 
-Verification is `pnpm -F @pos/worker test`, `pnpm -F @pos/api test`, lint, typecheck, build, and
+Verification is `pnpm -F @pos/api test`, `pnpm -F @pos/web test`, lint, typecheck, build, and
 `pnpm verify:integration`. Run tests narrowly; do not run the whole monorepo suite.
 ```

@@ -145,6 +145,14 @@ onBeforeUnmount(() => {
       pressing the same button produce one success and one conflict (§21.10, ADR 012).
     </p>
 
+    <p class="text-sm text-stone-600">
+      A ticket sent to the kitchen is queued for the printer <strong>at least once</strong>: a
+      failed print is retried with backoff and a dead letter waits for a human, but if the device
+      prints and the worker dies before recording it, the retry prints the same ticket again. The
+      <code>ticket_hash</code> deduplicates the record and the printer's idempotency key
+      deduplicates the request; neither can promise anything about paper (§12.3, ADR 014).
+    </p>
+
     <div class="grid gap-6 lg:grid-cols-4">
       <div v-for="column in COLUMNS" :key="column.state">
         <h2 class="mb-3 text-sm font-semibold tracking-wide text-stone-600 uppercase">

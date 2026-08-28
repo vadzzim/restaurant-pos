@@ -1098,3 +1098,68 @@ which would let an older snapshot overwrite a newer pause. The watcher now sched
 only when the current one settles. It also takes a reader function rather than a `Db`, which is
 what makes all of this testable without a database that can be made slow to order — the four new
 control tests came with that change.
+
+## M10 — the print job, and the one place a job and a record may disagree
+
+M10 was first on the drop list and was built anyway. The reason it earned its place is not BullMQ
+as a résumé keyword: it is that printing is the only effect in this system that leaves the database
+entirely, so it is the only place where the effect and its record **cannot** be one transaction.
+ADR 010 rejected BullMQ for the outbox because a job and a row would be two sources of truth for one
+fact; here that dual-write is unavoidable, and the milestone is about what makes it safe. ADR 014
+records the answer.
+
+**The load-bearing decision was where the `print_jobs` row gets written.** The obvious placement is
+the enqueue: the consumer projects a ticket, writes a `PENDING` row and adds a job. That is wrong,
+and it is wrong in a way that only shows up in the reconciler. With a row written at enqueue time,
+"a ticket with a `PENDING` row" covers both _a job is running right now_ and _the job is gone and
+nothing will ever print this_, and telling them apart needs a timeout — a guess. Writing the row in
+the **processor** instead makes the sweep's question exact: a `kitchen_tickets` row with no
+`print_jobs` row means nothing has ever tried to print that ticket. A crash between the projection
+commit and the `add`, a redelivery that answered `duplicate` (§21.13) and therefore enqueued
+nothing, and a Redis that lost every key all leave that same evidence, and one mechanism repairs all
+three. Staleness is still needed for rows that _do_ exist and have gone quiet, but it is now the
+minority case rather than the whole design.
+
+**The pair question again, and the answer that shaped the consumer.** The enqueue happens after the
+projection's transaction commits — §7 forbids the network call inside it, and a queue holding a job
+for a projection that rolled back would print a ticket for an order that does not exist. That order
+means the enqueue can be lost, which is fine. What is not fine is the enqueue _failing the message
+handler_: a rejected `eachMessage` leaves the Kafka offset uncommitted, so an event whose projection
+is already applied is redelivered — for ever, if Redis is what is broken. So the enqueue logs and
+returns, and the sweep is the repair. That is the third milestone running where the interesting bug
+was not "who writes this" but "in what order, and what does a crash in between leave behind".
+
+**Two counters for one process, deliberately not reconciled.** BullMQ's `attemptsMade` and
+`print_jobs.attempt_count` count the same failures and are allowed to diverge: the queue owns the
+_schedule_ and the row owns the _verdict_. A job re-enqueued by the sweep starts a fresh BullMQ
+attempt series against a row that remembers every attempt before it, so a printer that has been down
+all afternoon dead-letters once rather than once per enqueue. Anyone reading a BullMQ dashboard will
+see a different number from `/debug`, and that is the documented cost.
+
+**`removeOnFail: true`, and the trap that forced it.** BullMQ keeps terminal jobs under their
+`jobId`, and the `jobId` here is the ticket hash — which is what makes a duplicate `add` a no-op
+while a job is live. Left in place, a _failed_ job under that id would silently swallow every later
+`add` for the same ticket: the sweep's repair and a human's manual retry would both return success
+and do nothing. The visible record of a failure is the `print_jobs` row, so the queue keeps neither
+completed nor failed jobs and the id is always free.
+
+**Two smaller judgements, both recorded because they are not obviously right.** The sweep skips
+`CANCELLED` tickets — it can run minutes late, and paper for an order the floor already cancelled
+helps nobody — while the live path does not, so an order cancelled a second after being sent still
+prints. And the fake printer's idempotency ledger is an in-memory `Map`, not a table: a real
+device's dedup window is its own memory and forgets on a power cycle, and modelling it durably would
+look more robust while claiming a guarantee §12.3 explicitly does not have.
+
+**Three mechanical notes.**
+
+- `bullmq@5` bundles `ioredis@5`, and the worker had been given `ioredis@6`. Passing an `ioredis@6`
+  client where BullMQ wants its own is a type error under `exactOptionalPropertyTypes`, with a
+  twelve-line trace that ends at a protected field on `AbstractConnector`. The worker now pins
+  `ioredis@^5.11.1`; the API stays on 6 for the Socket.IO adapter, which is a different package
+  graph and does not meet BullMQ's types.
+- `pnpm install` reports `msgpackr-extract` as an ignored build script. It is an optional native
+  accelerator for BullMQ's serialiser and its absence is a silent JavaScript fallback, so nothing
+  approves it.
+- The `NOT NULL` column added to `print_jobs` has no default, which would fail on a table with rows.
+  Nothing has ever written `print_jobs` — it was created empty in M2 and this is its first user — so
+  the migration is safe exactly once, and this is the note for the next person who reads it.

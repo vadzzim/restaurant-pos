@@ -37,6 +37,28 @@ const environmentSchema = z.object({
   OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
   OUTBOX_BACKOFF_BASE_MS: z.coerce.number().int().positive().default(1_000),
   OUTBOX_BACKOFF_MAX_MS: z.coerce.number().int().positive().default(60_000),
+  /**
+   * The fake local printer (§12.3). It is an endpoint on the API rather than a device on the LAN,
+   * and the worker is the only thing that calls it.
+   */
+  PRINTER_URL: z.url().default('http://localhost:3000/api/printer/print'),
+  /** A device that has not answered in this long is a device that is not going to. */
+  PRINTER_TIMEOUT_MS: z.coerce.number().int().positive().default(3_000),
+  PRINT_QUEUE_NAME: z.string().min(1).default('print'),
+  /** Attempts, not retries: the first try counts. Reaching it dead-letters the row. */
+  PRINT_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  /** BullMQ's exponential backoff base, so attempt n waits `base * 2^(n-1)`. */
+  PRINT_BACKOFF_BASE_MS: z.coerce.number().int().positive().default(1_000),
+  /** How often the reconciliation sweep looks for tickets nothing has printed. */
+  PRINT_RECONCILE_MS: z.coerce.number().int().positive().default(15_000),
+  /** A bound on one sweep, so a backlog of unprintable tickets cannot monopolise the loop. */
+  PRINT_RECONCILE_LIMIT: z.coerce.number().int().positive().default(50),
+  /**
+   * How long a `PENDING` or `FAILED` row may sit untouched before the sweep assumes its job is
+   * gone — a Redis flush, or a worker that died between the insert and the send. It must exceed
+   * the longest backoff a live job can be waiting out, or the sweep re-enqueues healthy retries.
+   */
+  PRINT_STALE_MS: z.coerce.number().int().positive().default(60_000),
 });
 
 export type AppConfig = z.infer<typeof environmentSchema>;

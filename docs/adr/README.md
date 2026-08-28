@@ -40,4 +40,5 @@ What was evaluated and why it was rejected.
 | `013-client-persistence.md` | M7 | the three Dexie tables, and who may write them at hydration |
 | `002-offline-first.md` | M8 | a derived optimistic view, a projected `baseVersion`, and why a conflict halts the queue |
 | `010-db-outbox-retries.md` | M9 | why retries live in Postgres and not in BullMQ |
+| `014-print-job-queue.md` | M10 | why the print job *is* BullMQ's, and what reconciles the two records |
 | `008-feature-flags.md` | M13 | why the flag gates transport, not the write path |

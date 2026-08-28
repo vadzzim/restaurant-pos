@@ -236,6 +236,8 @@ export const API_ERROR_CODES = [
   /** The menu has no such product. A bad request, not a conflict: no version rebase would help. */
   'PRODUCT_NOT_FOUND',
   'ROUTE_NOT_FOUND',
+  /** The fake printer is switched off (§18 `Fail Printer`). A 503: retrying later is the answer. */
+  'PRINTER_OFFLINE',
   'INTERNAL_ERROR',
 ] as const;
 
@@ -331,6 +333,36 @@ export interface KitchenTicket {
   sourceEventVersion: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * The lifecycle of a `print_jobs` row (§12.3). `FAILED` is not terminal — it means the last
+ * attempt failed and BullMQ is holding a retry — and `DEAD_LETTER` is: only a human moves a row
+ * out of it.
+ */
+export const PRINT_JOB_STATES = ['PENDING', 'PRINTED', 'FAILED', 'DEAD_LETTER'] as const;
+
+export type PrintJobState = (typeof PRINT_JOB_STATES)[number];
+
+/** The header the fake printer deduplicates on. It carries the ticket hash (§21.14). */
+export const PRINTER_IDEMPOTENCY_HEADER = 'idempotency-key';
+
+/** What the worker posts to the fake printer: the ticket as it should appear on paper. */
+export interface PrintTicketRequest {
+  orderId: string;
+  restaurantId: string;
+  tableNumber: string;
+  items: OrderItemSnapshot[];
+}
+
+/**
+ * `printed: false` means the device recognised the idempotency key and did **not** emit a second
+ * ticket. It is a success for the caller either way — which is the whole contract §21.14 tests.
+ */
+export interface PrintTicketResponse {
+  receiptId: string;
+  printed: boolean;
+  duplicate: boolean;
 }
 
 export const FEATURE_FLAG_KEYS = ['realtime.websocket_push'] as const;

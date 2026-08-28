@@ -14,9 +14,10 @@ const migrationsFolder = fileURLToPath(new URL('../drizzle', import.meta.url));
  * Tables holding per-test state. Reference data (restaurants, terminals, products, flags) is
  * seeded once and left alone, so every test starts from the same menu without re-seeding.
  *
- * `outbox_controls` is here rather than with the reference data because it is operational state a
- * test may flip: an empty table reads as the defaults, so truncating it un-pauses the publisher for
- * the next test instead of leaking a pause into it.
+ * `outbox_controls` and `printer_controls` are here rather than with the reference data because
+ * they are operational state a test may flip: an empty table reads as the defaults, so truncating
+ * them un-pauses the publisher and fixes the printer for the next test instead of leaking a
+ * failure into it.
  */
 const TRANSACTIONAL_TABLES = [
   'order_items',
@@ -28,6 +29,7 @@ const TRANSACTIONAL_TABLES = [
   'kitchen_tickets',
   'conflict_log',
   'print_jobs',
+  'printer_controls',
   'orders',
 ] as const;
 

@@ -224,6 +224,22 @@ export const outboxControls = pgTable(
   (table) => [check('outbox_controls_singleton', sql`${table.id} = 'singleton'`)],
 );
 
+/**
+ * §18's `Fail Printer`, kept separate from `outbox_controls` because they are switches on two
+ * different components and nothing about one implies the other. The shape is deliberately the
+ * same: one row, `id = 'singleton'`, a missing row reading as the defaults, flipped by a process
+ * (the CLI now, `/debug` in M12) that is not the process that obeys it.
+ */
+export const printerControls = pgTable(
+  'printer_controls',
+  {
+    id: text('id').primaryKey(),
+    failing: boolean('failing').notNull().default(false),
+    updatedAt,
+  },
+  (table) => [check('printer_controls_singleton', sql`${table.id} = 'singleton'`)],
+);
+
 export const featureFlags = pgTable('feature_flags', {
   key: text('key').primaryKey(),
   enabled: boolean('enabled').notNull().default(false),
@@ -234,14 +250,33 @@ export const featureFlags = pgTable('feature_flags', {
 /**
  * The durable record behind the BullMQ print job (spec §12.3). It records what we believe was
  * printed; it cannot know what physically emerged from the device.
+ *
+ * **Written by the processor, never by the enqueuer** (ADR 014). That is what lets the
+ * reconciliation sweep read "a `kitchen_tickets` row with no `print_jobs` row" as "nothing has
+ * ever tried to print this ticket" — the one condition it can repair without guessing.
+ *
+ * `ticket_hash` is unique, so one ticket has at most one record however many times it is enqueued.
  */
-export const printJobs = pgTable('print_jobs', {
-  id: uuid('id').primaryKey(),
-  orderId: uuid('order_id').notNull(),
-  ticketHash: text('ticket_hash').notNull().unique(),
-  state: text('state').notNull(),
-  attemptCount: integer('attempt_count').notNull().default(0),
-  lastError: text('last_error'),
-  createdAt,
-  updatedAt,
-});
+export const printJobs = pgTable(
+  'print_jobs',
+  {
+    id: uuid('id').primaryKey(),
+    orderId: uuid('order_id').notNull(),
+    restaurantId: text('restaurant_id')
+      .notNull()
+      .references(() => restaurants.id),
+    ticketHash: text('ticket_hash').notNull().unique(),
+    state: text('state').notNull(),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    lastError: text('last_error'),
+    /** When the device accepted the ticket. Null everywhere else, including a dead letter. */
+    printedAt: timestamp('printed_at', { withTimezone: true }),
+    createdAt,
+    updatedAt,
+  },
+  (table) => [
+    index('print_jobs_order_id_idx').on(table.orderId),
+    // The sweep reads by state on every pass, and /debug (M11) will read the same way.
+    index('print_jobs_state_idx').on(table.state),
+  ],
+);

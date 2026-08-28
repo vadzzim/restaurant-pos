@@ -10,6 +10,8 @@ import { registerKitchenReadRoutes } from './modules/kitchen/api/kitchen-read-ro
 import { registerMenuRoutes } from './modules/menu/api/menu-routes.js';
 import { registerMutationRoutes } from './modules/orders/api/mutation-routes.js';
 import { registerOrderReadRoutes } from './modules/orders/api/order-read-routes.js';
+import { registerPrinterRoutes } from './modules/printer/api/printer-routes.js';
+import { createFakePrinter, type FakePrinter } from './modules/printer/application/fake-printer.js';
 import { ApiError, asClientError } from './shared/errors.js';
 import {
   correlatedChildLogger,
@@ -29,6 +31,11 @@ export interface BuildAppOptions {
   /** The complete dependency list for the health routes; see `HealthRouteOptions`. */
   probes?: DependencyProbe[];
   healthTimeoutMs?: number;
+  /**
+   * The fake device behind `POST /api/printer/print`. A fresh one per app by default; a test passes
+   * its own so it can read `physicalPrints()`, which is the assertion §21.14 actually rests on.
+   */
+  printer?: FakePrinter;
 }
 
 /**
@@ -41,6 +48,7 @@ export function buildApp({
   logDestination,
   probes,
   healthTimeoutMs,
+  printer = createFakePrinter(),
 }: BuildAppOptions): FastifyInstance {
   const app = Fastify({
     logger: {
@@ -105,6 +113,7 @@ export function buildApp({
   registerKitchenReadRoutes(app, db);
   registerMutationRoutes(app, db);
   registerKitchenCommandRoutes(app, db);
+  registerPrinterRoutes(app, db, printer);
 
   return app;
 }

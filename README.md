@@ -30,10 +30,24 @@ pnpm verify:integration       # Compose up, the PostgreSQL- and broker-backed su
 ```
 
 `pnpm verify:integration` is the reproducible one: it brings the infrastructure up, waits for the
-healthchecks, runs the suites that need it — including a real round trip through Redpanda — and
+healthchecks, runs the suites that need it — including a real round trip through Redpanda and one
+through the BullMQ print queue on a real Redis — and
 tears down **only the containers it started**, so a demo you already have running survives. Its full
 output lands in `.verify-output/integration.log`. Pass `--keep` to leave the containers up. CI runs
 this same command and declares no service containers of its own.
+
+## Operational switches
+
+The §18 failure simulator gets its buttons in M12. Until then the switches it will drive are real
+and reachable from a terminal, and a running worker picks them up without a restart:
+
+```bash
+pnpm -F @pos/worker outbox status | pause | resume | delay 3000
+pnpm -F @pos/worker printer status | fail | fix | retry <orderId>
+```
+
+`printer fail` makes `POST /api/printer/print` answer 503, which is how scenario §19.9 drives a
+print job into its dead-letter state; `printer retry` puts a dead-lettered ticket back on the queue.
 
 ## URLs
 
