@@ -8,7 +8,8 @@
 **Last completed milestone:** M10 — the BullMQ print job: a fake printer that fails on demand and
 honours an idempotency key, `print_jobs` written by the *processor*, `ticket_hash` deduplicating the
 record, bounded backoff and a dead-letter state owned by BullMQ, and a reconciliation sweep that
-reads `kitchen_tickets` and repairs every way an enqueue can be lost.
+reads `kitchen_tickets` and repairs every way an enqueue can be lost. Plus review round 1 (one P1,
+one P2, both fixed).
 **The entire order lifecycle is demoable end to end, a broker outage is demoable, reloading the tab
 mid-order is demoable, §19.2, §19.3 and now §19.9 are demoable, and the publisher and the printer
 can both be driven from a terminal — the buttons for them are M12's.**
@@ -20,9 +21,9 @@ M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, 
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
 `2666d4a` and its second at `6349dce`, M8 `8f72739` plus two review rounds through `5414676`,
-M9 `ed9a0b7` plus its review round at `4718bc4`, M10 in this commit.
+M9 `ed9a0b7` plus its review round at `4718bc4`, M10 `5909867` plus its review round in this commit.
 The tree passes typecheck, lint,
-build and **282 tests** (61 domain, **57 api**, **51 worker**, 113 web) against a real PostgreSQL,
+build and **283 tests** (61 domain, **57 api**, **52 worker**, 113 web) against a real PostgreSQL,
 plus **three integration tests** that run only under `pnpm verify:integration` — two against a real
 Redpanda (§21.12's round trip and §21.13's offset window) and one new one against a real Redis and
 a real BullMQ worker. All green at the end of M10.
@@ -66,7 +67,9 @@ a real BullMQ worker. All green at the end of M10.
   the live path and the sweep compute), `printer-client.ts` (the HTTP device, non-2xx throws),
   `print-processor.ts` (the **only** writer of `print_jobs`, plus `resetDeadLetteredJob`),
   `print-queue.ts` and `print-worker.ts` (BullMQ, `jobId` = ticket hash, terminal jobs never
-  retained), `reconcile.ts` (the sweep and the manual retry). The kitchen consumer enqueues after
+  retained, the `add` bounded by `PRINT_ENQUEUE_TIMEOUT_MS`), `reconcile.ts` (the sweep and the
+  manual retry), and `shared/redis.ts` — `BLOCKING_CONNECTION` versus `producerConnection()`, the
+  two shapes review round 1 found conflated. The kitchen consumer enqueues after
   its commit and never fails on it; `apps/worker/scripts/printer-control.ts` sits behind
   `pnpm -F @pos/worker printer`. ADR 014.
 - `apps/web` — a POS screen with all six of its commands (add, ±quantity, remove, send, pay,
@@ -352,7 +355,15 @@ a real BullMQ worker. All green at the end of M10.
 - **The print queue's `jobId` is the ticket hash, and terminal jobs are never retained.** A retained
   completed or failed job under that id would silently swallow every later `add` for the ticket,
   including the sweep's repair and a human's retry.
-- **Redis is still soft** and readiness still checks PostgreSQL only, print queue or not (ADR 014).
+- **Redis is still soft** and readiness still checks PostgreSQL only, print queue or not (ADR 014) —
+  and that claim is only true because **the enqueue is bounded twice**: a `commandTimeout` and a
+  finite `maxRetriesPerRequest` on the producer connection for a Redis that broke, and a timeout
+  race inside `createPrintQueue` for a Redis that was never reachable, where BullMQ is still in
+  `waitUntilReady` and no command exists to time out. Anything that enqueues from inside a consumer
+  needs both. Neither ends the connection, so the queue recovers on its own.
+- **The `PRINTER_URL` default is right for `pnpm dev` and wrong in a container.** The Compose `app`
+  profile sets it to `http://api:3000/api/printer/print`; inside that container `localhost` is the
+  worker. M14's production images need the same care.
 - **The worker pins `ioredis@5`** to match the copy BullMQ bundles; the API stays on `ioredis@6` for
   the Socket.IO adapter. Mixing them is a type error, not a runtime one, and the error names a
   protected field on `AbstractConnector` rather than the version skew.
@@ -434,6 +445,15 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   print this". The same table, the same column, one step later in the sequence, and the difference
   is that the reconciler stops having to guess. **When a repair mechanism needs a timeout to tell
   two states apart, suspect the write that created the ambiguity, not the repair.**
+- **M10's review round is the M6 lesson again, one library down.** `maxRetriesPerRequest: null` is
+  BullMQ's requirement for the connection its worker *blocks* on; I set it on both connections
+  because one helper built both, and on the producer it means "wait for ever" — inside a Kafka
+  consumer's `eachMessage`. The rule ("Redis is soft") was stated correctly in an ADR written the
+  same day and attached to the wrong object, which is now the sixth time. **Two connections that
+  differ only in options are two things, and a helper that builds both hides which is which.** The
+  second half is newer: bounding it needed *two* guards, because a connection that broke and a
+  connection that was never ready fail at different layers — and the obvious single fix covers only
+  the first.
 
 ## Known problems / open questions
 
@@ -467,6 +487,10 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **The print worker is fleet-wide and single-device.** One queue, one fake printer, no
   per-restaurant routing, `concurrency` left at one. Two workers would race on the same
   `print_jobs` row and spend attempts twice as fast.
+- **An abandoned enqueue may still land.** The timeout rejects the promise; it cannot unsend the
+  command. The `jobId` is the ticket hash, so a late `add` is a no-op — but "the worker reported a
+  failed enqueue" and "nothing was queued" are not the same statement, exactly as with the outbox's
+  `sendWithinLease`.
 - **A Redis outage is invisible until M11.** Nothing prints, the sweep logs a warning every
   `PRINT_RECONCILE_MS`, readiness stays green (ADR 014), and no screen says why.
 - Infrastructure URLs intentionally have development defaults. M14 production images must require

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { loadConfig } from '@pos/config';
 import type { PrintTicketResponse } from '@pos/contracts';
 import { printJobs } from '@pos/db';
-import { Redis } from 'ioredis';
+import type { Redis, RedisOptions } from 'ioredis';
 import pino from 'pino';
 import { afterAll, describe, expect, it } from 'vitest';
 
@@ -11,6 +11,7 @@ import { createPrintQueue } from '../src/modules/printing/print-queue.js';
 import { startPrintWorker } from '../src/modules/printing/print-worker.js';
 import type { Printer } from '../src/modules/printing/printer-client.js';
 import { ticketHash, type PrintableTicket } from '../src/modules/printing/ticket-hash.js';
+import { BLOCKING_CONNECTION, connectRedis, producerConnection } from '../src/shared/redis.js';
 import { db, useTestDatabase } from './helpers.js';
 
 useTestDatabase();
@@ -29,11 +30,14 @@ const logger = pino({ level: 'silent' });
  */
 const connections: Redis[] = [];
 
-function connect(): Redis {
-  const redis = new Redis(config.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: null });
+/** The production shapes, so the round trip exercises the options the worker actually runs with. */
+function connect(options: RedisOptions): Redis {
+  const redis = connectRedis(config.REDIS_URL, options, 'test', logger);
   connections.push(redis);
   return redis;
 }
+
+const producerOptions = producerConnection(config.PRINT_ENQUEUE_TIMEOUT_MS);
 
 afterAll(async () => {
   await Promise.all(connections.map(async (redis) => redis.quit()));
@@ -73,12 +77,13 @@ describe('the print queue against a real Redis', () => {
       },
     };
 
-    const queue = createPrintQueue(connect(), {
+    const queue = createPrintQueue(connect(producerOptions), {
       queueName,
       maxAttempts: 3,
       backoffBaseMs: 100,
+      enqueueTimeoutMs: config.PRINT_ENQUEUE_TIMEOUT_MS,
     });
-    const worker = startPrintWorker(connect(), db(), printer, logger, {
+    const worker = startPrintWorker(connect(BLOCKING_CONNECTION), db(), printer, logger, {
       queueName,
       maxAttempts: 3,
     });
@@ -100,7 +105,7 @@ describe('the print queue against a real Redis', () => {
       await queue.close();
 
       // The queue is disposable: nothing outside this test may find its keys afterwards.
-      const cleaner = connect();
+      const cleaner = connect(producerOptions);
       const leftovers = await cleaner.keys(`bull:${queueName}:*`);
       if (leftovers.length > 0) {
         await cleaner.del(...leftovers);

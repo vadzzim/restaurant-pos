@@ -129,6 +129,9 @@ services:
       DATABASE_URL: postgresql://pos:pos@postgres:5432/pos
       REDIS_URL: redis://redis:6379
       KAFKA_BROKERS: redpanda:29092
+      # The fake printer is an endpoint on the API (§12.3), so inside this container `localhost`
+      # would be the worker itself: every print would be refused and the ticket would dead-letter.
+      PRINTER_URL: http://api:3000/api/printer/print
     volumes:
       - .:/workspace
       - worker_node_modules:/workspace/node_modules
@@ -139,6 +142,8 @@ services:
         condition: service_healthy
       redpanda:
         condition: service_healthy
+      api:
+        condition: service_started
 
 volumes:
   postgres_data:

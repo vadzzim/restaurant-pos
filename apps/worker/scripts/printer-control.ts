@@ -1,9 +1,10 @@
 import { loadConfig } from '@pos/config';
 import { closeDb, getDb, readPrinterControls, setPrinterControls } from '@pos/db';
-import { Redis } from 'ioredis';
+import pino from 'pino';
 
 import { createPrintQueue } from '../src/modules/printing/print-queue.js';
 import { retryDeadLetteredTicket } from '../src/modules/printing/reconcile.js';
+import { connectRedis, producerConnection } from '../src/shared/redis.js';
 
 /**
  * §18's `Fail Printer` and §19.9's manual retry, until M12 gives them buttons in `/debug`.
@@ -43,11 +44,19 @@ async function main(): Promise<void> {
         throw new Error('retry takes an order id');
       }
       const config = loadConfig();
-      const redis = new Redis(config.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: null });
+      // The producer's bounded options, so `retry` against an unreachable Redis prints an error
+      // rather than hanging a terminal.
+      const redis = connectRedis(
+        config.REDIS_URL,
+        producerConnection(config.PRINT_ENQUEUE_TIMEOUT_MS),
+        'printer-cli',
+        pino({ level: config.LOG_LEVEL }),
+      );
       const queue = createPrintQueue(redis, {
         queueName: config.PRINT_QUEUE_NAME,
         maxAttempts: config.PRINT_MAX_ATTEMPTS,
         backoffBaseMs: config.PRINT_BACKOFF_BASE_MS,
+        enqueueTimeoutMs: config.PRINT_ENQUEUE_TIMEOUT_MS,
       });
       try {
         const result = await retryDeadLetteredTicket(db, queue, argument);

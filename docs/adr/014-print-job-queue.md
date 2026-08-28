@@ -35,10 +35,19 @@ enqueued nothing (§21.13), Redis losing its keys — leaves the same evidence i
 and one mechanism repairs all three. `PRINTED` and `DEAD_LETTER` rows are never swept; `PENDING` and
 `FAILED` rows are, once they have been untouched for longer than any live backoff.
 
-**Redis stays a soft dependency.** `/api/health/ready` still checks PostgreSQL only (ADR 011). With
-Redis down, orders are accepted, projected and displayed, and the tickets that did not print are
-still recorded in `kitchen_tickets` waiting for the sweep. Marking the API unready would take a
-working POS offline to protect a printer.
+**Redis stays a soft dependency, and the enqueue is bounded so that stays true.** `/api/health/ready`
+still checks PostgreSQL only (ADR 011). With Redis down, orders are accepted, projected and
+displayed, and the tickets that did not print are still recorded in `kitchen_tickets` waiting for
+the sweep. Marking the API unready would take a working POS offline to protect a printer.
+
+That claim rests on one mechanism, and review round 1 found it missing: the kitchen consumer awaits
+the enqueue inside `eachMessage`, so an `add` that never settles is a consumer that never commits an
+offset and never projects another order — the soft dependency taking down the hard path. The
+producer connection is therefore bounded (`commandTimeout`, a finite `maxRetriesPerRequest`) **and**
+the `add` itself is raced against a timeout, because those cover different failures: the first
+bounds a connection that was ready and then broke, the second bounds one that was never ready, where
+BullMQ is still inside `waitUntilReady` and no command exists to time out. Neither gives up on the
+connection, so the queue recovers by itself when Redis returns.
 
 **The guarantee is at-least-once, and it is stated in the UI.** `ticket_hash` deduplicates the
 record and the fake printer's `Idempotency-Key` deduplicates the request within the device's own
@@ -65,6 +74,11 @@ memory. Neither deduplicates paper: if the device prints and the worker dies bef
   live path to wait, which would delay every ticket for the sake of a rare one.
 - Redis being soft means a Redis outage is invisible to readiness and visible only in the worker's
   logs until M11's `/debug` reports it.
+- An abandoned enqueue is not a cancelled one. The `add` may still land after the timeout reported
+  failure; the `jobId` is the ticket hash, so a late arrival is a no-op, and a genuinely lost
+  enqueue is the sweep's job. The same trade the outbox's `sendWithinLease` makes (ADR 010).
+- The producer and the BullMQ worker need **different** ioredis options — bounded versus
+  unbounded — which means one shared connection cannot serve both. That is why there are two.
 
 ## Alternatives considered
 

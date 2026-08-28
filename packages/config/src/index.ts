@@ -44,6 +44,12 @@ const environmentSchema = z.object({
   PRINTER_URL: z.url().default('http://localhost:3000/api/printer/print'),
   /** A device that has not answered in this long is a device that is not going to. */
   PRINTER_TIMEOUT_MS: z.coerce.number().int().positive().default(3_000),
+  /**
+   * The bound on a single Redis command from the queue's producer connection. The kitchen consumer
+   * awaits `queue.add()` after committing its projection, so an enqueue that never settles is a
+   * consumer that never commits its offset — Redis is soft only if this is finite (ADR 014).
+   */
+  PRINT_ENQUEUE_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
   PRINT_QUEUE_NAME: z.string().min(1).default('print'),
   /** Attempts, not retries: the first try counts. Reaching it dead-letters the row. */
   PRINT_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),

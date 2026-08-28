@@ -1163,3 +1163,51 @@ look more robust while claiming a guarantee §12.3 explicitly does not have.
 - The `NOT NULL` column added to `print_jobs` has no default, which would fail on a table with rows.
   Nothing has ever written `print_jobs` — it was created empty in M2 and this is its first user — so
   the migration is safe exactly once, and this is the note for the next person who reads it.
+
+## M10 review round 1 — the soft dependency that could stop the kitchen
+
+An external review of the M10 commit returned two findings. The first is the sixth milestone
+running where the rule was stated correctly and attached to the wrong mechanism.
+
+**P1 — `maxRetriesPerRequest: null` on the queue's producer connection.** That setting is BullMQ's
+requirement for the connection its `Worker` _blocks_ on, and I applied it to both connections
+because one helper built both. On the producer it means the opposite of what it means on the worker:
+a command issued while Redis is unreachable never settles. The kitchen consumer awaits
+`queue.add()` inside `eachMessage`, after committing its projection, so an unreachable Redis leaves
+that handler suspended — the offset is never committed, and the consumer projects nothing further.
+Redis is soft everywhere in this system (ADR 011, ADR 014), and this made it the one dependency that
+could stop the kitchen. The `enqueueTicket` comment even promised the opposite: "it never throws"
+was true, and useless, because it never _returned_ either.
+
+**Bounding it needed two guards, not one, and that is the part worth remembering.** The obvious fix
+— a finite `maxRetriesPerRequest` and a `commandTimeout` on the producer — only covers a connection
+that was ready and then broke: the command reaches ioredis's offline queue and the timeout rejects
+it. If Redis was never reachable, BullMQ is still inside `RedisConnection.waitUntilReady`, no
+command has been issued at all, and there is nothing for a command timeout to bound; it waits for as
+long as ioredis keeps reconnecting, which is for ever by default. So `createPrintQueue` now also
+races the `add` against `PRINT_ENQUEUE_TIMEOUT_MS`. Neither guard gives up on the _connection_ —
+ending it would have been the third wrong answer, because the queue must work again when Redis comes
+back.
+
+Two dead ends are worth recording. `enableOfflineQueue: false` does not help, for the same reason
+the command timeout does not: the wait happens before any command exists. And BullMQ's
+`skipWaitingForReady` moves the wait rather than removing it — `init()` then runs `loadCommands` and
+a version check, which would reject through the bounded connection and leave `initializing` in a
+permanently rejected state, killing the queue for the lifetime of the process.
+
+The test is a unit test with no infrastructure at all: a queue pointed at `redis://127.0.0.1:1`,
+where every connection is refused immediately. It asserts the enqueue _rejects_, and that it does so
+within ten times its bound — the assertion is "bounded", not "fast". With the race removed it hangs
+until vitest's 30-second timeout, which is how it was checked to be capable of failing.
+
+**P2 — the Compose `app` profile pointed the worker at itself.** `PRINTER_URL` defaults to
+`http://localhost:3000/api/printer/print`, which is right for `pnpm dev` and wrong inside a
+container where `localhost` is the worker. Every print would have been refused and every ticket
+dead-lettered. The worker service now sets `PRINTER_URL: http://api:3000/api/printer/print` and
+depends on `api`. Nothing caught it because the `app` profile is a convenience that no test starts —
+the same blind spot as before, now with one more thing behind it.
+
+The shared shapes moved to `apps/worker/src/shared/redis.ts`: `BLOCKING_CONNECTION` for the BullMQ
+worker, `producerConnection(timeout)` for everything that enqueues, and one `connectRedis` that
+always attaches the `error` listener. Having the two named side by side is the point — the bug was
+that they looked like one thing.

@@ -2,7 +2,6 @@ import { hostname } from 'node:os';
 
 import { loadConfig } from '@pos/config';
 import { closeDb, getDb } from '@pos/db';
-import { Redis } from 'ioredis';
 import pino from 'pino';
 
 import { readOutboxControls, watchOutboxControls } from './modules/events/outbox-controls.js';
@@ -14,6 +13,7 @@ import { startPrintReconciler } from './modules/printing/reconcile.js';
 import { connectBroker } from './shared/broker-session.js';
 import { supervise } from './shared/broker-supervisor.js';
 import { createKafka } from './shared/kafka.js';
+import { BLOCKING_CONNECTION, connectRedis, producerConnection } from './shared/redis.js';
 
 const config = loadConfig();
 const logger = pino({ level: config.LOG_LEVEL });
@@ -31,30 +31,26 @@ const publisherOptions = {
 
 const kafka = createKafka(config);
 
-/**
- * Two connections, because BullMQ's worker blocks on Redis and a blocked client cannot also serve
- * the queue's writes. `maxRetriesPerRequest: null` is BullMQ's own requirement, and it is the right
- * shape here anyway: a command held until Redis returns beats a command that fails while it is away.
- *
- * The `error` listeners are not optional. ioredis emits connection failures as events, and an
- * `error` event with no listener is thrown — which would kill the worker, and with it the outbox
- * publisher, over a dependency that is deliberately soft (ADR 011, ADR 014).
- */
-function connectRedis(role: string): Redis {
-  const redis = new Redis(config.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: null });
-  redis.on('error', (error: unknown) => {
-    logger.warn({ err: error, role }, 'redis connection error');
-  });
-  return redis;
-}
-
-const queueRedis = connectRedis('print-queue');
-const printWorkerRedis = connectRedis('print-worker');
+// Two connections, and deliberately not the same options: BullMQ's worker blocks on Redis, while
+// the producer is awaited by the kitchen consumer and must fail rather than wait. See shared/redis.
+const queueRedis = connectRedis(
+  config.REDIS_URL,
+  producerConnection(config.PRINT_ENQUEUE_TIMEOUT_MS),
+  'print-queue',
+  logger,
+);
+const printWorkerRedis = connectRedis(
+  config.REDIS_URL,
+  BLOCKING_CONNECTION,
+  'print-worker',
+  logger,
+);
 
 const printQueue = createPrintQueue(queueRedis, {
   queueName: config.PRINT_QUEUE_NAME,
   maxAttempts: config.PRINT_MAX_ATTEMPTS,
   backoffBaseMs: config.PRINT_BACKOFF_BASE_MS,
+  enqueueTimeoutMs: config.PRINT_ENQUEUE_TIMEOUT_MS,
 });
 
 const printWorker = startPrintWorker(
@@ -181,17 +177,37 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   try {
     await publisherLoop;
     await broker.stop();
-    // The print worker first: closing it lets an attempt in flight finish and its outcome reach
-    // `print_jobs` before the pool it writes through is gone.
-    await printWorker.close();
-    await printQueue.close();
-    await Promise.all([queueRedis.quit(), printWorkerRedis.quit()]);
+    await stopPrinting();
     await closeDb();
   } catch (error) {
     logger.error({ err: error, signal }, 'Failed to shut down worker cleanly');
     process.exitCode = 1;
   }
   logger.info({ signal }, 'Worker stopped');
+}
+
+/**
+ * Redis is soft at shutdown too (ADR 014): a print pipeline that cannot reach it must not make a
+ * clean stop look like a failed one. Sequential rather than concurrent, so one failure does not
+ * hide the next, and every step logs instead of propagating.
+ */
+async function stopPrinting(): Promise<void> {
+  const steps: [string, () => Promise<unknown>][] = [
+    // The worker first: closing it lets an attempt in flight finish and its outcome reach
+    // `print_jobs` before the connections that carry it are gone.
+    ['print worker', async () => printWorker.close()],
+    ['print queue', async () => printQueue.close()],
+    ['print queue redis', async () => queueRedis.quit()],
+    ['print worker redis', async () => printWorkerRedis.quit()],
+  ];
+
+  for (const [step, stop] of steps) {
+    try {
+      await stop();
+    } catch (error) {
+      logger.warn({ err: error, step }, 'could not stop the print pipeline cleanly');
+    }
+  }
 }
 
 function sleep(ms: number): Promise<void> {
