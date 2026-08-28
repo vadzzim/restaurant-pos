@@ -59,40 +59,41 @@ describe('a reload keeps the order and the identity of what was in flight', () =
     before.useTerminal('pos-1');
 
     // An answered mutation is what puts a canonical snapshot on disk — `adopt` only paints it.
-    postMutationMock.mockResolvedValueOnce({
-      status: 'APPLIED',
-      serverVersion: 3,
-      order: snapshot('order-a', 3),
-    });
+    // The server echoes the client's own `orderId` — that is what makes a lost `CREATE_ORDER`
+    // response recoverable — so the mock does too.
+    postMutationMock.mockImplementationOnce((orderId) =>
+      Promise.resolve({ status: 'APPLIED', serverVersion: 3, order: snapshot(orderId, 3) }),
+    );
     await before.createOrder('pos-1', 'demo-restaurant', '12');
+    const orderId = before.currentOrderId ?? '';
 
     // The next request left the terminal and produced no answer: this is the only state in the
     // whole system where losing a client-side fact loses money.
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await before.addItem('pos-1', 'demo-restaurant', 'burger');
-    const sentId = before.pending?.mutationId;
+    const sentId = before.queue[0]?.mutationId;
     expect(sentId).toBeDefined();
 
     reload();
 
     const after = useOrderStore();
     after.useTerminal('pos-1');
+    // Hydration ends with a canonical read and then a pass over the queue, so the re-send happens
+    // inside `hydrate` rather than being asked for by a button.
+    fetchOrderMock.mockImplementationOnce((id) => Promise.resolve(snapshot(id, 3)));
+    postMutationMock.mockImplementationOnce((id) =>
+      Promise.resolve({ status: 'ALREADY_APPLIED', serverVersion: 4, order: snapshot(id, 4) }),
+    );
     await after.hydrate('pos-1');
 
-    expect(after.order?.id).toBe('order-a');
-    expect(after.order?.version).toBe(3);
-    expect(after.pending?.mutationId).toBe(sentId);
-    expect(after.blocked).toBe(true);
-
-    postMutationMock.mockResolvedValueOnce(applied(4));
-    await after.retryPending();
+    expect(after.currentOrderId).toBe(orderId);
 
     const [, request] = postMutationMock.mock.calls.at(-1) ?? [];
     // The same id and the same base version, so §9 answers `ALREADY_APPLIED` instead of adding a
     // second burger. A fresh id here is the one bug in this milestone that loses money.
     expect(request?.mutationId).toBe(sentId);
     expect(request?.baseVersion).toBe(3);
-    expect(after.pending).toBeUndefined();
+    expect(after.pendingCount).toBe(0);
     expect(after.version).toBe(4);
   });
 
@@ -109,7 +110,7 @@ describe('a reload keeps the order and the identity of what was in flight', () =
     expect(held[0]?.status).toBe('PENDING');
 
     postMutationMock.mockResolvedValueOnce(applied(4));
-    await orders.retryPending();
+    await orders.sync();
 
     expect(await db.pendingMutations.count()).toBe(0);
   });
@@ -125,16 +126,14 @@ describe('a reload keeps the order and the identity of what was in flight', () =
     const seenAtDelete: (string | undefined)[] = [];
     const realDelete = localStore.deletePending.bind(localStore);
     vi.spyOn(localStore, 'deletePending').mockImplementation(async (mutationId: string) => {
-      const cached = await db.orders.get('order-a');
-      seenAtDelete.push(cached === undefined ? undefined : `v${cached.snapshot.version}`);
+      const cached = await db.orders.toArray();
+      seenAtDelete.push(cached[0] === undefined ? undefined : `v${cached[0].snapshot.version}`);
       await realDelete(mutationId);
     });
 
-    postMutationMock.mockResolvedValueOnce({
-      status: 'APPLIED',
-      serverVersion: 3,
-      order: snapshot('order-a', 3),
-    });
+    postMutationMock.mockImplementationOnce((orderId) =>
+      Promise.resolve({ status: 'APPLIED', serverVersion: 3, order: snapshot(orderId, 3) }),
+    );
     await orders.createOrder('pos-1', 'demo-restaurant', '12');
 
     expect(seenAtDelete).toEqual(['v3']);
@@ -146,12 +145,19 @@ describe('a reload keeps the order and the identity of what was in flight', () =
     orders.adopt(snapshot('order-a', 3));
 
     let release: (value: MutationResponse) => void = () => {};
-    postMutationMock.mockReturnValueOnce(
-      new Promise<MutationResponse>((resolve) => {
+    let requestSent: () => void = () => {};
+    const sent = new Promise<void>((resolve) => {
+      requestSent = resolve;
+    });
+    postMutationMock.mockImplementationOnce(() => {
+      requestSent();
+      return new Promise<MutationResponse>((resolve) => {
         release = resolve;
-      }),
-    );
+      });
+    });
     const sending = orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    // The enqueue and the send are two steps: wait until the request is genuinely in the air.
+    await sent;
 
     // The operator walks to another terminal — another restaurant — before the answer lands.
     orders.useTerminal('pos-3');
@@ -164,36 +170,60 @@ describe('a reload keeps the order and the identity of what was in flight', () =
     expect((await localStore.readTerminalState('pos-3')).order).toBeUndefined();
   });
 
-  it('writes no status M8 has not been built for yet', async () => {
+  it('puts a SYNCING row back to PENDING, because that label means "this tab, right now"', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
 
-    postMutationMock.mockRejectedValueOnce(new Error('network down'));
-    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
-
-    const statuses = (await db.pendingMutations.toArray()).map((row) => row.status);
-    // `CONFLICT`, `BLOCKED` and `SYNCED` are §14.1's, and §14.1 is M8's.
-    expect(statuses.every((status) => status === 'PENDING' || status === 'SYNCING')).toBe(true);
-  });
-
-  it('forgets the mutation for good when the operator discards it', async () => {
-    const orders = useOrderStore();
-    orders.useTerminal('pos-1');
-    orders.adopt(snapshot('order-a', 3));
-
-    postMutationMock.mockRejectedValueOnce(new Error('network down'));
-    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
-    await orders.discardPending();
+    // The tab dies while the request is in the air: the row keeps the label and there is nobody
+    // left attempting it. A pass that trusted the label would skip the mutation for ever.
+    postMutationMock.mockImplementationOnce(() => new Promise<MutationResponse>(() => {}));
+    void orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    await vi.waitFor(async () => {
+      expect((await db.pendingMutations.toArray())[0]?.status).toBe('SYNCING');
+    });
 
     reload();
     const after = useOrderStore();
     after.useTerminal('pos-1');
+    fetchOrderMock.mockResolvedValueOnce(snapshot('order-a', 3));
+    postMutationMock.mockResolvedValueOnce(applied(4));
     await after.hydrate('pos-1');
 
-    // A discard that only cleared memory would ask the operator the same unanswerable question
-    // again on the next reload.
-    expect(after.pending).toBeUndefined();
+    // Re-sent with the same id, so §9 answers `ALREADY_APPLIED` if it did in fact apply.
+    expect(postMutationMock.mock.calls.at(-1)?.[1]?.mutationId).toBe(
+      postMutationMock.mock.calls[0]?.[1]?.mutationId,
+    );
+    expect(await db.pendingMutations.count()).toBe(0);
+  });
+
+  it('forgets the halted mutations for good when the operator discards them', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockResolvedValueOnce({
+      status: 'CONFLICT',
+      reason: 'ORDER_CANCELLED',
+      clientBaseVersion: 3,
+      serverVersion: 4,
+      canonicalOrder: snapshot('order-a', 4),
+    });
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    expect(orders.halted).toBe(true);
+
+    await orders.discardHalted();
+
+    reload();
+    const after = useOrderStore();
+    after.useTerminal('pos-1');
+    fetchOrderMock.mockResolvedValueOnce(snapshot('order-a', 4));
+    await after.hydrate('pos-1');
+
+    // A discard that only cleared memory would ask the operator the same question again on the
+    // next reload — and the labels it cleared are the durable half of §14.1's halt.
+    expect(after.pendingCount).toBe(0);
+    expect(after.halted).toBe(false);
     expect(await db.pendingMutations.count()).toBe(0);
   });
 });
@@ -231,7 +261,7 @@ describe('hydration is a checked writer, not a privileged one', () => {
     expect(orders.version).toBe(7);
   });
 
-  it('does not overwrite a pending slot that is already filled', async () => {
+  it('does not drop a mutation queued while it was reading from disk', async () => {
     await localStore.savePending({
       mutationId: 'stored',
       restaurantId: 'demo-restaurant',
@@ -248,16 +278,18 @@ describe('hydration is a checked writer, not a privileged one', () => {
     orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
 
-    postMutationMock.mockRejectedValueOnce(new Error('network down'));
+    // Everything the server is asked for during this test fails, so both rows stay queued and can
+    // be counted.
+    postMutationMock.mockRejectedValue(new Error('network down'));
+    fetchOrderMock.mockRejectedValue(new Error('network down'));
+
+    const hydrating = orders.hydrate('pos-1');
     await orders.sendToKitchen('pos-1', 'demo-restaurant');
-    const fresher = orders.pending?.mutationId;
+    await hydrating;
 
-    await orders.hydrate('pos-1');
-
-    // The in-memory intent is the more recent one; the stored row is M8's queue to reconcile,
-    // not a startup path's to overrule.
-    expect(orders.pending?.mutationId).toBe(fresher);
-    expect(orders.pending?.type).toBe('SEND_TO_KITCHEN');
+    // The mirror is re-read rather than assigned from a list captured before the new intent was
+    // written; installing the older list would have hidden the fresher mutation from the screen.
+    expect(orders.queue.map((row) => row.type)).toEqual(['ADD_ITEM', 'SEND_TO_KITCHEN']);
   });
 
   it('writes nothing once the screen has moved to another terminal', async () => {
@@ -284,10 +316,9 @@ describe('hydration is a checked writer, not a privileged one', () => {
     await hydrating;
 
     expect(orders.order).toBeUndefined();
-    expect(orders.pending).toBeUndefined();
-
-    orders.useTerminal('pos-1');
-    expect(orders.pending).toBeUndefined();
+    // pos-1's queue is on disk and pos-3's screen has no business mirroring it.
+    expect(orders.queue).toEqual([]);
+    expect(await localStore.readQueue('pos-1')).toHaveLength(1);
   });
 
   it('writes nothing once the screen has gone away entirely', async () => {
@@ -325,7 +356,9 @@ describe('hydration is a checked writer, not a privileged one', () => {
     fetchOrderMock.mockResolvedValueOnce(snapshot('order-a', 9));
     await orders.hydrate('pos-1');
 
-    expect(fetchOrderMock).toHaveBeenCalledWith('order-a');
+    // Read as the terminal that asked, so a terminal simulating an offline device does not
+    // quietly refresh itself.
+    expect(fetchOrderMock).toHaveBeenCalledWith('order-a', 'pos-1');
     expect(orders.version).toBe(9);
     expect((await localStore.readTerminalState('pos-1')).order?.version).toBe(9);
   });

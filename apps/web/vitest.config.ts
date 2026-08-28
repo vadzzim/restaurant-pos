@@ -14,6 +14,7 @@ export default defineConfig({
       '@pos/contracts': fileURLToPath(
         new URL('../../packages/contracts/src/index.ts', import.meta.url),
       ),
+      '@pos/domain': fileURLToPath(new URL('../../packages/domain/src/index.ts', import.meta.url)),
     },
   },
 });

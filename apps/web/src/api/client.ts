@@ -8,6 +8,8 @@ import type {
   OrderSnapshot,
 } from '@pos/contracts';
 
+import { assertOnline } from './offline';
+
 /** A §17 error envelope that came back from the API, surfaced with its code intact. */
 export class ApiRequestError extends Error {
   constructor(
@@ -48,8 +50,20 @@ export const fetchConfig = (restaurantId: string): Promise<ConfigResponse> =>
 export const fetchTickets = (restaurantId: string): Promise<KitchenTicket[]> =>
   get<KitchenTicket[]>(`/api/kitchen/tickets?restaurantId=${encodeURIComponent(restaurantId)}`);
 
-/** An order that is not there yet is a normal state on this client, not an error. */
-export async function fetchOrder(orderId: string): Promise<OrderSnapshot | undefined> {
+/**
+ * An order that is not there yet is a normal state on this client, not an error.
+ *
+ * `terminalId` is here for the offline gate and for nothing else. Reads have to be cut off as well
+ * as writes: §19.3 depends on POS-1 *not* learning that POS-2 cancelled the order while it is
+ * offline, because a refresh it never asked for would silently re-validate the `baseVersion`s its
+ * queue is stamped with and the conflict the scenario exists to show would not happen.
+ */
+export async function fetchOrder(
+  orderId: string,
+  terminalId?: string,
+): Promise<OrderSnapshot | undefined> {
+  assertOnline(terminalId);
+
   try {
     return await get<OrderSnapshot>(`/api/orders/${orderId}`);
   } catch (error) {
@@ -90,7 +104,14 @@ export const postKitchenCommand = (
 ): Promise<MutationResponse> =>
   postMutationTo(`/api/kitchen/orders/${orderId}/${command}`, request);
 
-async function postMutationTo(path: string, request: unknown): Promise<MutationResponse> {
+async function postMutationTo(
+  path: string,
+  request: { terminalId: string },
+): Promise<MutationResponse> {
+  // Every mutation body carries the terminal that sent it, so the gate needs no extra argument —
+  // and cannot be bypassed by a caller that forgot to pass one.
+  assertOnline(request.terminalId);
+
   const response = await fetch(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },

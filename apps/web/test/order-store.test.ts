@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 
 import { ticketsSatisfy } from '../src/stores/kitchen';
 import { acceptsSnapshot } from '../src/domain/order-snapshot';
-import { sameMutation, type MutationIdentity } from '../src/stores/order';
 
 function snapshot(id: string, version: number): OrderSnapshot {
   return {
@@ -35,61 +34,6 @@ describe('acceptsSnapshot (out-of-order refetches)', () => {
 
   it('takes a different order regardless of version', () => {
     expect(acceptsSnapshot(snapshot('a', 9), snapshot('b', 1))).toBe(true);
-  });
-});
-
-describe('sameMutation (retrying with the same identity)', () => {
-  const pending: MutationIdentity = {
-    orderId: 'order-1',
-    mutationId: 'mutation-1',
-    terminalId: 'pos-1',
-    restaurantId: 'demo-restaurant',
-    type: 'ADD_ITEM',
-    baseVersion: 3,
-    payload: { productId: 'burger', quantity: 1 },
-  };
-
-  it('recognises the identical attempt', () => {
-    expect(
-      sameMutation(pending, 'ADD_ITEM', 'order-1', 3, { productId: 'burger', quantity: 1 }),
-    ).toBe(true);
-  });
-
-  it('rejects a different payload, order, version or type', () => {
-    expect(
-      sameMutation(pending, 'ADD_ITEM', 'order-1', 3, { productId: 'cola', quantity: 1 }),
-    ).toBe(false);
-    expect(
-      sameMutation(pending, 'ADD_ITEM', 'order-2', 3, { productId: 'burger', quantity: 1 }),
-    ).toBe(false);
-    expect(
-      sameMutation(pending, 'ADD_ITEM', 'order-1', 4, { productId: 'burger', quantity: 1 }),
-    ).toBe(false);
-    expect(
-      sameMutation(pending, 'SEND_TO_KITCHEN', 'order-1', 3, { productId: 'burger', quantity: 1 }),
-    ).toBe(false);
-  });
-
-  it('matches a CREATE_ORDER retry, which has no orderId to compare yet', () => {
-    const create: MutationIdentity = {
-      orderId: 'order-9',
-      mutationId: 'mutation-9',
-      terminalId: 'pos-1',
-      restaurantId: 'demo-restaurant',
-      type: 'CREATE_ORDER',
-      baseVersion: 0,
-      payload: { tableNumber: '12' },
-    };
-
-    // The point of the match: the retry reuses `order-9` instead of minting a second order.
-    expect(sameMutation(create, 'CREATE_ORDER', undefined, 0, { tableNumber: '12' })).toBe(true);
-    expect(sameMutation(create, 'CREATE_ORDER', undefined, 0, { tableNumber: '13' })).toBe(false);
-  });
-
-  it('never matches when nothing is pending', () => {
-    expect(sameMutation(undefined, 'CREATE_ORDER', undefined, 0, { tableNumber: '12' })).toBe(
-      false,
-    );
   });
 });
 

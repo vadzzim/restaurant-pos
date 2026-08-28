@@ -5,27 +5,29 @@
 
 ## Current state
 
-**Last completed milestone:** M7 — the three §14 Dexie tables, local writes on every action, and
-hydration at startup under the ownership rules M4's review established.
-**The entire order lifecycle is demoable end to end, a broker outage is demoable, and now so is
-reloading the tab mid-order.**
-**Next:** M8 — offline queue, sequential sync, §14.1 halt-on-conflict. Model: **Opus**.
-Size: **L**. The M7 review's open P2 is closed: the cache write is monotonic.
+**Last completed milestone:** M8 — the offline queue, the sequential sync engine, and §14.1's
+halt-on-conflict with an explicit discard-or-rebase.
+**The entire order lifecycle is demoable end to end, a broker outage is demoable, reloading the tab
+mid-order is demoable, and now so are §19.2 and §19.3 — POS-1 works while cut off, and its queue
+stops rather than cascading when another terminal moves the order underneath it.**
+**Next:** M9 — outbox hardening and the crash windows: bounded backoff, lease reclaim, pause and
+delay controls, §21.12, §21.13, §21.16. Model: **Opus**. Size: **L**.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
-`2666d4a` and its second in this commit. The tree passes typecheck, lint,
-build and **219 tests** (61 domain, 52 api, 22 worker, **83 web**) against a real PostgreSQL, plus
-**one integration test** against a real Redpanda that runs only under `pnpm verify:integration`.
-Ten of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3,
-**21.4**, 21.5, 21.6, **21.9**, **21.10**, 21.11, 21.15.
+`2666d4a` and its second at `6349dce`, M8 in this commit. The tree passes typecheck, lint,
+build and **240 tests** (61 domain, 52 api, 22 worker, **105 web**) against a real PostgreSQL, plus
+**one integration test** against a real Redpanda that runs only under `pnpm verify:integration`
+(re-run at the end of M8 and green; M8 changed no server file).
+**Twelve** of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1, 21.2,
+21.3, 21.4, 21.5, 21.6, **21.7**, **21.8**, 21.9, 21.10, 21.11, 21.15.
 
 ## What exists
 
 - `CLAUDE.md`, `docs/spec.md`, `docs/MILESTONES.md`, `docs/build-log.md`.
-- `docs/milestones/M01.md` … `M07.md` — the completed briefs.
-- ADRs 001, 003, 004, 005, 006, 007, 009, 011, 012, **013** accepted.
+- `docs/milestones/M01.md` … `M08.md` — the completed briefs.
+- ADRs 001, **002**, 003, 004, 005, 006, 007, 009, 011, 012, 013 accepted.
 - `packages/config` — zod environment, `TEST_DATABASE_URL`, Kafka topics, outbox tuning.
 - `packages/contracts` — statuses, the nine `MUTATION_TYPES`, the nine event types, every mutation
   and event payload, the §5 request/response shapes, `ConflictReason`, `PaymentMethod`,
@@ -50,6 +52,11 @@ Ten of the sixteen mandatory §21 tests exist and are named by their spec number
   `persistenceError` ref and the `plain()` unwrapper; `domain/order-snapshot.ts` — the one
   `acceptsSnapshot` both memory and disk obey; `hydrate` on the order store and `hydrateCommands`
   on the kitchen store; `fake-indexeddb` in the vitest setup.
+- **The offline client (M8):** `apps/web/src/sync/engine.ts` — the §14 pass and §14.1's halt and
+  rebase; `domain/project-queue.ts` — the optimistic fold and `nextBaseVersion`; `api/offline.ts` —
+  the per-terminal `Simulate Offline` switch, enforced inside `api/client.ts`; the order store
+  rebuilt around a durable per-order queue; the POS's queue panel, §14.1 resolution panel and
+  offline toggle. ADR 002.
 - **The operational surface (M6):** `/api/health/{live,ready}` and `/api/debug/dependencies`; the
   §17 envelope produced in one handler with `ApiErrorCode` closed in contracts; `requestId` and
   `traceId` on every request log line; `scripts/verify-integration.mjs`; `.github/workflows/ci.yml`.
@@ -155,13 +162,18 @@ Ten of the sixteen mandatory §21 tests exist and are named by their spec number
 - **The browser filters what the socket delivers**: dedup by `eventId`, ignore `version` not
   greater than what it holds, refetch the snapshot on reconnect. A socket message never carries
   state into the UI — it only triggers a canonical read.
-- **A mutation whose answer never came back keeps its identity and blocks further commands.** On
-  the POS the slot is **per terminal**; in the kitchen it is **per order**, which is the aggregate
-  and the granularity §14.1 halts at. Both resolve explicitly — Retry (same `mutationId`, so §9
-  answers `ALREADY_APPLIED`) or Discard (accept an unknown outcome). **Both are durable since M7**:
-  the identity survives a reload in `pendingMutations`, and Discard deletes the row rather than only
-  the memory. What M8 adds is not durability but a *queue* — more than one unresolved mutation per
-  aggregate, synced in order, halting on a conflict.
+- **A mutation whose answer never came back keeps its identity and is simply still in the queue.**
+  The next trigger re-sends it with the same `mutationId`, so §9 answers `ALREADY_APPLIED`. There is
+  no Retry button on the POS any more and no `sameMutation`/`identityFor` — the row *is* the
+  identity. **The kitchen still keeps one slot per order** with its own Retry and Discard: it
+  already halts at the aggregate, and the engine never touches its rows because they carry
+  `KITCHEN_TERMINAL_ID`.
+- **§14.1 in full, and nothing resolves itself.** A `409` (and `MUTATION_ID_REUSED`, and `REJECTED`)
+  marks that row `CONFLICT` and every later row for the same order `BLOCKED`, in one transaction;
+  other orders keep syncing. The operator **discards** the halted group or **rebases** it — one at a
+  time, a new `mutationId` each, the fresh `baseVersion` taken from the snapshot the previous step
+  returned rather than from a refetch. `CREATE_ORDER` rebases at 0. A rebased row keeps its
+  `createdAt` so it stays in front of what it is blocking.
 - **Client state that outlives a screen has an explicit owner.** `adopt` refuses a snapshot older
   than the one held for that order; `refetch` re-checks that the order it asked about is still
   current; `connection.start`/`stop` claim a generation. This class of bug is what three of the
@@ -189,14 +201,42 @@ Ten of the sixteen mandatory §21 tests exist and are named by their spec number
   socket's `onConnected` refetch does not run when `realtime.websocket_push` is off or
   `GET /api/config` fails, so a view-level refresh would leave the cache on screen indefinitely on
   the transport M13 exists to complete.
-- **The three §14 tables are written but not yet read by a sync engine (M7).** `orders` is a cache
-  and is pruned; `pendingMutations` is the durable fact, keyed by `mutationId`, **never
-  regenerated**; `syncMetadata` is per terminal and holds the pointer to the order that device is
-  working on. M7 writes only `SYNCING` (before a request goes out) and `PENDING` (back, when no
-  answer came); `CONFLICT`, `BLOCKED` and `SYNCED` exist in the union and are M8's to write. ADR 013.
+- **The three §14 tables, and the engine that reads them.** `orders` is a cache and is pruned;
+  `pendingMutations` is the durable fact, keyed by `mutationId`, **never regenerated except by a
+  rebase**; `syncMetadata` is per terminal and holds the pointer to the order that device is on.
+  Still **Dexie schema version 1** — M8 needed no new index. ADR 013, ADR 002.
+- **The disk is the queue; the store holds a mirror it re-reads after every write.** Never edited
+  in place. The engine writes rows the screen did not ask for, so a second in-memory copy would
+  drift; a stale mirror is a display bug, a divergent copy is a lost mutation.
+- **The optimistic view is derived on read and never stored** — `projectQueue(canonical, queue)` in
+  `apps/web/src/domain/project-queue.ts`. This is what keeps `orders` canonical and what removes the
+  worst crash window in the milestone: there is one write per intent, not two. The *rules* come from
+  `decide()` in `@pos/domain`, the same function the API calls; only the item arithmetic is
+  restated, because the server's is an atomic SQL upsert. **Do not write a prediction into
+  `orders`.**
+- **`baseVersion` is stamped from the projected version, not the canonical one.** A `CREATE_ORDER`
+  at 0 projects v1, so the `ADD_ITEM` behind it is stamped at 1. That is what makes §19.2 drain
+  with nothing re-stamped, and what makes §19.3 conflict on the first mutation. **Do not re-stamp
+  at send time** — that is a silent auto-rebase of the whole queue.
+- **The send gate is a derivation, not a status lookup**: a group is sendable only when every row in
+  it is `PENDING` or `SYNCING` (`isSendable` in `sync/engine.ts`, used by the engine and by the
+  store's `halted`). It survives a crash mid-halt and a rebase that stopped part-way; a gate that
+  read the head's status would send followers the rebase had already invalidated.
+- **`SYNCING` is not durable state.** It means "this tab, right now", so hydration rewrites every
+  `SYNCING` row for that terminal back to `PENDING` before the first pass.
+- **The engine has no timers.** It runs on an enqueue, on hydration, on the socket connecting, on
+  `navigator.onLine`, on the offline toggle flipping, and on **Sync now**. A pass that hits a
+  transport error stops and waits. A retry loop would make the offline demo non-deterministic.
+- **`Simulate Offline` is in `apps/web/src/api/client.ts`, per terminal, and blocks reads too.**
+  §19.3 depends on POS-1 not learning that POS-2 cancelled the order. **Not in the stores**, which
+  would grow a second code path, and not via DevTools.
 - **A storage failure can never break a command.** Every repository call resolves with a neutral
   value and records the failure in the exported `persistenceError` ref, shown as `NOT DURABLE`. The
   ref is **not** cleared by a later success: a failed write is never retried, so the fact stays true.
+  **`savePending` is the one exception to the neutral value**: it returns whether the row is
+  actually there, because since M8 the queue is the only path to the server and a silently dropped
+  row would be a silently dropped command. The caller sends it directly through the engine's
+  `attemptOnce` instead. A device that cannot store loses offline-first, not the order.
 - **Everything crossing into Dexie goes through `plain()`.** IndexedDB clones what it stores and a
   Vue reactive proxy raises `DataCloneError`. One `toRaw` helper in the repository, where the
   provenance of the values is known. `fake-indexeddb` implements cloning for real, so the test
@@ -343,13 +383,21 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   cannot tell it apart from a cancellation of an `OPEN` order. Bounded by the next event or a
   reload. Closing it would mean putting "did this order ever reach the kitchen" into the
   `OrderCancelled` payload: a display concern in a domain event, which is why it was not done.
-- **One pending mutation slot per terminal on the POS, one per order in the kitchen.** Durable
-  since M7, but still **one** slot: while it is occupied that terminal takes no new commands. M8
-  replaces the slot with a queue and gives the POS the per-aggregate granularity the kitchen
-  already has.
-- **The screens are still not optimistic.** §14 says the UI updates optimistically and never waits
-  for the server; that sentence needs the queue, so M7 left it alone and the screens still show the
-  canonical answer. Worth saying out loud rather than claiming §14 is done.
+- **The kitchen still has one slot per order, with its own Retry and Discard.** It already halts at
+  the aggregate, which is what §14.1 asks for, but it has no queue and no rebase: a kitchen command
+  that conflicts is simply reported and the operator presses again. Deliberate — §21.8 is about the
+  POS queue, and giving the kitchen the same machinery would have doubled the milestone.
+- **The engine syncs only the terminal whose screen is up.** A queue for POS-1 does not drain while
+  the tab is showing POS-2. One screen per terminal is the assumption the whole client already
+  makes; worth saying out loud, because a real fleet would want a background worker per device.
+- **A halted order the screen has left is listed, and can be returned to, and that is all.** New
+  commands are refused while the order *on screen* is halted, so a halt is resolved rather than
+  walked away from — but nothing stops the operator leaving an order *before* it conflicts and
+  finding it halted later. `haltedElsewhere` and `focusOrder` exist for exactly that.
+- **The optimistic projection can differ from what the server produces.** It prices items from the
+  menu, not from the order, and the item arithmetic is a second implementation of the server's SQL.
+  Every canonical answer replaces it, so the divergence is bounded by one round trip — but a demo
+  that adds an item whose price changed server-side will visibly correct itself.
 - **The client database is shared by every tab on the origin.** Two POS tabs on the same terminal
   id write the same pointer and the same pending slot. The in-memory slot already assumed one
   screen per terminal, so nothing changed — but a demo that opens two tabs on `/pos/pos-1` would
@@ -357,6 +405,11 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **A cached snapshot is briefly stale after a reload**, between hydration and the first refetch.
   That is what the cache is for, and it is visibly wrong for a moment against a server that moved
   on while the tab was closed.
+- **`Simulate Offline` is on the POS header, not on `/debug`.** §18 wants the eleven controls in one
+  place; M12 moves it. The other ten do not exist yet.
+- **The client has no backoff and no automatic retry.** By design (ADR 002): the engine runs on
+  explicit triggers so the demo is deterministic. A server that is down and a socket that never
+  reconnects therefore leave the queue sitting until the operator presses **Sync now**.
 - **A poison message on the realtime topic is lost to that consumer group permanently.** A
   consumer-side dead-letter topic is the real answer and is not built. The publish side already
   dead-letters through `outbox_events`.
@@ -368,74 +421,33 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 ## First command of the next session
 
 ```
-Read docs/PROGRESS.md. Two commits this session, in this order.
+Read docs/PROGRESS.md, then expand M9 from docs/MILESTONES.md into docs/milestones/M09.md and
+implement M9 only. Stop when the M09 Verification block passes.
 
-**Commit 1 — close the open P2 from the M7 review's second round.** Do this first, before
-reading anything about M8: it is roughly twenty lines, it is in the code M8 is about to build
-on, and leaving it open means M8's sync engine inherits a cache that can move backwards.
+M9 is server-side — the outbox publisher and the two crash windows — so it is the first
+milestone in three that does not touch `apps/web`. Six things worth knowing before you plan:
 
-`localStore.saveOrder` overwrites unconditionally. `adopt` refuses a snapshot older than the
-one held; the two callers that persist — `send` and `refetch` in `apps/web/src/stores/order.ts`
-— do not, because pulling the write out of `adopt` in the first review round moved the write
-and left the rule behind. Two overlapping refetches answering v5 then v4 leave the screen at v5
-and IndexedDB at v4; a mutation response racing a newer refetch is the same shape.
+1. **The publisher already has a lease, backoff fields and dead-lettering.** M3 built
+   `attempt_count`, `next_attempt_at`, `last_error`, `claim_until` and the three-step claim →
+   publish → mark loop in `apps/worker`. M9 hardens what is there: it does not rebuild it.
+   Read the M3 and M6 entries in `build-log.md` for what the broker supervision already
+   guarantees, and ADR 010 for why retries live in Postgres rather than in BullMQ.
+2. **The known gap is named in Known problems**: a batch cut short by the broker dying leaves
+   its untouched rows leased for up to `OUTBOX_LEASE_MS`. Releasing the claim eagerly is M9's,
+   and it is a pair of writes — say which order survives a crash between them.
+3. **§21.12 and §21.13 are crash-window tests**, and the M5 lesson applies: a test that asserts
+   an invariant is not a proof that the unguarded code was broken. The deterministic ones in
+   this repo hold a row and poll `pg_stat_activity` until the interleaving is provable. Do
+   that, or say plainly in the test that it cannot fail falsely and is not a proof.
+4. **§21.16 needs two workers running concurrently against one PostgreSQL.** The lease exists
+   for exactly this; the test is what makes it more than a column.
+5. **The pause and delay controls are real operational switches**, not test hooks — M12 surfaces
+   them in `/debug`. Build them where the publisher loop can honour them without a restart.
+6. **Ask the second question.** M7 tabulated who may write each piece of state and still shipped
+   four review findings; M8 asked "for each pair of writes, which order survives a crash between
+   them?" and that question found the `savePending` regression before the code did. M9 is
+   *entirely* about crash windows, so put the pair table in the brief before writing anything.
 
-Three things about the fix:
-
-- **The comparison goes in the repository, not the store.** A caller that reads the stored
-  version and then writes in two calls reproduces the race one level down. It must be one
-  Dexie `readwrite` transaction over `orders` that reads, compares and writes.
-- **The rule is `acceptsSnapshot`'s, and there must be exactly one of it.** Import it rather
-  than writing a second version — a rule stated twice is a rule that will disagree with itself.
-  Note the asymmetry it already encodes: a *different* order id is always accepted.
-- **The pointer is a separate question from the snapshot.** `saveOrder` writes both. Decide
-  explicitly whether a rejected snapshot should still move `syncMetadata.currentOrderId`, and
-  say why in the comment. (It should: the pointer is about which order this device is on, not
-  about which version of it is newest.)
-
-Test it against a real out-of-order pair, and check the test fails without the fix. Then
-commit on its own: `M7 review 2: the cache write that was not monotonic`.
-
-**Commit 2 — M8.** Expand M8 from docs/MILESTONES.md into docs/milestones/M08.md, then
-implement M8 only. Stop when the M08 Verification block passes.
-
-Seven things worth knowing before you plan, so the session does not rediscover them:
-
-1. The storage is built and the schema will not change. `apps/web/src/persistence/db.ts` holds
-   the three §14 tables at schema version 1; `local-store.ts` is the repository. M7 writes
-   `SYNCING` before a request goes out and `PENDING` back when no answer came. `CONFLICT`,
-   `BLOCKED` and `SYNCED` are in the union, unwritten, waiting for you. If you need a new index,
-   that is a Dexie version 2 — do not edit version 1's store definition.
-2. The sync engine is the **third** writer of state that already has two, and the first that
-   runs without a screen asking it to. `adopt`, `refetch`, `pendingByTerminal`,
-   `connection.start/stop` and `createCoalescingLoader` each have a rule; M7's `hydrate` and
-   `hydrateCommands` claim a generation and fill only empty slots. Read the ownership table at
-   the top of `docs/milestones/M07.md` before touching a store.
-3. **Ask the second question this time.** M7's brief tabulated "who may write this?" and all
-   four review findings still landed — three of them "the right writer at the wrong moment",
-   the fourth "the write moved and the rule did not". So for every pair of writes M8 adds, put
-   in the brief: *which order survives a crash between them, and which invariant guards each
-   half?*
-4. A `mutationId` is never regenerated — **except by a rebase, which is the one place §14.1
-   says it must be.** A rebase re-issues a blocked mutation with a *new* id at a *fresh*
-   baseVersion, sequentially, one at a time, each subject to §8. Everything else — retry,
-   hydration, a reconnect — reuses the stored id so §9 answers `ALREADY_APPLIED`.
-5. The halt is per aggregate, and the POS still has one slot per terminal. Giving the POS the
-   per-order queue the kitchen already has is part of M8, not a refactor to skip.
-6. `Simulate Offline` intercepts at the API-client layer (`apps/web/src/api/client.ts`), not in
-   the stores and not via DevTools — the demo has to be deterministic. Nothing auto-resolves: a
-   conflict surfaces the canonical state next to the local intent and waits for discard or
-   rebase, because silent auto-rebase is last-write-wins in disguise.
-7. Verification runs `pnpm -F @pos/web test` plus lint/typecheck/build, and §21.7 and §21.8 are
-   named tests. `pnpm verify:integration` must stay green; M8 should not need server changes,
-   and if it seems to, say so before making one.
+Verification is `pnpm -F @pos/worker test`, `pnpm -F @pos/api test`, lint, typecheck, build, and
+`pnpm verify:integration`. Run tests narrowly; do not run the whole monorepo suite.
 ```
-
-M8 is the offline queue, the sequential per-aggregate sync engine, and §14.1's halt-on-conflict in
-full. It is an **L** milestone on **Opus** because the correctness is in the interleaving: one
-mutation at a time per aggregate, other aggregates unaffected, and a conflict that stops a queue
-without stopping the client.
-
-The class of bug to watch for is unchanged and now has a third instance waiting: client state with
-an owner, and a new writer that does not honour it. M7 added the second writer; the review found
-four ways it was added at the wrong moment. The sync engine is the third.

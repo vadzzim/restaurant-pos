@@ -110,7 +110,7 @@ describe('the pending mutation queue', () => {
   it('round-trips an intent with its identity intact', async () => {
     await localStore.savePending(pending({ status: 'SYNCING' }));
 
-    const restored = (await localStore.readTerminalState('pos-1')).pending;
+    const restored = (await localStore.readTerminalState('pos-1')).queue[0];
 
     expect(restored?.mutationId).toBe('mutation-1');
     expect(restored?.baseVersion).toBe(3);
@@ -136,14 +136,14 @@ describe('the pending mutation queue', () => {
     await new Promise((resolve) => setTimeout(resolve, 2));
     await localStore.savePending(pending({ mutationId: 'newer' }));
 
-    expect((await localStore.readTerminalState('pos-1')).pending?.mutationId).toBe('older');
+    expect((await localStore.readTerminalState('pos-1')).queue[0]?.mutationId).toBe('older');
   });
 
   it('is deleted on request', async () => {
     await localStore.savePending(pending());
     await localStore.deletePending('mutation-1');
 
-    expect((await localStore.readTerminalState('pos-1')).pending).toBeUndefined();
+    expect((await localStore.readTerminalState('pos-1')).queue).toEqual([]);
   });
 
   it('changes status without changing anything else', async () => {
@@ -214,7 +214,9 @@ describe('a storage failure cannot break a command', () => {
   it('is reported and swallowed', async () => {
     vi.spyOn(db.pendingMutations, 'put').mockRejectedValueOnce(new Error('QuotaExceededError'));
 
-    await expect(localStore.savePending(pending())).resolves.toBeUndefined();
+    // `false`, not a thrown error: the queue is the only path to the server since M8, so the
+    // caller has to be told the row is not there and send the mutation directly.
+    await expect(localStore.savePending(pending())).resolves.toBe(false);
 
     expect(persistenceError.value).toMatch(/QuotaExceededError/);
   });
@@ -223,8 +225,9 @@ describe('a storage failure cannot break a command', () => {
     vi.spyOn(db.syncMetadata, 'get').mockRejectedValueOnce(new Error('database is closed'));
 
     await expect(localStore.readTerminalState('pos-1')).resolves.toEqual({
+      currentOrderId: undefined,
       order: undefined,
-      pending: undefined,
+      queue: [],
     });
     expect(persistenceError.value).toMatch(/database is closed/);
   });
@@ -242,7 +245,7 @@ describe('a storage failure cannot break a command', () => {
 });
 
 describe('the §14 status vocabulary', () => {
-  it('declares all five so M7 and M8 agree on the schema', () => {
+  it('declares all five, and M8 writes every one of them', () => {
     expect([...PENDING_MUTATION_STATUSES]).toEqual([
       'PENDING',
       'SYNCING',

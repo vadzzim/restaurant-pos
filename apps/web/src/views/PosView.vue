@@ -5,6 +5,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 
 import StateBadge from '../components/StateBadge.vue';
+import { isTerminalOffline, toggleTerminalOffline } from '../api/offline';
 import { persistenceError } from '../persistence/local-store';
 import { useConnectionStore } from '../stores/connection';
 import { useMenuStore } from '../stores/menu';
@@ -22,21 +23,38 @@ const busy = ref(false);
 
 const money = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 
-const status = computed(() => orders.order?.status);
+/**
+ * The screen renders the **projection** — the canonical snapshot with the queue folded onto it —
+ * because §14 says the UI updates optimistically and never waits for the server. `orders.order` is
+ * still the canonical truth and is what the conflict panel shows beside the local intent.
+ */
+const shown = computed(() => orders.projected);
+const status = computed(() => shown.value?.status);
 
 /** Items may only change while the order is OPEN — after that the kitchen is cooking it (§8). */
-const canOrder = computed(() => status.value === 'OPEN' && !orders.blocked);
+const canOrder = computed(() => status.value === 'OPEN' && !orders.halted);
 /** `ALLOWED_TRANSITIONS` permits PAID from OPEN and from READY, and from nowhere else. */
 const canPay = computed(
-  () => (status.value === 'OPEN' || status.value === 'READY') && !orders.blocked,
+  () => (status.value === 'OPEN' || status.value === 'READY') && !orders.halted,
 );
 const canCancel = computed(
   () =>
     status.value !== undefined &&
     status.value !== 'PAID' &&
     status.value !== 'CANCELLED' &&
-    !orders.blocked,
+    !orders.halted,
 );
+
+/** §18's `Simulate POS-n Offline`, intercepting in the API client so the stores stay single-path. */
+const offline = computed(() => isTerminalOffline(terminalId.value));
+
+async function toggleOffline(): Promise<void> {
+  const nowOffline = toggleTerminalOffline(terminalId.value);
+  // Coming back is a sync trigger; going away is not. There are no timers anywhere in the engine.
+  if (!nowOffline) {
+    await run(() => orders.sync());
+  }
+}
 
 async function start(): Promise<void> {
   const restaurantId = terminal.value?.restaurantId;
@@ -56,13 +74,22 @@ async function start(): Promise<void> {
   await connection.start({
     restaurantId,
     role: 'pos',
-    currentOrderId: () => orders.order?.id,
-    // Anything about another order is news by definition, so the version we hold for it is 0.
-    heldVersion: (aggregateId) =>
-      orders.order?.id === aggregateId ? (orders.order?.version ?? 0) : 0,
+    // The order this screen is on, which may be one that exists only in this client's queue —
+    // an order created offline still has a room to join the moment the socket comes up.
+    currentOrderId: () => orders.currentOrderId,
+    // The **canonical** version, not the projected one: the gate is deciding whether a server
+    // event carries news, and the projection is this client's guess about the future.
+    heldVersion: (aggregateId) => (orders.order?.id === aggregateId ? orders.canonicalVersion : 0),
     // The POS reads `orders`, written by the very transaction that wrote the outbox row, so the
     // event it was woken by is already visible: one read is always enough here.
-    refresh: () => orders.refetch(),
+    //
+    // A reconnect drains the queue first and reads second (§14): the mutations this client is
+    // holding are what the snapshot ought to include, and reading before sending would paint a
+    // server state the operator has already moved past.
+    refresh: async () => {
+      await orders.sync();
+      await orders.refetch();
+    },
   });
 }
 
@@ -75,7 +102,9 @@ async function run(action: () => Promise<unknown>): Promise<void> {
   }
 }
 
-const retryPending = (): Promise<void> => run(() => orders.retryPending());
+const syncNow = (): Promise<void> => run(() => orders.sync());
+const discardHalted = (): Promise<void> => run(() => orders.discardHalted());
+const rebaseHalted = (): Promise<void> => run(() => orders.rebaseHalted());
 
 const createOrder = (): Promise<void> =>
   run(async () => {
@@ -136,6 +165,16 @@ const cancel = (): Promise<void> =>
     }
   });
 
+// The browser coming back is the other sync trigger. `Simulate Offline` has its own above.
+watch(
+  () => connection.online,
+  (online) => {
+    if (online) {
+      void orders.sync();
+    }
+  },
+);
+
 onMounted(start);
 onBeforeUnmount(() => {
   connection.stop();
@@ -177,15 +216,45 @@ watch(terminalId, async () => {
       />
       <StateBadge :label="connection.transport" :tone="connection.pushEnabled ? 'ok' : 'warn'" />
       <StateBadge
-        v-if="orders.order"
+        v-if="shown"
         :label="`v${orders.version}`"
         :tone="orders.syncing ? 'warn' : 'ok'"
       />
+      <StateBadge v-if="offline" label="SIMULATED OFFLINE" tone="bad" />
       <StateBadge v-if="orders.syncing" label="SYNCING" tone="warn" />
-      <StateBadge v-if="orders.pending" label="PENDING" tone="warn" />
+      <StateBadge
+        v-if="orders.pendingCount"
+        :label="`${orders.pendingCount} PENDING`"
+        tone="warn"
+      />
+      <StateBadge v-if="orders.halted" label="QUEUE HALTED" tone="bad" />
       <StateBadge v-if="orders.readError" label="READ FAILED" tone="bad" />
       <StateBadge v-if="persistenceError" label="NOT DURABLE" tone="bad" />
+
+      <button
+        type="button"
+        class="ml-auto rounded border px-3 py-1 text-sm font-medium"
+        :class="
+          offline
+            ? 'border-rose-500 bg-rose-100 text-rose-900'
+            : 'border-stone-300 text-stone-700 hover:bg-stone-100'
+        "
+        @click="toggleOffline"
+      >
+        {{ offline ? 'Go back online' : 'Simulate Offline' }}
+      </button>
     </header>
+
+    <p
+      v-if="offline"
+      class="rounded border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900"
+    >
+      <strong>{{ terminalId }} is pretending the API is unreachable.</strong>
+      The interception is in the API client, not in the stores and not in the browser's own offline
+      mode, so the demo is deterministic and every screen keeps one code path. Reads are cut off as
+      well as writes — otherwise this terminal would quietly learn what another one did to the order
+      and the queued versions would stop being stale. Commands keep working and pile up locally.
+    </p>
 
     <p
       v-if="persistenceError"
@@ -196,45 +265,104 @@ watch(terminalId, async () => {
       screen and — worse — the identity of any mutation that has no answer yet.
     </p>
 
+    <div
+      v-if="orders.halted"
+      class="space-y-3 rounded border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900"
+    >
+      <p>
+        <strong>The queue for this order is halted (§14.1).</strong>
+        <span v-if="orders.currentConflict">
+          <code>{{ orders.conflictedMutation?.type }}</code> was sent at v{{
+            orders.currentConflict.clientBaseVersion
+          }}
+          and the server answered <code>{{ orders.currentConflict.reason }}</code> at v{{
+            orders.currentConflict.serverVersion
+          }}.
+        </span>
+        Everything queued behind it is <code>BLOCKED</code> and has <strong>not</strong> been sent —
+        their <code>baseVersion</code> is provably stale, and sending them would produce a cascade
+        of conflicts that looks like a broken client. Mutations for other orders keep syncing.
+        Nothing resolves itself.
+      </p>
+
+      <div class="grid gap-3 md:grid-cols-2">
+        <div class="rounded border border-rose-200 bg-white p-3">
+          <h3 class="mb-1 font-semibold">The server's canonical order</h3>
+          <p v-if="orders.order" class="text-stone-700">
+            v{{ orders.canonicalVersion }} · {{ orders.order.status }} ·
+            {{ money(orders.order.totalCents) }} · {{ orders.order.items.length }} line(s)
+          </p>
+          <p v-else class="text-stone-700">The server has no order at this id.</p>
+        </div>
+        <div class="rounded border border-rose-200 bg-white p-3">
+          <h3 class="mb-1 font-semibold">This terminal's queued intent</h3>
+          <ol class="list-decimal space-y-1 pl-5 text-stone-700">
+            <li v-for="row in orders.currentQueue" :key="row.mutationId">
+              <code>{{ row.type }}</code> at v{{ row.baseVersion }} —
+              <strong>{{ row.status }}</strong>
+              <code class="ml-1 text-xs text-stone-500">{{ row.mutationId.slice(0, 8) }}</code>
+            </li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap gap-2">
+        <button
+          type="button"
+          class="rounded border border-rose-500 px-3 py-1 font-medium disabled:opacity-40"
+          :disabled="busy"
+          @click="discardHalted"
+        >
+          Discard {{ orders.currentQueue.length }} mutation(s)
+        </button>
+        <button
+          type="button"
+          class="rounded border border-rose-400 px-3 py-1 disabled:opacity-40"
+          :disabled="busy"
+          @click="rebaseHalted"
+        >
+          Rebase onto v{{ orders.canonicalVersion }}
+        </button>
+      </div>
+
+      <p class="text-xs">
+        A rebase re-issues them one at a time, each with a <strong>new</strong>
+        <code>mutationId</code> at the version the previous one produced — never a batch re-stamp,
+        because each successful mutation advances the version. Any of them may conflict again: a
+        rebase onto a cancelled order fails on the first attempt and the rest stay blocked.
+      </p>
+    </div>
+
     <p
-      v-if="orders.pending"
+      v-else-if="orders.pendingCount"
       class="flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
     >
       <span>
-        <strong>{{ orders.pending.type }} left this terminal but no answer came back.</strong>
-        This terminal takes no new commands until it is resolved — there is one slot, and sending
-        anything else would overwrite the only <code>mutationId</code> that can still settle it.
-        Retrying reuses that id, so if the server did apply it the answer is
-        <code>ALREADY_APPLIED</code> rather than a second one. Discarding accepts that the outcome
-        will stay unknown.
+        <strong>{{ orders.pendingCount }} mutation(s) queued locally.</strong>
+        <span v-if="orders.pendingForOtherOrders">
+          {{ orders.pendingForOtherOrders }} of them belong to an order this screen has left — the
+          queue is per aggregate and they sync on their own.
+        </span>
+        Each keeps its <code>mutationId</code> across a reload, so a re-send is answered
+        <code>ALREADY_APPLIED</code> rather than applied twice.
       </span>
-      <span class="flex gap-2">
-        <button
-          type="button"
-          class="rounded border border-amber-500 px-3 py-1 font-medium disabled:opacity-40"
-          :disabled="busy"
-          @click="retryPending"
-        >
-          Retry
-        </button>
-        <button
-          type="button"
-          class="rounded border border-amber-400 px-3 py-1 disabled:opacity-40"
-          :disabled="busy"
-          @click="orders.discardPending()"
-        >
-          Discard
-        </button>
-      </span>
+      <button
+        type="button"
+        class="rounded border border-amber-500 px-3 py-1 font-medium disabled:opacity-40"
+        :disabled="busy || offline"
+        @click="syncNow"
+      >
+        Sync now
+      </button>
     </p>
 
     <p
-      v-if="orders.conflict"
+      v-if="orders.currentConflict && !orders.halted"
       class="rounded border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900"
     >
-      <strong>CONFLICT — {{ orders.conflict.reason }}.</strong>
-      Sent at v{{ orders.conflict.clientBaseVersion }}, the server is at v{{
-        orders.conflict.serverVersion
+      <strong>CONFLICT — {{ orders.currentConflict.reason }}.</strong>
+      Sent at v{{ orders.currentConflict.clientBaseVersion }}, the server is at v{{
+        orders.currentConflict.serverVersion
       }}. The canonical order is shown below.
     </p>
 
@@ -251,6 +379,27 @@ watch(terminalId, async () => {
       class="rounded border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
     >
       {{ orders.lastError }}
+    </p>
+
+    <p
+      v-for="strandedId in orders.haltedElsewhere"
+      :key="strandedId"
+      class="flex flex-wrap items-center gap-3 rounded border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900"
+    >
+      <span>
+        <strong>Another order queued on this terminal is halted.</strong>
+        The halt is per aggregate and this screen is on a different one, so nothing here can resolve
+        it — and until it is resolved those mutations are neither sent nor discarded.
+        <code class="text-xs">{{ strandedId }}</code>
+      </span>
+      <button
+        type="button"
+        class="rounded border border-rose-500 px-3 py-1 font-medium disabled:opacity-40"
+        :disabled="busy"
+        @click="run(() => orders.focusOrder(strandedId))"
+      >
+        Go to it
+      </button>
     </p>
 
     <div class="grid gap-6 md:grid-cols-2">
@@ -274,7 +423,7 @@ watch(terminalId, async () => {
       <div class="rounded border border-stone-300 bg-white p-4">
         <h2 class="mb-3 text-lg font-semibold">Current order</h2>
 
-        <form v-if="!orders.order" class="flex items-end gap-3" @submit.prevent="createOrder">
+        <form v-if="!shown" class="flex items-end gap-3" @submit.prevent="createOrder">
           <label class="text-sm">
             <span class="mb-1 block text-stone-600">Table</span>
             <input
@@ -286,7 +435,7 @@ watch(terminalId, async () => {
           <button
             type="submit"
             class="rounded bg-emerald-700 px-4 py-2 font-medium text-white disabled:opacity-40"
-            :disabled="busy || orders.blocked"
+            :disabled="busy || orders.halted"
           >
             Create order
           </button>
@@ -294,13 +443,13 @@ watch(terminalId, async () => {
 
         <div v-else class="space-y-3">
           <p class="text-sm text-stone-600">
-            Table {{ orders.order.tableNumber }} · {{ orders.order.status }} ·
-            <code class="text-xs">{{ orders.order.id }}</code>
+            Table {{ shown.tableNumber }} · {{ shown.status }} ·
+            <code class="text-xs">{{ shown.id }}</code>
           </p>
 
-          <ul v-if="orders.order.items.length" class="divide-y divide-stone-200">
+          <ul v-if="shown.items.length" class="divide-y divide-stone-200">
             <li
-              v-for="item in orders.order.items"
+              v-for="item in shown.items"
               :key="item.productId"
               class="flex items-center justify-between gap-3 py-2"
             >
@@ -341,14 +490,14 @@ watch(terminalId, async () => {
 
           <p class="flex justify-between border-t border-stone-300 pt-3 text-lg font-semibold">
             <span>Total</span>
-            <span>{{ money(orders.order.totalCents) }}</span>
+            <span>{{ money(shown.totalCents) }}</span>
           </p>
 
           <div class="flex flex-wrap gap-3">
             <button
               type="button"
               class="rounded bg-[#17201c] px-4 py-2 font-medium text-white disabled:opacity-40"
-              :disabled="!canOrder || busy || orders.order.items.length === 0"
+              :disabled="!canOrder || busy || shown.items.length === 0"
               @click="sendToKitchen"
             >
               Send to kitchen
@@ -380,7 +529,7 @@ watch(terminalId, async () => {
             <button
               type="button"
               class="rounded border border-stone-300 px-4 py-2 disabled:opacity-40"
-              :disabled="busy || orders.blocked"
+              :disabled="busy || orders.halted"
               @click="orders.clear()"
             >
               New order

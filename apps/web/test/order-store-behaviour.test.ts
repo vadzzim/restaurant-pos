@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { fetchOrder, postMutation } from '../src/api/client';
+import { localStore } from '../src/persistence/local-store';
 import { useOrderStore } from '../src/stores/order';
 
 vi.mock('../src/api/client', () => ({
@@ -32,8 +33,8 @@ beforeEach(() => {
   vi.resetAllMocks();
 });
 
-describe('an unresolved mutation halts the terminal', () => {
-  it('refuses a different command rather than overwriting the only id that can settle the first', async () => {
+describe('the queue is a queue, not a slot', () => {
+  it('accepts more commands behind one that got no answer, in creation order', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
@@ -42,44 +43,63 @@ describe('an unresolved mutation halts the terminal', () => {
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');
 
-    const held = orders.pending;
-    expect(held?.type).toBe('ADD_ITEM');
-    expect(orders.blocked).toBe(true);
-
-    // A different command would replace `mutationId`, and the first mutation's fate would become
-    // permanently unknowable — no retry could ever resolve it under §9.
+    // M7 refused this — there was one slot and a second command would have overwritten the only
+    // id that could settle the first. §14 says the opposite: the UI never waits, the intent is
+    // queued behind the one in front of it.
+    postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.sendToKitchen('pos-1', 'demo-restaurant');
 
-    expect(postMutationMock).toHaveBeenCalledTimes(1);
-    expect(orders.pending).toBe(held);
-    expect(orders.lastError).toMatch(/no answer yet/i);
+    expect(orders.queue.map((row) => row.type)).toEqual(['ADD_ITEM', 'SEND_TO_KITCHEN']);
+    expect(orders.pendingCount).toBe(2);
+    // Stamped at the *projected* version: the second mutation assumes the first one applied,
+    // which is exactly what the server will produce when the queue drains in order.
+    expect(orders.queue.map((row) => row.baseVersion)).toEqual([3, 4]);
+    expect(orders.halted).toBe(false);
   });
 
-  it('retries with the identical identity and clears on the answer', async () => {
+  it('shows the operator their own actions before the server has answered', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockRejectedValue(new Error('network down'));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger', 2);
+
+    // §14: the UI updates optimistically and never waits. The canonical snapshot is untouched.
+    expect(orders.projected?.items).toEqual([
+      expect.objectContaining({ productId: 'burger', quantity: 2 }),
+    ]);
+    expect(orders.version).toBe(4);
+    expect(orders.order?.items).toEqual([]);
+    expect(orders.canonicalVersion).toBe(3);
+  });
+
+  it('re-sends with the stored mutationId and deletes the row on the answer', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');
-    const held = orders.pending;
+    const queued = orders.queue[0];
 
     postMutationMock.mockResolvedValueOnce({
       status: 'ALREADY_APPLIED',
       order: snapshot('order-a', 4),
       serverVersion: 4,
     });
-    await orders.retryPending();
+    await orders.sync();
 
-    const [, retried] = postMutationMock.mock.calls[1] ?? [];
-    expect(retried?.mutationId).toBe(held?.mutationId);
-    expect(retried?.baseVersion).toBe(3);
-    expect(orders.pending).toBeUndefined();
-    expect(orders.blocked).toBe(false);
+    const [, resent] = postMutationMock.mock.calls[1] ?? [];
+    // A fresh id would turn the re-send into a second mutation at a stale version: a duplicate
+    // line, or a conflict reported over an operation that in fact succeeded.
+    expect(resent?.mutationId).toBe(queued?.mutationId);
+    expect(resent?.baseVersion).toBe(3);
+    expect(orders.pendingCount).toBe(0);
     expect(orders.version).toBe(4);
   });
 
-  it('keeps the pending mutation when the operator starts a new order', async () => {
+  it('keeps the queue when the operator starts a new order', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
@@ -87,12 +107,98 @@ describe('an unresolved mutation halts the terminal', () => {
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');
 
-    // "New order" is not an answer to "did that apply?".
+    // "New order" is not an answer to "did that apply?" — and the halt is per aggregate, so the
+    // mutation for the order the screen has left keeps syncing on its own.
     await orders.clear();
-    expect(orders.pending).toBeDefined();
+    expect(orders.pendingCount).toBe(1);
+    expect(orders.currentQueue).toEqual([]);
+    expect(orders.pendingForOtherOrders).toBe(1);
+  });
+});
 
-    await orders.discardPending();
-    expect(orders.pending).toBeUndefined();
+describe('§14.1 on the screen', () => {
+  const cancelledAt = (version: number): MutationResponse => ({
+    status: 'CONFLICT',
+    reason: 'ORDER_CANCELLED',
+    clientBaseVersion: 3,
+    serverVersion: version,
+    canonicalOrder: { ...snapshot('order-a', version), status: 'CANCELLED' },
+  });
+
+  it('shows the canonical state beside the local intent and refuses new commands', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockRejectedValueOnce(new Error('network down'));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    postMutationMock.mockRejectedValueOnce(new Error('network down'));
+    await orders.sendToKitchen('pos-1', 'demo-restaurant');
+
+    postMutationMock.mockResolvedValueOnce(cancelledAt(6));
+    await orders.sync();
+
+    expect(orders.halted).toBe(true);
+    expect(orders.conflictedMutation?.type).toBe('ADD_ITEM');
+    expect(orders.blockedMutations.map((row) => row.type)).toEqual(['SEND_TO_KITCHEN']);
+    // The server's truth is on screen next to the intent that was refused.
+    expect(orders.order?.status).toBe('CANCELLED');
+    expect(orders.currentConflict?.reason).toBe('ORDER_CANCELLED');
+
+    // Nothing resolves itself, and nothing new joins a halted queue.
+    const before = postMutationMock.mock.calls.length;
+    await orders.pay('pos-1', 'demo-restaurant', 'CARD');
+    expect(postMutationMock).toHaveBeenCalledTimes(before);
+    expect(orders.lastError).toMatch(/halted/i);
+  });
+
+  it('discard empties the queue and leaves the canonical order on screen', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockResolvedValueOnce(cancelledAt(6));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+
+    await orders.discardHalted();
+
+    expect(orders.pendingCount).toBe(0);
+    expect(orders.halted).toBe(false);
+    // What the operator is accepting: the server's version of the order.
+    expect(orders.projected?.status).toBe('CANCELLED');
+    expect(orders.projected?.version).toBe(6);
+  });
+
+  it('keeps a halt reachable after the screen has moved to another order', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockRejectedValueOnce(new Error('network down'));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+
+    // "New order" while the first order's mutation is still unsent. The halt lands on an order
+    // this screen has already left — §21.8's shape, seen from the POS rather than the engine.
+    await orders.clear();
+    // The pass drains in creation order, so order-a's mutation goes first and is refused; the
+    // creation behind it belongs to another aggregate and is unaffected by that halt.
+    postMutationMock.mockResolvedValueOnce(cancelledAt(6));
+    postMutationMock.mockImplementationOnce((orderId) =>
+      Promise.resolve({ status: 'APPLIED', order: snapshot(orderId, 1), serverVersion: 1 }),
+    );
+    await orders.createOrder('pos-1', 'demo-restaurant', '14');
+    const second = orders.currentOrderId;
+
+    // The new order is unaffected; the old one is halted and says so.
+    expect(orders.currentOrderId).toBe(second);
+    expect(orders.halted).toBe(false);
+    expect(orders.haltedElsewhere).toEqual(['order-a']);
+
+    // And it can be returned to, which is the only thing that makes it resolvable.
+    fetchOrderMock.mockResolvedValueOnce({ ...snapshot('order-a', 6), status: 'CANCELLED' });
+    await orders.focusOrder('order-a');
+    expect(orders.halted).toBe(true);
+    expect(orders.haltedElsewhere).toEqual([]);
   });
 });
 
@@ -196,35 +302,37 @@ describe('a failed canonical read', () => {
   });
 });
 
-describe('a pending mutation belongs to the terminal that sent it', () => {
-  it('is neither shown nor retried from another terminal', async () => {
+describe('a queued mutation belongs to the terminal that formed it', () => {
+  it('is neither shown nor sent from another terminal', async () => {
     const orders = useOrderStore();
     orders.useTerminal('pos-1');
     orders.adopt(snapshot('order-a', 3));
 
     postMutationMock.mockRejectedValueOnce(new Error('network down'));
     await orders.addItem('pos-1', 'demo-restaurant', 'burger');
-    expect(orders.blocked).toBe(true);
+    expect(orders.pendingCount).toBe(1);
 
     // The operator walks to POS-3, which belongs to the *other* restaurant.
     await orders.clear();
     orders.useTerminal('pos-3');
+    await orders.sync();
 
-    expect(orders.pending).toBeUndefined();
-    expect(orders.blocked).toBe(false);
+    // POS-3's engine reads by terminal, so POS-1's row is not its to send.
+    expect(postMutationMock).toHaveBeenCalledTimes(1);
+    expect(orders.pendingCount).toBe(0);
 
-    // POS-3 is free to work, and its own mutation does not disturb POS-1's unresolved one.
-    postMutationMock.mockResolvedValueOnce({
-      status: 'APPLIED',
-      order: snapshot('order-b', 1),
-      serverVersion: 1,
-    });
+    // POS-3 is free to work, and its own mutation does not disturb POS-1's unresolved one. The
+    // server echoes the client's own `orderId`, which is what makes a lost `CREATE_ORDER` response
+    // recoverable — so the mock does too.
+    postMutationMock.mockImplementationOnce((orderId) =>
+      Promise.resolve({ status: 'APPLIED', order: snapshot(orderId, 1), serverVersion: 1 }),
+    );
     await orders.createOrder('pos-3', 'second-restaurant', '9');
-    expect(orders.order?.id).toBe('order-b');
+    expect(orders.order?.id).toBe(orders.currentOrderId);
+    expect(orders.version).toBe(1);
 
-    // Back at POS-1 the unresolved mutation is still there, and still retriable.
-    orders.useTerminal('pos-1');
-    expect(orders.pending?.terminalId).toBe('pos-1');
+    // Back at POS-1 the unresolved mutation is still on disk, with the terminal that formed it.
+    expect(await localStore.readQueue('pos-1')).toHaveLength(1);
   });
 
   it('never paints another terminal answer onto the screen that replaced it', async () => {
@@ -233,13 +341,22 @@ describe('a pending mutation belongs to the terminal that sent it', () => {
     orders.adopt(snapshot('order-a', 3));
 
     let release: (value: MutationResponse) => void = () => undefined;
-    postMutationMock.mockReturnValueOnce(
-      new Promise((resolve) => {
+    let requestSent: () => void = () => undefined;
+    const sent = new Promise<void>((resolve) => {
+      requestSent = resolve;
+    });
+    postMutationMock.mockImplementationOnce(() => {
+      requestSent();
+      return new Promise((resolve) => {
         release = resolve;
-      }),
-    );
+      });
+    });
 
     const inFlight = orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    // The enqueue and the send are two steps now, so the test waits for the request to be
+    // genuinely in the air before moving the screen — otherwise it would be testing a mutation
+    // that was never sent.
+    await sent;
 
     // The route changed while the request was outstanding.
     await orders.clear();
@@ -251,8 +368,7 @@ describe('a pending mutation belongs to the terminal that sent it', () => {
     // POS-3 would otherwise be showing an order from the first restaurant, and every command it
     // sent afterwards would come back CROSS_TENANT_MUTATION.
     expect(orders.order).toBeUndefined();
-    // The answer still resolved the mutation: POS-1 has nothing left pending.
-    orders.useTerminal('pos-1');
-    expect(orders.pending).toBeUndefined();
+    // The answer still resolved the mutation: nothing is left on disk for POS-1.
+    expect(await localStore.readQueue('pos-1')).toEqual([]);
   });
 });

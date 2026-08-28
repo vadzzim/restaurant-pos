@@ -28,8 +28,10 @@ export const persistenceError = ref<string | undefined>();
  * needs `status` and `createdAt` to explain what it is looking at.
  */
 export interface RestoredTerminalState {
+  /** Which order this device was working on. Set even when nothing was ever cached for it. */
+  currentOrderId: string | undefined;
   order: OrderSnapshot | undefined;
-  pending: PendingMutationRecord | undefined;
+  queue: PendingMutationRecord[];
 }
 
 /**
@@ -61,6 +63,18 @@ async function guarded<T>(what: string, run: () => Promise<T>, fallback: T): Pro
 }
 
 const now = (): string => new Date().toISOString();
+
+/**
+ * Queue order is `createdAt`, with `mutationId` as a tiebreak so two intents formed in the same
+ * millisecond still have a total order — without it a "later than the head" filter could match
+ * both of them, or neither.
+ */
+function isLaterInQueue(row: PendingMutationRecord, head: PendingMutationRecord): boolean {
+  if (row.createdAt !== head.createdAt) {
+    return row.createdAt > head.createdAt;
+  }
+  return row.mutationId > head.mutationId;
+}
 
 export const localStore = {
   /**
@@ -132,6 +146,11 @@ export const localStore = {
   /**
    * Record an intent before it is sent. `mutationId` is the primary key, so re-recording the same
    * mutation — a retry — updates the row rather than creating a second one.
+   *
+   * **Returns whether it is actually stored.** Every other operation here can fail silently, but
+   * this one cannot: since M8 the queue is the *only* path to the server, so a row that was not
+   * written is a command that would never be sent at all. The caller falls back to sending it
+   * directly — a device whose IndexedDB refuses writes loses offline-first, not the order.
    */
   async savePending(input: {
     mutationId: string;
@@ -142,8 +161,8 @@ export const localStore = {
     type: MutationType;
     payload: MutationRequest['payload'];
     status: PendingMutationStatus;
-  }): Promise<void> {
-    await guarded(
+  }): Promise<boolean> {
+    return guarded(
       'Recording the pending mutation',
       async () => {
         const existing = await db.pendingMutations.get(input.mutationId);
@@ -155,8 +174,9 @@ export const localStore = {
           // of its own queue.
           createdAt: existing?.createdAt ?? now(),
         });
+        return true;
       },
-      undefined,
+      false,
     );
   },
 
@@ -177,11 +197,14 @@ export const localStore = {
   },
 
   /**
-   * What this terminal was holding when the tab went away.
+   * What this terminal was holding when the tab went away: the pointer, the cached snapshot it
+   * names, and the whole queue.
    *
-   * The pending row is the **earliest** unresolved one. Both screens keep a single slot today, so
-   * there is normally at most one; reading the earliest rather than an arbitrary row means that
-   * if M8's queue ever leaves several behind, hydration surfaces the one that blocks the rest.
+   * The pointer is returned separately from the snapshot because the two can disagree, and the
+   * disagreement is the interesting case: an order created while the device was offline has a
+   * pointer and a `CREATE_ORDER` in the queue but **no cached snapshot at all**, because no
+   * canonical answer has ever come back for it. Returning only the snapshot would lose that order
+   * on a reload — which is the one thing §14 says must not happen.
    */
   async readTerminalState(terminalId: string): Promise<RestoredTerminalState> {
     return guarded(
@@ -190,16 +213,174 @@ export const localStore = {
         const metadata = await db.syncMetadata.get(terminalId);
         const orderId = metadata?.currentOrderId;
         const cached = orderId === undefined ? undefined : await db.orders.get(orderId);
-
-        const pending = await db.pendingMutations
+        const queue = await db.pendingMutations
           .where('terminalId')
           .equals(terminalId)
           .sortBy('createdAt');
 
-        return { order: cached?.snapshot, pending: pending[0] };
+        return { currentOrderId: orderId, order: cached?.snapshot, queue };
       },
-      { order: undefined, pending: undefined },
+      { currentOrderId: undefined, order: undefined, queue: [] },
     );
+  },
+
+  /** One cached snapshot by id, for a screen returning to an order it left. */
+  async readOrder(orderId: string): Promise<OrderSnapshot | undefined> {
+    return guarded(
+      'Reading the cached order',
+      async () => (await db.orders.get(orderId))?.snapshot,
+      undefined,
+    );
+  },
+
+  /**
+   * Point the terminal at an order there is no canonical snapshot for yet.
+   *
+   * `saveOrder` moves the pointer as a side effect of caching an answer, which covers every order
+   * the server has confirmed. An order created offline has no answer and would otherwise be
+   * invisible to the next reload: the queue row exists, but nothing says this device is on it.
+   */
+  async setCurrentOrder(terminalId: string, orderId: string): Promise<void> {
+    await guarded(
+      'Pointing the terminal at the order',
+      () => db.syncMetadata.put({ terminalId, currentOrderId: orderId, updatedAt: now() }),
+      undefined,
+    );
+  },
+
+  /**
+   * The whole of this terminal's queue, in local creation order (§14).
+   *
+   * The order is `createdAt`, not insertion order and not status: §14's reconnect algorithm syncs
+   * in the order the operator formed the intents, and a rebase deliberately keeps the original
+   * `createdAt` so a re-issued mutation stays in front of the ones it is still blocking.
+   */
+  async readQueue(terminalId: string): Promise<PendingMutationRecord[]> {
+    return guarded(
+      'Reading the queue',
+      () => db.pendingMutations.where('terminalId').equals(terminalId).sortBy('createdAt'),
+      [],
+    );
+  },
+
+  /**
+   * Put every `SYNCING` row for this terminal back to `PENDING`.
+   *
+   * **`SYNCING` means "this tab, right now", so it is not durable state.** A row is marked before
+   * its request goes out and put back by the catch when no answer comes — but a crash between the
+   * two leaves the label with nothing behind it, and the engine would then be looking at a
+   * mutation it believes someone else is attempting. Hydration therefore rewrites the label before
+   * the first pass. Re-sending a mutation that did in fact apply is safe and is the whole point of
+   * a stable `mutationId`: §9 answers `ALREADY_APPLIED`.
+   *
+   * `CONFLICT` and `BLOCKED` are untouched: those two survive a reload on purpose, because the
+   * halt they describe is waiting for a human, not for a request.
+   */
+  async normalizeSyncing(terminalId: string): Promise<void> {
+    await guarded(
+      'Recovering interrupted mutations',
+      () =>
+        db.pendingMutations
+          .where('terminalId')
+          .equals(terminalId)
+          .filter((row) => row.status === 'SYNCING')
+          .modify({ status: 'PENDING' }),
+      0,
+    );
+  },
+
+  /**
+   * §14.1, as one write: the mutation the server refused becomes `CONFLICT`, and every mutation
+   * queued **after it for the same order** becomes `BLOCKED`.
+   *
+   * One transaction because the two halves are one fact. If the head were labelled and the tab
+   * died before the followers were, a reload would find rows that look sendable and whose
+   * `baseVersion` is provably stale — the cascade of conflicts §14.1 exists to prevent. The engine
+   * does not rely on that transaction alone: its send gate asks whether *every* row in the group is
+   * `PENDING` or `SYNCING`, so the labels are what the operator reads and the derivation is what
+   * the gate obeys.
+   *
+   * "After it" is by `createdAt`, the queue's own order, with `mutationId` as a tiebreak so two
+   * intents formed in the same millisecond still have a total order.
+   */
+  async haltQueue(head: PendingMutationRecord): Promise<void> {
+    await guarded(
+      'Halting the queue',
+      () =>
+        db.transaction('rw', db.pendingMutations, async () => {
+          await db.pendingMutations.update(head.mutationId, { status: 'CONFLICT' });
+          await db.pendingMutations
+            .where('orderId')
+            .equals(head.orderId)
+            .filter((row) => isLaterInQueue(row, head))
+            .modify({ status: 'BLOCKED' });
+        }),
+      undefined,
+    );
+  },
+
+  /**
+   * Discard: the operator gives up on the whole halted group for one order.
+   *
+   * The conflicted mutation and everything blocked behind it go together, in one transaction.
+   * Deleting the head alone would leave the followers sendable at a `baseVersion` the server has
+   * already left behind — the same cascade, arrived at by a different route.
+   */
+  async discardOrderQueue(terminalId: string, orderId: string): Promise<void> {
+    await guarded(
+      'Discarding the halted mutations',
+      () =>
+        db.transaction('rw', db.pendingMutations, async () => {
+          const ids = await db.pendingMutations
+            .where('orderId')
+            .equals(orderId)
+            .filter((row) => row.terminalId === terminalId)
+            .primaryKeys();
+
+          await db.pendingMutations.bulkDelete(ids);
+        }),
+      undefined,
+    );
+  },
+
+  /**
+   * Rebase one mutation: the same intent, a **new `mutationId`**, a fresh `baseVersion`.
+   *
+   * This is the one place in the client where an id is regenerated, and §14.1 is explicit that it
+   * must be — a rebase is a different mutation, and re-sending the old id would be answered
+   * `ALREADY_APPLIED` for a mutation that never applied.
+   *
+   * Delete and insert are one transaction. Were they two, the insert would have to come first: two
+   * rows for one intent are refused by the send gate and the operator resolves again, whereas
+   * delete-first loses the intent with nothing left to recover it from.
+   *
+   * **`createdAt` is carried over.** The re-issued mutation is still in front of the ones it is
+   * blocking; moving it to the back of the queue would reorder the operator's actions.
+   */
+  async reissue(
+    previous: PendingMutationRecord,
+    mutationId: string,
+    baseVersion: number,
+  ): Promise<PendingMutationRecord> {
+    const reissued: PendingMutationRecord = {
+      ...previous,
+      payload: plain(previous.payload),
+      mutationId,
+      baseVersion,
+      status: 'PENDING',
+    };
+
+    await guarded(
+      'Re-issuing the mutation',
+      () =>
+        db.transaction('rw', db.pendingMutations, async () => {
+          await db.pendingMutations.put(reissued);
+          await db.pendingMutations.delete(previous.mutationId);
+        }),
+      undefined,
+    );
+
+    return reissued;
   },
 
   /**

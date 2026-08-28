@@ -847,3 +847,54 @@ Three tests, all checked by neutralising the guard and watching them fail: the o
 (v5 then v4 stays at v5), the ordinary pair (v4 then v5 moves), and the pointer moving under a
 refused snapshot. The second exists because the cheapest way to pass the first is to make the
 cache refuse everything.
+
+## M8 — the queue, and the halt
+
+The milestone that turns M7's storage into §14's client. Four things are worth recording, three of
+them because they were decisions and one because it was a bug the brief's own second question found
+before the code did.
+
+**The optimistic view is derived, and that is what removed the worst crash window.** The obvious
+implementation writes the predicted order into `orders` as each mutation is queued. That is a pair
+of writes for one intent, and a crash between them leaves either a predicted order nothing will
+ever sync, or a queue row whose effect the screen has forgotten. Folding the queue over the
+canonical snapshot on read has neither problem — the projection is a pure function of two persisted
+things, so a reload reproduces it exactly — and it keeps a table documented as canonical free of
+guesses. The brief asked "for each pair of writes, which order survives a crash between them?" and
+the best answer available turned out to be "make it not a pair".
+
+**`baseVersion` is stamped from the projected version.** This is the single decision that makes
+§19.2 work: four mutations queued offline drain in order with nothing re-stamped, because a client
+that is the only writer can predict the versions the server will produce. The alternative — restamp
+each mutation from the canonical version as it goes out — also makes §19.2 pass, and silently
+rebases the whole queue onto whatever the server holds. That is last-write-wins with no one
+deciding, which is exactly what §14.1 exists to prevent.
+
+**The send gate is a derivation, not a status lookup.** A group is sendable only when every row in
+it is `PENDING` or `SYNCING`. The `CONFLICT` + `BLOCKED` writes are one transaction, but the gate
+does not depend on that: a crash mid-halt, or a rebase that stopped part-way, both leave a group
+the derivation still refuses. It also turned out to be the thing that makes the rebase loop safe —
+after re-issuing the head, the followers are still `BLOCKED`, and a gate that had read only the
+head's status would have sent them at versions the rebase had already invalidated.
+
+**The bug the second question caught.** Since M8 the queue is the _only_ path to the server, so
+`savePending` failing silently — M7's rule, and correct then — became "the command is dropped and
+nobody is told". M7's guarantee is that a storage failure never breaks a command, and the queue
+quietly repealed it. `savePending` now reports whether the row is there, and a device whose
+IndexedDB refuses writes sends the mutation directly through the same `attempt` the pass uses.
+Every repository call inside it is already failure-tolerant, so on such a device those writes are
+no-ops and what is left is the request and its answer. The existing M7 test caught this within a
+minute of the queue landing, which is the argument for that test having existed.
+
+**One thing found while writing the demo, not by a test.** The halt is per aggregate and the screen
+is per order, so they come apart: press "New order" while the first order's mutations are still
+unsent, and it is the first order the server later refuses. The halted group was then counted by
+the pending badge and reachable by nothing — a queue no human could resolve, which is worse than a
+queue that stops. `haltedElsewhere` lists them and `focusOrder` goes back to one. New commands are
+still refused while the order _on screen_ is halted: a halted order is resolved, not walked away
+from.
+
+**And one thing about the tests.** `vi.useFakeTimers()` stalls `fake-indexeddb`, which schedules
+its transactions on real timers — every engine test timed out. `vi.useFakeTimers({ toFake: ['Date'] })`
+is what gives the queue distinct, controlled `createdAt` values without freezing the database the
+tests exist to run against.
