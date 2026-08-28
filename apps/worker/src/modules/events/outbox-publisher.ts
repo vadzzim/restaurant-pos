@@ -50,6 +50,8 @@ interface ClaimedRow extends Record<string, unknown> {
  * A crash between steps 2 and 3 leaves the row claimed until the lease expires and then
  * republishes it. **Publication is therefore at-least-once**, which is exactly why the consumers
  * deduplicate on `event_id` (§12).
+ *
+ * Per-order ordering is the claim query's job, not this loop's: see `claimBatch`.
  */
 export async function publishOnce(
   db: Db,
@@ -85,23 +87,44 @@ export async function publishOnce(
   return result;
 }
 
+/**
+ * Claims at most **one** row per aggregate: the earliest unpublished event of that order. A later
+ * event becomes claimable only once its predecessor is published, so a single order's events reach
+ * Redpanda in version order no matter how many workers run, how a batch is ordered internally, or
+ * which publish fails and goes back for a retry. Kafka then preserves that order within the
+ * partition the order id keys into (§11).
+ *
+ * A dead-lettered event deliberately stops blocking its successors: the alternative is one poison
+ * event freezing an order forever, and `/debug` surfaces dead letters for a human to act on.
+ */
 async function claimBatch(db: Db, options: PublisherOptions): Promise<ClaimedRow[]> {
   return db.transaction(async (tx) => {
     const claimed = await tx.execute<ClaimedRow>(sql`
-      update outbox_events
-      set claimed_by = ${options.workerId},
-          claim_until = now() + ${`${options.leaseMs} milliseconds`}::interval
-      where id in (
-        select id from outbox_events
-        where published_at is null
-          and dead_lettered_at is null
-          and next_attempt_at <= now()
-          and (claim_until is null or claim_until < now())
-        order by next_attempt_at
-        limit ${options.batchSize}
-        for update skip locked
+      with claimed as (
+        update outbox_events
+        set claimed_by = ${options.workerId},
+            claim_until = now() + ${`${options.leaseMs} milliseconds`}::interval
+        where id in (
+          select pending.id from outbox_events pending
+          where pending.published_at is null
+            and pending.dead_lettered_at is null
+            and pending.next_attempt_at <= now()
+            and (pending.claim_until is null or pending.claim_until < now())
+            and not exists (
+              select 1 from outbox_events earlier
+              where earlier.aggregate_id = pending.aggregate_id
+                and earlier.published_at is null
+                and earlier.dead_lettered_at is null
+                and (earlier.event_version, earlier.created_at, earlier.id)
+                    < (pending.event_version, pending.created_at, pending.id)
+            )
+          order by pending.next_attempt_at
+          limit ${options.batchSize}
+          for update skip locked
+        )
+        returning *
       )
-      returning *
+      select * from claimed order by created_at, event_version
     `);
 
     return [...claimed.rows];

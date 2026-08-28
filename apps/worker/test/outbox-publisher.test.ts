@@ -42,6 +42,22 @@ const failingTransport: EventTransport = {
   },
 };
 
+async function seedEvent(orderId: string, eventVersion: number): Promise<string> {
+  const eventId = randomUUID();
+
+  await db().insert(outboxEvents).values({
+    id: eventId,
+    aggregateId: orderId,
+    aggregateType: 'order',
+    restaurantId: 'demo-restaurant',
+    eventType: 'OrderItemAdded',
+    eventVersion,
+    payload: { orderId },
+  });
+
+  return eventId;
+}
+
 async function seedOrderWithEvent(): Promise<{ orderId: string; eventId: string }> {
   const orderId = randomUUID();
   const eventId = randomUUID();
@@ -137,5 +153,52 @@ describe('the outbox publisher', () => {
 
     const afterDeadLetter = await publishOnce(db(), failingTransport, impatient);
     expect(afterDeadLetter.claimed).toBe(0);
+  });
+});
+
+describe('per-order ordering', () => {
+  it('claims only the earliest pending event of an order, so v2 cannot overtake v1', async () => {
+    const orderId = randomUUID();
+    const first = await seedEvent(orderId, 1);
+    const second = await seedEvent(orderId, 2);
+    const transport = recordingTransport();
+
+    const pass = await publishOnce(db(), transport, options);
+    expect(pass.claimed).toBe(1);
+    expect(transport.sent.map((event) => event.eventId)).toEqual([first]);
+
+    await publishOnce(db(), transport, options);
+    expect(transport.sent.map((event) => event.eventId)).toEqual([first, second]);
+    expect(transport.sent.map((event) => event.version)).toEqual([1, 2]);
+  });
+
+  it('holds later events of the same order back while an earlier one is retrying', async () => {
+    const orderId = randomUUID();
+    const first = await seedEvent(orderId, 1);
+    await seedEvent(orderId, 2);
+    const impatient: PublisherOptions = { ...options, backoffBaseMs: 1, backoffMaxMs: 1 };
+
+    await publishOnce(db(), failingTransport, impatient);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    // v1 is back in the queue: the next pass must retry it, never skip ahead to v2.
+    const transport = recordingTransport();
+    const retry = await publishOnce(db(), transport, impatient);
+
+    expect(retry.published).toBe(1);
+    expect(transport.sent.map((event) => event.eventId)).toEqual([first]);
+  });
+
+  it('still batches events belonging to different orders', async () => {
+    const firstOrder = randomUUID();
+    const secondOrder = randomUUID();
+    await seedEvent(firstOrder, 1);
+    await seedEvent(secondOrder, 1);
+    const transport = recordingTransport();
+
+    const pass = await publishOnce(db(), transport, options);
+
+    expect(pass.claimed).toBe(2);
+    expect(pass.published).toBe(2);
   });
 });

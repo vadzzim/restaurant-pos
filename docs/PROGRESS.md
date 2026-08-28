@@ -10,9 +10,10 @@ Redpanda -> kitchen consumer -> projection, for `CREATE_ORDER`, `ADD_ITEM` and `
 **Next:** M4 — the frontend vertical slice and Socket.IO. Recommended model: Sonnet.
 **This is the milestone that makes M4 demoable.**
 
-M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`. M3 passes typecheck, lint, build and 27
-tests (9 domain, 10 api, 8 worker) against a real PostgreSQL. The seven mandatory tests §21.1,
-21.2, 21.3, 21.5, 21.6, 21.11 and 21.15 are present and named by their spec number.
+M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + the review fixes. M3 passes
+typecheck, lint, build and 33 tests (9 domain, 13 api, 11 worker) against a real PostgreSQL. The
+seven mandatory tests §21.1, 21.2, 21.3, 21.5, 21.6, 21.11 and 21.15 are present and named by
+their spec number; five more cover the races an external review found after the first commit.
 
 ## What exists
 
@@ -47,6 +48,9 @@ tests (9 domain, 10 api, 8 worker) against a real PostgreSQL. The seven mandator
 - The kitchen projection is `kitchen_tickets`, written only from `OrderSentToKitchen`, with
   `state = 'SENT_TO_KITCHEN'` and `source_event_version`. M4's kitchen screen reads this table.
 - Events on `restaurant.order.events` are keyed by `orderId`; the envelope is `DomainEvent`.
+- **The publisher claims only an order's earliest unpublished event**, so that order's events reach
+  Redpanda in version order regardless of retries or how many workers run. A pass that published
+  something immediately runs again instead of waiting out the poll interval.
 - Test databases: `TEST_DATABASE_URL` (`pos_test`), created and migrated automatically by
   `@pos/db/testing`. The demo database is never truncated by a test run.
 - Workspace packages resolve through their `exports` to `dist`, so `pnpm run build:packages` runs

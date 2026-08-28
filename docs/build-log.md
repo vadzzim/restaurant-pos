@@ -60,3 +60,37 @@ versioned UPDATE matched zero rows, so it returned `409 CONFLICT` even though it
 just been applied by the winner. A client would have halted its queue over its own retry (§14.1).
 The conflict path now looks the `mutationId` up after the rollback and answers `ALREADY_APPLIED`
 when the winner's row is there. Caught by a test written for exactly that race.
+
+## M3 review — three races the tests did not cover
+
+**`isUniqueViolation` never matched anything.** Drizzle wraps driver failures in a
+`DrizzleQueryError` whose `cause` holds the pg `DatabaseError`, so the `23505` check read `code`
+off the wrapper and always saw `undefined`. The whole "a concurrent duplicate committed first"
+branch was dead and the API would have answered `500`. The check now walks the `cause` chain.
+
+Worse than the wrapper: that branch returned the winner's stored result unconditionally. Two
+concurrent mutations sharing a `mutationId` but carrying **different** payloads would have handed
+the loser a result for an operation it never requested — the exact silent drop §9 forbids. Both
+race paths (primary key, and losing the versioned UPDATE) now compare `request_hash` and answer
+`MUTATION_ID_REUSED` on a mismatch.
+
+**Concurrent `CREATE_ORDER` walked around the tenant guard.** The guard runs at the top of the
+transaction, where a not-yet-created order looks like no order at all. Two restaurants creating the
+same client-generated `orderId` therefore both passed it; the loser then compared only
+`tableNumber` and, on a match, returned `ALREADY_APPLIED` **with the other tenant's order**. The
+insert-conflict path now re-checks `restaurant_id` before it compares content.
+
+**The outbox could publish an order's events out of version order.** A failed publish sent one
+event back for a retry while the loop kept publishing later events of the same order;
+`UPDATE ... RETURNING` does not preserve the subquery's order; and two workers could claim adjacent
+versions into separate batches. The Kafka key preserves only the order in which messages are
+actually sent, so a consumer could legitimately see v2 before v1. The claim now takes **only the
+earliest unpublished event per aggregate** — a successor becomes claimable when its predecessor is
+published — and the batch is ordered explicitly through a CTE. A dead-lettered event stops blocking
+its successors on purpose, so one poison event cannot freeze an order forever.
+
+That claim rule costs throughput per order, so a pass that published something no longer waits a
+poll interval before the next one; otherwise a three-event order would take seconds to reach the
+kitchen.
+
+Five regression tests were added, and all five fail against the pre-fix sources.

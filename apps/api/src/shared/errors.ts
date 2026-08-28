@@ -24,14 +24,26 @@ interface PostgresError {
   constraint?: string;
 }
 
-/** A unique violation is a normal outcome on this path, not a crash: two clients raced. */
-export function isUniqueViolation(error: unknown, constraint?: string): boolean {
-  if (typeof error !== 'object' || error === null || !('code' in error)) {
-    return false;
+function asPostgresError(error: unknown): PostgresError | undefined {
+  // Drizzle wraps driver failures in a DrizzleQueryError whose `cause` is the pg DatabaseError,
+  // so the code we need is one or more links down the chain, never on the thrown object itself.
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 5 && typeof current === 'object' && current !== null; depth += 1) {
+    if ('code' in current && typeof (current as { code: unknown }).code === 'string') {
+      return current as PostgresError;
+    }
+    current = (current as { cause?: unknown }).cause;
   }
 
-  const pgError = error as PostgresError;
-  if (pgError.code !== '23505') {
+  return undefined;
+}
+
+/** A unique violation is a normal outcome on this path, not a crash: two clients raced. */
+export function isUniqueViolation(error: unknown, constraint?: string): boolean {
+  const pgError = asPostgresError(error);
+
+  if (pgError?.code !== '23505') {
     return false;
   }
 

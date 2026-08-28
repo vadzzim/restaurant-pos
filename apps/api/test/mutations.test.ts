@@ -317,3 +317,127 @@ describe('the mutation route', () => {
     }
   });
 });
+
+describe('races the review found', () => {
+  it('answers MUTATION_ID_REUSED when a concurrent mutation reuses the id with other content', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+
+    const mutationId = randomUUID();
+    const results = await Promise.all([
+      applyMutation(
+        db(),
+        mutation({
+          orderId,
+          mutationId,
+          type: 'ADD_ITEM',
+          payload: { productId: 'burger', quantity: 1 },
+        }),
+      ),
+      applyMutation(
+        db(),
+        mutation({
+          orderId,
+          mutationId,
+          type: 'ADD_ITEM',
+          payload: { productId: 'pizza', quantity: 5 },
+        }),
+      ),
+    ]);
+
+    // One of the two applied; the other must never be handed the winner's result.
+    expect(results.map((result) => result.body.status).sort()).toEqual([
+      'APPLIED',
+      'MUTATION_ID_REUSED',
+    ]);
+
+    const items = await itemRows(orderId);
+    expect(items).toHaveLength(1);
+    expect(
+      (await outboxRows(orderId)).filter((row) => row.eventType === 'OrderItemAdded'),
+    ).toHaveLength(1);
+  });
+
+  it('rejects an id reused across two orders, where only the primary key can catch it', async () => {
+    const mutationId = randomUUID();
+    const firstOrder = randomUUID();
+    const secondOrder = randomUUID();
+
+    // Different orders, so neither mutation can lose on a version check: the loser can only be
+    // stopped by the processed_mutations primary key.
+    const results = await Promise.all([
+      applyMutation(
+        db(),
+        mutation({
+          orderId: firstOrder,
+          mutationId,
+          type: 'CREATE_ORDER',
+          baseVersion: 0,
+          payload: { tableNumber: '21' },
+        }),
+      ),
+      applyMutation(
+        db(),
+        mutation({
+          orderId: secondOrder,
+          mutationId,
+          type: 'CREATE_ORDER',
+          baseVersion: 0,
+          payload: { tableNumber: '22' },
+        }),
+      ),
+    ]);
+
+    expect(results.map((result) => result.body.status).sort()).toEqual([
+      'APPLIED',
+      'MUTATION_ID_REUSED',
+    ]);
+
+    const stored = await db().select().from(orders);
+    const created = stored.filter((row) => row.id === firstOrder || row.id === secondOrder);
+    expect(created).toHaveLength(1);
+  });
+
+  it('does not hand a concurrent CREATE_ORDER from another restaurant the winner order', async () => {
+    const orderId = randomUUID();
+
+    const results = await Promise.all([
+      applyMutation(
+        db(),
+        mutation({
+          orderId,
+          type: 'CREATE_ORDER',
+          baseVersion: 0,
+          payload: { tableNumber: '12' },
+        }),
+      ),
+      applyMutation(
+        db(),
+        mutation({
+          orderId,
+          type: 'CREATE_ORDER',
+          baseVersion: 0,
+          terminalId: 'pos-3',
+          restaurantId: SECOND_RESTAURANT,
+          payload: { tableNumber: '12' },
+        }),
+      ),
+    ]);
+
+    const statuses = results.map((result) => result.body.status).sort();
+    expect(statuses).toEqual(['APPLIED', 'REJECTED']);
+
+    const rejected = results.find((result) => result.body.status === 'REJECTED');
+    expect(rejected?.httpStatus).toBe(403);
+    expect(rejected?.body).toEqual({ status: 'REJECTED', reason: 'CROSS_TENANT_MUTATION' });
+
+    // Either restaurant may win the insert; what matters is that the loser is told to go away
+    // rather than being handed the winner's order.
+    const applied = results.find((result) => result.body.status === 'APPLIED');
+    const winner = applied?.body.status === 'APPLIED' ? applied.body.order.restaurantId : undefined;
+
+    const stored = await db().select().from(orders).where(eq(orders.id, orderId));
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.restaurantId).toBe(winner);
+  });
+});

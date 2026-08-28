@@ -38,16 +38,24 @@ let running = true;
 /** Sequential passes: a slow publish must not overlap the next tick and double-publish a lease. */
 const publisherLoop = (async () => {
   while (running) {
+    let drained = true;
+
     try {
       const result = await publishOnce(db, transport, publisherOptions);
       if (result.claimed > 0) {
         logger.info({ workerId, ...result }, 'outbox batch processed');
       }
+      // A pass claims at most one event per order, to keep that order's events in version order.
+      // Waiting a full poll interval between them would make a three-event order take seconds to
+      // reach the kitchen, so a productive pass is followed immediately by the next one.
+      drained = result.published === 0;
     } catch (error) {
       logger.error({ err: error, workerId }, 'outbox publisher pass failed');
     }
 
-    await sleep(config.OUTBOX_POLL_MS);
+    if (drained) {
+      await sleep(config.OUTBOX_POLL_MS);
+    }
   }
 })();
 

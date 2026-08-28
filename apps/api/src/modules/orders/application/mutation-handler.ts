@@ -102,9 +102,11 @@ export async function applyMutation(db: Db, input: MutationInput): Promise<Mutat
     }
 
     if (isUniqueViolation(error, 'processed_mutations_pkey')) {
-      // A concurrent retry of the same mutation committed first. Its effect is the one that
-      // counts; ours rolled back, so the business effect still happened exactly once (§21.2).
-      return storedOutcome(db, input.mutationId);
+      // A mutation with this id committed while ours was in flight. If it carried the same
+      // request, its effect is our effect and the business effect happened exactly once (§21.2).
+      // If it carried a different one, this is id reuse and returning the winner's result would
+      // silently drop a real operation (§9) — so the hash decides, exactly as it does above.
+      return racedOutcome(db, input, hash);
     }
 
     throw error;
@@ -198,8 +200,14 @@ async function applyEffect(
       .returning();
 
     if (inserted.length === 0) {
-      // A concurrent CREATE_ORDER for the same client-generated id won the race.
+      // A concurrent CREATE_ORDER for the same client-generated id won the race. The tenant check
+      // at the top of the transaction saw no order at all, so it has to run again here — the
+      // winner may belong to another restaurant, and answering ALREADY_APPLIED would hand this
+      // caller another tenant's order (§3).
       const existing = await loadOrderSnapshot(tx, input.orderId);
+      if (existing !== undefined && existing.restaurantId !== input.restaurantId) {
+        throw new CrossTenantSignal();
+      }
       if (existing?.tableNumber === command.payload.tableNumber) {
         throw new AlreadyAppliedSignal();
       }
@@ -281,9 +289,7 @@ async function conflictOutcome(
   // mutation that actually applied.
   const raced = await findProcessedMutation(db, input.mutationId);
   if (raced !== undefined) {
-    return raced.requestHash === requestHash(input.orderId, input.type, input.payload)
-      ? toAppliedOutcome(raced.resultJson as StoredResult)
-      : { httpStatus: 409, body: { status: 'MUTATION_ID_REUSED', reason: 'PAYLOAD_MISMATCH' } };
+    return outcomeFor(raced, requestHash(input.orderId, input.type, input.payload));
   }
 
   // Read the canonical state after the rollback, so the client rebases onto what is actually
@@ -346,11 +352,24 @@ async function alreadyAppliedOutcome(db: Db, input: MutationInput): Promise<Muta
   };
 }
 
-async function storedOutcome(db: Db, mutationId: string): Promise<MutationOutcome> {
-  const processed = await findProcessedMutation(db, mutationId);
+async function racedOutcome(db: Db, input: MutationInput, hash: string): Promise<MutationOutcome> {
+  const processed = await findProcessedMutation(db, input.mutationId);
 
   if (processed === undefined) {
-    throw new Error(`Mutation ${mutationId} conflicted but left no processed_mutations row.`);
+    throw new Error(
+      `Mutation ${input.mutationId} hit the processed_mutations primary key but left no row.`,
+    );
+  }
+
+  return outcomeFor(processed, hash);
+}
+
+function outcomeFor(
+  processed: { requestHash: string; resultJson: unknown },
+  hash: string,
+): MutationOutcome {
+  if (processed.requestHash !== hash) {
+    return { httpStatus: 409, body: { status: 'MUTATION_ID_REUSED', reason: 'PAYLOAD_MISMATCH' } };
   }
 
   return toAppliedOutcome(processed.resultJson as StoredResult);
