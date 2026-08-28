@@ -11,6 +11,12 @@ import { applyMutation, type MutationInput } from '../application/mutation-handl
  *
  * The adapters therefore carry no rule of their own. They read as domain commands and they
  * validate their own body; everything after that is this function and the handler behind it.
+ *
+ * This is also the only place §20's correlation fields can be logged together, which is why they
+ * are logged here and not in the three routes: a mutation is the one unit of work that knows all
+ * of `orderId mutationId restaurantId terminalId` at once. `traceId` is passed *into* the handler,
+ * so it is written to `outbox_events.trace_id`, copied onto the `DomainEvent` by the publisher and
+ * logged again by both consumers — one header followed across three processes.
  */
 export async function executeMutation(
   db: Db,
@@ -18,20 +24,32 @@ export async function executeMutation(
   reply: FastifyReply,
   input: Omit<MutationInput, 'traceId'>,
 ): Promise<FastifyReply> {
-  const outcome = await applyMutation(db, { ...input, traceId: request.id });
+  const outcome = await applyMutation(db, { ...input, traceId: request.traceId });
+  const body = outcome.body;
 
-  request.log.info(
-    {
-      traceId: request.id,
-      orderId: input.orderId,
-      mutationId: input.mutationId,
-      restaurantId: input.restaurantId,
-      terminalId: input.terminalId,
-      mutationType: input.type,
-      outcome: outcome.body.status,
-    },
-    'mutation processed',
-  );
+  const fields = {
+    orderId: input.orderId,
+    mutationId: input.mutationId,
+    restaurantId: input.restaurantId,
+    terminalId: input.terminalId,
+    mutationType: input.type,
+    baseVersion: input.baseVersion,
+    outcome: body.status,
+    httpStatus: outcome.httpStatus,
+  };
 
-  return reply.status(outcome.httpStatus).send(outcome.body);
+  // A run of conflicts is the signal an operator is looking for; it must be visible without
+  // reading every applied mutation, so the level follows the outcome rather than the transport.
+  if (body.status === 'APPLIED' || body.status === 'ALREADY_APPLIED') {
+    request.log.info(fields, 'mutation processed');
+  } else {
+    // `in` rather than a narrowing on `status`: an applied response carries two status literals, so
+    // the union does not collapse on the negative branch.
+    request.log.warn(
+      { ...fields, reason: 'reason' in body ? body.reason : undefined },
+      'mutation refused',
+    );
+  }
+
+  return reply.status(outcome.httpStatus).send(body);
 }

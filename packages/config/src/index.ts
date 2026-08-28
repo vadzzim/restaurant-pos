@@ -23,6 +23,14 @@ const environmentSchema = z.object({
   /** Shared across every api instance on purpose: see ADR 006. */
   REALTIME_CONSUMER_GROUP: z.string().min(1).default('realtime'),
   REALTIME_CONSUMER_RETRY_MS: z.coerce.number().int().positive().default(5_000),
+  /**
+   * The worker retries its broker connection on this interval instead of exiting. It deliberately
+   * does not run the publisher while disconnected: a failed publish increments `attempt_count`,
+   * and an outage long enough to exhaust it would dead-letter events that were never bad (ADR 011).
+   */
+  WORKER_BROKER_RETRY_MS: z.coerce.number().int().positive().default(5_000),
+  /** One dependency being unreachable must not make the report that explains it hang (§17). */
+  HEALTH_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
   OUTBOX_POLL_MS: z.coerce.number().int().positive().default(500),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().default(50),
   OUTBOX_LEASE_MS: z.coerce.number().int().positive().default(30_000),

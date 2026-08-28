@@ -460,3 +460,72 @@ for a case that the next event or a reload already resolves.
 Two rounds, two shapes worth keeping: M5's own fix widened a rule past what justified it, and the
 justification was sitting in the comment above it. Both this round and the last found the same
 thing — a rule stated correctly in prose and then implemented one notch too broadly.
+
+## M6 — the operational half: errors, correlation, health, and one reproducible command
+
+M6 added no feature. Almost everything in it existed in outline and the milestone was about
+finishing each outline honestly. Four things were worth writing down.
+
+**Two error paths were producing the wrong answer, and neither had a test.** The single error
+handler only recognised `ApiError`, so a body that was not JSON — which Fastify rejects before any
+route code runs, with its own `statusCode: 400` — fell through to the unhandled branch and answered
+**500 `INTERNAL_ERROR`**. Telling a client that its own malformed request was a server fault is not
+a cosmetic bug in a system with an offline queue: §14 branches on exactly that distinction, and a
+500 means _retry forever_. Unknown routes had the matching problem, answering Fastify's default
+`{message, error, statusCode}` rather than the §17 envelope. Both are handler-level fixes —
+`asClientError` honours a 4xx that arrives with one, and `setNotFoundHandler` covers the other — so
+there is now no way out of the API that is not a §5 outcome, a §17 envelope or a health report.
+
+`ApiError.code` is `ApiErrorCode` now rather than `string`. Writing the union down forced the
+question the §17 example invites: should `ORDER_VERSION_CONFLICT` travel in the error envelope? No.
+A conflict is a _successful_ application of the rules and carries a snapshot, a reason and two
+version numbers — all of which the envelope would erase, and all three of which §14.1 branches on.
+`packages/contracts` had already said so in a comment; the union is that comment made mechanical.
+
+**`traceId` and `requestId` are two fields, and the second one is a fallback for the first.**
+`requestId` identifies the HTTP call; `traceId` identifies the work, and the work outlives the call
+— it becomes an outbox row, a Kafka message, a projection write and a broadcast, and both consumers
+were already logging `traceId` from the event. What was missing was the front end of that chain:
+`executeMutation` was passing Fastify's request id as the trace id, so a client could not supply
+one. It now reads `x-trace-id`, falls back to the request id when nothing upstream is tracing —
+inventing a second uuid there would add a field that correlates with nothing — and both are bound
+onto the request's child logger, so Fastify's own lines carry them too. The end-to-end assertion is
+in `apps/api/test/errors.test.ts`: a header on the request appears in `outbox_events.trace_id`.
+
+**The health split's only interesting decision is what readiness does _not_ check**, and it is in
+ADR 011. The part that took the most thought is the third state: `degraded`. A report that can only
+say healthy or broken flattens the exact distinction the architecture is built on, so
+`/api/debug/dependencies` grades each dependency `hard` or `soft`, names what its absence costs, and
+carries the outbox backlog next to it. Stopping Redpanda now produces a demonstration rather than a
+claim: readiness green, mutations `APPLIED`, status `degraded`, backlog counting up.
+
+**The open question about the worker had a sharper answer than "make it match the API".** The worker
+exited when Redpanda was down at startup while the API retried. The obvious fix — let it run and let
+the publisher fail — is the one that silently destroys data quality: every failed pass increments
+`attempt_count`, and at the current settings a broker outage of about three minutes would
+dead-letter events whose only fault was arriving at the wrong time. Dead-lettering has to keep
+meaning _this event is bad_, because M9 and §18 are built on it. So the worker supervises the
+connection **and idles the publisher while disconnected**: the backlog waits untouched and drains on
+recovery. The heartbeat carries `brokerConnected` so a worker that is alive but deaf is visible.
+
+**`pnpm verify:integration` closed the reproducibility gap, and the round trip closed a test gap.**
+Until now Kafka was in no test at all: the publisher ran against a fake transport and both consumers
+were called as functions, so the producer, the topic, the key-to-partition mapping, the consumer
+group and the JSON envelope were asserted by nothing. `kafka-roundtrip.integration.test.ts` runs
+outbox row → producer → Redpanda → consumer group → `kitchen_tickets` for real. It publishes to its
+own topic and its own consumer group, both suffixed per run — against `restaurant.order.events` the
+worker the user keeps running for the demo would consume the test's events and write kitchen tickets
+for orders that do not exist in the demo database. It is excluded from `pnpm test` so the default
+suite stays runnable against PostgreSQL alone.
+
+Two details of the script are decisions, not plumbing. It tears down **only the services it
+started** — `docker compose ps` before `up`, then `rm -sf` on the difference, never `down -v` — so
+running the tests cannot destroy the demo the user has on screen. And it is a Node script rather
+than a shell script, because the user is on Windows and CI is on Linux; one file that runs on both
+beats two that drift. CI calls that same command and declares no `services:` block: the script owns
+the container lifecycle, and declaring both would bind the same ports twice and verify a different
+set of containers than anyone runs locally.
+
+One thing deliberately left alone: `GET /api/config` is still the M4 stub. M6's brief lists it
+because §17 lists it, and it exists; the Redis cache, the percentage rollout and the 15-second poll
+are M13's, together with the polling transport that is the flag's other branch.

@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { executeMutation } from '../../orders/api/mutation-reply.js';
-import { ApiError } from '../../../shared/errors.js';
+import { validationFailed } from '../../../shared/errors.js';
 
 const paramsSchema = z.object({ orderId: z.uuid() });
 
@@ -39,16 +39,12 @@ function register(app: FastifyInstance, db: Db, segment: string, type: MutationT
   app.post(`/api/kitchen/orders/:orderId/${segment}`, async (request, reply) => {
     const params = paramsSchema.safeParse(request.params);
     if (!params.success) {
-      throw new ApiError(400, 'VALIDATION_FAILED', 'orderId must be a UUID.', {
-        issues: params.error.issues,
-      });
+      throw validationFailed('orderId must be a UUID.', params.error);
     }
 
     const body = bodySchema.safeParse(request.body);
     if (!body.success) {
-      throw new ApiError(400, 'VALIDATION_FAILED', 'The kitchen command body is not valid.', {
-        issues: body.error.issues,
-      });
+      throw validationFailed('The kitchen command body is not valid.', body.error);
     }
 
     return executeMutation(db, request, reply, {

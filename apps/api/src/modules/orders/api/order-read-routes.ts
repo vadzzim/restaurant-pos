@@ -3,7 +3,7 @@ import type { Db } from '@pos/db';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import { ApiError } from '../../../shared/errors.js';
+import { ApiError, validationFailed } from '../../../shared/errors.js';
 import { loadOrderSnapshot } from '../application/order-snapshot.js';
 
 const paramsSchema = z.object({ orderId: z.uuid() });
@@ -24,9 +24,7 @@ export function registerOrderReadRoutes(app: FastifyInstance, db: Db): void {
   app.get('/api/orders/:orderId', async (request): Promise<OrderSnapshot> => {
     const params = paramsSchema.safeParse(request.params);
     if (!params.success) {
-      throw new ApiError(400, 'VALIDATION_FAILED', 'orderId must be a UUID.', {
-        issues: params.error.issues,
-      });
+      throw validationFailed('orderId must be a UUID.', params.error);
     }
 
     const snapshot = await db.transaction(

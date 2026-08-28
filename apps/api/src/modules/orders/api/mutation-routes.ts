@@ -3,7 +3,7 @@ import type { Db } from '@pos/db';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import { ApiError } from '../../../shared/errors.js';
+import { validationFailed } from '../../../shared/errors.js';
 import { executeMutation } from './mutation-reply.js';
 
 const identity = {
@@ -92,16 +92,12 @@ export function registerMutationRoutes(app: FastifyInstance, db: Db): void {
   app.post('/api/orders/:orderId/mutations', async (request, reply) => {
     const params = paramsSchema.safeParse(request.params);
     if (!params.success) {
-      throw new ApiError(400, 'VALIDATION_FAILED', 'orderId must be a UUID.', {
-        issues: params.error.issues,
-      });
+      throw validationFailed('orderId must be a UUID.', params.error);
     }
 
     const body = mutationSchema.safeParse(request.body);
     if (!body.success) {
-      throw new ApiError(400, 'VALIDATION_FAILED', 'The mutation body is not valid.', {
-        issues: body.error.issues,
-      });
+      throw validationFailed('The mutation body is not valid.', body.error);
     }
 
     const input = body.data;

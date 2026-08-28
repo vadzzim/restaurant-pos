@@ -1,24 +1,16 @@
-import { fileURLToPath } from 'node:url';
-
 import { defineConfig } from 'vitest/config';
 
-const resolve = (path: string) => fileURLToPath(new URL(path, import.meta.url));
+import { packageAliases } from './vitest.alias.js';
 
 export default defineConfig({
-  resolve: {
-    // Tests run against package sources, so a stale dist can never hide a broken change.
-    alias: {
-      '@pos/db/testing': resolve('../../packages/db/src/testing.ts'),
-      '@pos/db': resolve('../../packages/db/src/index.ts'),
-      '@pos/contracts': resolve('../../packages/contracts/src/index.ts'),
-      '@pos/domain': resolve('../../packages/domain/src/index.ts'),
-      '@pos/config': resolve('../../packages/config/src/index.ts'),
-    },
-  },
+  resolve: { alias: packageAliases },
   test: {
     // One database, one file at a time: the suites truncate shared tables.
     fileParallelism: false,
     hookTimeout: 60_000,
     testTimeout: 30_000,
+    // `pnpm test` must stay runnable with PostgreSQL alone. The round trip needs a live broker, so
+    // it runs from `vitest.integration.config.ts` under `pnpm verify:integration` instead.
+    exclude: ['**/node_modules/**', '**/dist/**', '**/*.integration.test.ts'],
   },
 });

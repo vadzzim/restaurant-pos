@@ -5,25 +5,24 @@
 
 ## Current state
 
-**Last completed milestone:** M5 — all nine mutation types, the whole of §8 in one domain
-component, the two §17 kitchen adapters, payments, and the kitchen rail moving on screen.
-**The entire order lifecycle is demoable end to end.**
-**Next:** M6 — error model, logging, the three-way health split, `verify:integration` and CI.
-Model: Sonnet.
+**Last completed milestone:** M6 — the typed error model, §20 correlation fields, the three-way
+health split with its ADR, the supervised worker, `pnpm verify:integration` and CI.
+**The entire order lifecycle is demoable end to end, and now so is a broker outage.**
+**Next:** M7 — Dexie / IndexedDB persistence. Model: Sonnet.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
-four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `HEAD`. The
-tree
-passes typecheck, lint, build and **163 tests**
-(61 domain, 39 api, 16 worker, 47 web) against a real PostgreSQL. Ten of the sixteen mandatory
-§21 tests exist and are named by their spec number: 21.1, 21.2, 21.3, **21.4**, 21.5, 21.6,
-**21.9**, **21.10**, 21.11, 21.15.
+four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
+M6 at `HEAD`. The tree passes typecheck, lint, build and **176 tests**
+(61 domain, 51 api, 16 worker, 47 web) against a real PostgreSQL, plus **one integration test**
+against a real Redpanda that runs only under `pnpm verify:integration`. Ten of the sixteen
+mandatory §21 tests exist and are named by their spec number: 21.1, 21.2, 21.3, **21.4**, 21.5,
+21.6, **21.9**, **21.10**, 21.11, 21.15.
 
 ## What exists
 
 - `CLAUDE.md`, `docs/spec.md`, `docs/MILESTONES.md`, `docs/build-log.md`.
-- `docs/milestones/M01.md` … `M05.md` — the completed briefs.
-- ADRs 001, 003, 004, **005**, 006, 007, 009, **012** accepted.
+- `docs/milestones/M01.md` … `M06.md` — the completed briefs.
+- ADRs 001, 003, 004, 005, 006, 007, 009, **011**, 012 accepted.
 - `packages/config` — zod environment, `TEST_DATABASE_URL`, Kafka topics, outbox tuning.
 - `packages/contracts` — statuses, the nine `MUTATION_TYPES`, the nine event types, every mutation
   and event payload, the §5 request/response shapes, `ConflictReason`, `PaymentMethod`,
@@ -43,17 +42,33 @@ passes typecheck, lint, build and **163 tests**
 - `apps/web` — a POS screen with all six of its commands (add, ±quantity, remove, send, pay,
   cancel) and a kitchen screen with four columns and two command buttons. Pinia stores for menu,
   order, kitchen and connection. `/debug` and `/demo` are still the M1 placeholder (M11, M16).
+- **The operational surface (M6):** `/api/health/{live,ready}` and `/api/debug/dependencies`; the
+  §17 envelope produced in one handler with `ApiErrorCode` closed in contracts; `requestId` and
+  `traceId` on every request log line; `scripts/verify-integration.mjs`; `.github/workflows/ci.yml`.
 
-## Facts M6 depends on
+## Facts the next milestone depends on
 
 - **One write path, three routes into it.** `applyMutation` is the only function that writes an
   order. The canonical `POST /api/orders/:orderId/mutations` and the two kitchen adapters all go
   through `executeMutation` in `apps/api/src/modules/orders/api/mutation-reply.ts`, which is the
-  single place an outcome becomes an HTTP reply and a log line. **M6's correlation fields belong
-  there**, not in three route handlers.
-- The §17 error envelope `{ code, message, details }` and `ApiError` already exist in
-  `apps/api/src/shared/errors.ts`, and `buildApp()` already installs one error handler with no
-  stack traces in responses. M6 makes it typed and complete rather than inventing it.
+  single place an outcome becomes an HTTP reply and a log line — and, since M6, the single place
+  §20's correlation fields are logged. Anything a future milestone wants on every mutation goes
+  there, never into the three route handlers.
+- **Everything leaving the API is one of three shapes**: a §5 domain outcome, the §17 envelope
+  `{ code, message, details }` with `code: ApiErrorCode`, or a health report. `buildApp()` installs
+  the one error handler and the one not-found handler; no route builds an error body. A conflict is
+  never an error — it carries a snapshot and a reason that §14.1 branches on.
+- **`traceId` is the client's if it sends one.** `x-trace-id` (else the requestId) is bound to the
+  request logger, passed into `applyMutation`, written to `outbox_events.trace_id`, copied onto the
+  `DomainEvent` and logged by both consumers. `x-request-id` seeds `request.id`. Both are sanitized
+  in `apps/api/src/shared/request-context.ts`.
+- **Readiness checks the hard dependencies and there is exactly one: PostgreSQL** (ADR 011).
+  Redpanda and Redis down is `degraded`, never unready. `registerHealthRoutes` throws at boot if it
+  is given no hard probe. Probes are injected in `index.ts`; `buildApp()` defaults to PostgreSQL
+  alone so `fastify.inject` tests need no infrastructure.
+- **The worker never publishes while its broker is disconnected** (ADR 011). A failed publish costs
+  an `attempt_count`, so publishing through an outage would dead-letter events that were never bad.
+  `broker.current()` is `undefined` while disconnected and the publisher loop idles.
 - **`decide()` owns §8 and nothing else does.** Nine mutation types, six statuses, one table-driven
   function, one matrix test. A rule added anywhere else is a bug. The order of checks is fixed:
   **domain rule first, version second** — §21.4 fails if that is reversed, because a client at v5
@@ -118,6 +133,13 @@ passes typecheck, lint, build and **163 tests**
   Redpanda in version order regardless of retries or worker count.
 - Test databases: `TEST_DATABASE_URL` (`pos_test`), created and migrated by `@pos/db/testing`. The
   demo database is never truncated by a test run.
+- **`pnpm test` must stay runnable with PostgreSQL alone.** A suite needing a live broker is named
+  `*.integration.test.ts`, excluded by `apps/worker/vitest.config.ts` and run by
+  `vitest.integration.config.ts` under `pnpm verify:integration`. Such a suite uses its own topic
+  and consumer group, suffixed per run: on `restaurant.order.events` the worker the user keeps
+  running for the demo would consume the test's events into the demo database.
+- **`pnpm verify:integration` tears down only what it started** and never touches volumes, so it
+  cannot destroy a demo that is already up. CI runs that same command with no `services:` block.
 - Workspace packages resolve through their `exports` to `dist`, so `pnpm run build:packages` runs
   before dev, typecheck, build, test and the db scripts. Vitest aliases the sources instead.
 - Root `pnpm test` runs the suites with `--workspace-concurrency=1`; they share one test database.
@@ -135,9 +157,10 @@ passes typecheck, lint, build and **163 tests**
 - **Reads that span two tables are `repeatable read`.**
 - **A socket message is a hint, never data.** The client refetches the canonical snapshot (§13).
 - **The user starts the infrastructure.** Claude never runs `docker compose` and never reads
-  container logs. `pnpm verify:integration` (M6) is what closes the reproducibility gap: one
-  scripted command that brings Compose up, waits for readiness, runs the integration suite, tears
-  down, and writes output to a file. CI calls that same command and declares no service containers.
+  container logs. `pnpm verify:integration` is the one exception and the one reproducible command:
+  Compose up, wait for the healthchecks, run the infrastructure-backed suites, tear down only what
+  it started, write the output to `.verify-output/integration.log`. **Built in M6.** CI calls that
+  same command and declares no service containers.
 - **Drop order if the interview date closes in:** M10 (print job), then M16 (`/demo`), then M17
   (PWA). Do not drop M15 or M18 first.
 
@@ -153,6 +176,10 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   When adding an answer, ask what write makes it true. The M5 review also found a rule I had stated
   correctly in a comment (`KITCHEN_EVENT_TYPES`) and then broken two lines later — a comment is not
   a check.
+- **M6's lesson came from finishing an outline rather than reviewing one.** Two error paths had been
+  wrong since M3 — a malformed body answered 500, an unknown route answered Fastify's own shape —
+  and neither had a test, because the handler was written for the errors the code raises rather than
+  for the errors that reach it. Ask what arrives at a handler, not what is thrown at it.
 
 ## Known problems / open questions
 
@@ -170,11 +197,22 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   drop list.
 - Infrastructure URLs intentionally have development defaults. M14 production images must require
   explicit values rather than inheriting localhost defaults.
-- **Kafka is not in the test path.** The publisher is tested against a fake transport and both
-  consumers by calling their handlers directly. No test opens a socket. The real round trip is
-  verified by hand and automated in M6 by `pnpm verify:integration`. §21.12 and §21.16 are M9's.
-- The worker connects to Redpanda at startup and exits if the broker is down. **The API no longer
-  does.** M6 should give the worker the same treatment, or state why it should not.
+- **Kafka is in the test path once, and only once.** `apps/worker/test/kafka-roundtrip.integration
+  .test.ts` runs outbox row → producer → Redpanda → consumer group → projection for real, under
+  `pnpm verify:integration`. Everything else still uses a fake transport or calls a handler
+  directly, **no test opens a socket**, and the realtime consumer's KafkaJS wiring is covered only
+  by the structurally identical worker path. §21.12 and §21.16 are M9's.
+- **`/api/debug/dependencies` reports no consumer lag.** It needs a Kafka admin describing group
+  offsets and belongs with §20's other counters in M11. The report is also a snapshot, not a
+  monitor: it cannot say how long a dependency has been down, and the outbox backlog age is the
+  only duration in it.
+- **A degraded API keeps receiving traffic, and that is the design.** Readiness green with Redpanda
+  down means clients reach an instance whose screens do not update live; §13's reconnect-and-refetch
+  and M13's polling transport are the mitigation, not the probe (ADR 011).
+- **The worker no longer fails fast.** A misconfigured broker address produces a warning every five
+  seconds rather than an exit, which is easier to miss than a crash. The heartbeat carries
+  `brokerConnected` for exactly that reason. Two supervision loops now exist, one per process,
+  deliberately not shared (ADR 011).
 - **`GET /api/config` is the M4 stub of an M13 feature.** It reads `feature_flags` directly: no
   Redis cache, no percentage rollout, and the client fetches it once at bootstrap instead of every
   15 s. With the flag off the screens are correct but receive no live updates, because the polling
@@ -204,5 +242,11 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 ## First command of the next session
 
 ```
-Read docs/PROGRESS.md. Expand M6 from docs/MILESTONES.md into docs/milestones/M06.md, then implement M6 only. Stop when the Verification block passes.
+Read docs/PROGRESS.md. Expand M7 from docs/MILESTONES.md into docs/milestones/M07.md, then implement M7 only. Stop when the Verification block passes.
 ```
+
+M7 is persistence only — the Dexie schema `orders / pendingMutations / syncMetadata`, local writes
+on every action, hydration at startup. **No sync engine**: that is M8, and the §14.1 halt-on-conflict
+rule with it. The class of bug to watch for is the one three of the four M4 review rounds found —
+client state that outlives the screen that created it, with no explicit owner — because M7 is where
+that state stops being in memory and starts surviving a reload.

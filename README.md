@@ -21,11 +21,28 @@ pnpm dev
 PowerShell equivalent: `Copy-Item .env.example .env`. Compose can start the infrastructure without
 the file because its demo defaults are explicit, but local application processes read `.env`.
 
+## Verify
+
+```bash
+pnpm lint && pnpm typecheck   # static checks
+pnpm test:unit                # the domain rules and the browser stores; no infrastructure needed
+pnpm verify:integration       # Compose up, the PostgreSQL- and broker-backed suites, teardown
+```
+
+`pnpm verify:integration` is the reproducible one: it brings the infrastructure up, waits for the
+healthchecks, runs the suites that need it — including a real round trip through Redpanda — and
+tears down **only the containers it started**, so a demo you already have running survives. Its full
+output lands in `.verify-output/integration.log`. Pass `--keep` to leave the containers up. CI runs
+this same command and declares no service containers of its own.
+
 ## URLs
 
 - POS: http://localhost:5173/pos/pos-1
 - Kitchen: http://localhost:5173/kitchen
-- API readiness: http://localhost:3000/api/health/ready
+- API liveness: http://localhost:3000/api/health/live
+- API readiness: http://localhost:3000/api/health/ready — PostgreSQL only; a broker outage leaves
+  this green and orders still accepted (ADR 011)
+- Dependencies: http://localhost:3000/api/debug/dependencies
 - Redpanda Console: http://localhost:8080
 
 The optional Compose `app` profile is a development convenience. Local `pnpm dev` is the supported

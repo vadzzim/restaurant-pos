@@ -3,7 +3,7 @@ import { featureFlags, type Db } from '@pos/db';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import { ApiError } from '../../../shared/errors.js';
+import { validationFailed } from '../../../shared/errors.js';
 
 const querySchema = z.object({ restaurantId: z.string().min(1) });
 
@@ -16,9 +16,7 @@ export function registerConfigRoutes(app: FastifyInstance, db: Db): void {
   app.get('/api/config', async (request): Promise<ConfigResponse> => {
     const query = querySchema.safeParse(request.query);
     if (!query.success) {
-      throw new ApiError(400, 'VALIDATION_FAILED', 'restaurantId is required.', {
-        issues: query.error.issues,
-      });
+      throw validationFailed('restaurantId is required.', query.error);
     }
 
     const rows = await db

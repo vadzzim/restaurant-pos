@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# There is deliberately no `services:` block. `pnpm verify:integration` owns the container
+# lifecycle — it runs `docker compose up --wait` against the same `docker-compose.yml` a developer
+# uses — and declaring the services here as well would bind the same ports twice and verify a
+# different set of containers than anyone runs locally. CI must run the command the README does.
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # The suites that need no infrastructure: the domain rules and the browser stores.
+      - name: Unit tests
+        run: pnpm test:unit
+
+      # Compose up, the PostgreSQL- and broker-backed suites, teardown — one command, the same one
+      # a developer runs.
+      - name: Integration verification
+        run: pnpm verify:integration
+
+      - name: Build
+        run: pnpm build
+
+      - name: Upload verification log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-integration-log
+          path: .verify-output/integration.log
+          if-no-files-found: ignore

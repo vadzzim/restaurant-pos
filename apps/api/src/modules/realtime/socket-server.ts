@@ -19,6 +19,11 @@ const subscribeSchema = z.object({
 export interface RealtimeServer {
   io: SocketServer;
   emitter: RealtimeEmitter;
+  /**
+   * Reaches Redis over the adapter's own publisher client, so `/api/debug/dependencies` reports
+   * the connection the broadcasts actually travel on rather than a second one that might differ.
+   */
+  ping: () => Promise<void>;
   close: () => Promise<void>;
 }
 
@@ -96,6 +101,9 @@ export function createRealtimeServer(
   return {
     io,
     emitter,
+    ping: async () => {
+      await pub.ping();
+    },
     close: async () => {
       await io.close();
       pub.disconnect();

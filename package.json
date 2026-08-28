@@ -13,6 +13,8 @@
     "lint": "eslint . && prettier --check --ignore-unknown .",
     "typecheck": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker run typecheck",
     "test": "pnpm run build:packages && pnpm --recursive --workspace-concurrency=1 --if-present run test",
+    "test:unit": "pnpm run build:packages && pnpm --filter @pos/domain --filter @pos/web run test",
+    "verify:integration": "node scripts/verify-integration.mjs",
     "build": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker run build",
     "db:migrate": "pnpm run build:packages && pnpm --filter @pos/db run db:migrate",
     "db:seed": "pnpm run build:packages && pnpm --filter @pos/db run db:seed",

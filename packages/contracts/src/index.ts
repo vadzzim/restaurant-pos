@@ -223,11 +223,83 @@ export type MutationResponse =
   | MutationIdReusedResponse
   | MutationRejectedResponse;
 
+/**
+ * Every code the §17 error envelope can carry. Deliberately closed and deliberately small: a
+ * conflict, a tenant rejection and an id reuse are §5 *outcomes* with a snapshot and a reason, not
+ * errors, and routing them through this envelope would throw both away. §17's example happens to
+ * name `ORDER_VERSION_CONFLICT`; §5 defines the response the client actually branches on.
+ */
+export const API_ERROR_CODES = [
+  /** The request did not satisfy its zod schema, or its body was not parseable at all. */
+  'VALIDATION_FAILED',
+  'ORDER_NOT_FOUND',
+  /** The menu has no such product. A bad request, not a conflict: no version rebase would help. */
+  'PRODUCT_NOT_FOUND',
+  'ROUTE_NOT_FOUND',
+  'INTERNAL_ERROR',
+] as const;
+
+export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
+
 /** The §17 error envelope. Domain outcomes above are not errors and never use this shape. */
 export interface ApiErrorResponse {
-  code: string;
+  code: ApiErrorCode;
   message: string;
   details?: unknown;
+}
+
+/** `GET /api/health/live` — the process answers, and nothing else is claimed (§17). */
+export interface LivenessResponse {
+  status: 'ok';
+  uptimeSeconds: number;
+}
+
+export type DependencyStatus = 'up' | 'down';
+
+/**
+ * Hard means readiness depends on it; soft means the system degrades and keeps accepting orders.
+ * The distinction is the whole content of the health split, so it travels with every report.
+ */
+export type DependencyKind = 'hard' | 'soft';
+
+export interface DependencyReport {
+  name: string;
+  kind: DependencyKind;
+  status: DependencyStatus;
+  latencyMs: number;
+  /** Present only when `status` is `down`. Never a stack trace (§17). */
+  error?: string;
+  /** What being down costs, in one sentence, for whoever is reading `/debug`. */
+  impact: string;
+}
+
+/**
+ * `ok` — everything is up. `degraded` — only soft dependencies are down: live updates suffer,
+ * writes do not. `unavailable` — a hard dependency is down and this instance cannot accept writes.
+ */
+export type HealthStatus = 'ok' | 'degraded' | 'unavailable';
+
+/**
+ * `GET /api/health/ready`: PostgreSQL only (§17). The same shape on 200 and on 503, so a failing
+ * probe is readable rather than generic.
+ */
+export interface ReadinessResponse {
+  status: Extract<HealthStatus, 'ok' | 'unavailable'>;
+  checks: DependencyReport[];
+}
+
+/** The outbox seen from outside: what "the broker is down" costs, as a number. */
+export interface OutboxBacklog {
+  pending: number;
+  deadLettered: number;
+  oldestPendingAgeSeconds: number | null;
+}
+
+/** `GET /api/debug/dependencies` (§17) — what `/debug` renders and what a human reads. */
+export interface DependenciesResponse {
+  status: HealthStatus;
+  dependencies: DependencyReport[];
+  outbox: OutboxBacklog;
 }
 
 export interface MenuItem {
