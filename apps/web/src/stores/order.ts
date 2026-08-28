@@ -224,20 +224,21 @@ export const useOrderStore = defineStore('order', () => {
         adopt(snapshot);
       }
     },
-    onHalt: (row, response) => {
-      if (response.status === 'CONFLICT') {
+    onHalt: (row, cause) => {
+      if (cause.kind === 'conflict') {
         conflict.value = {
           orderId: row.orderId,
-          reason: response.reason,
-          clientBaseVersion: response.clientBaseVersion,
-          serverVersion: response.serverVersion,
+          reason: cause.reason,
+          clientBaseVersion: cause.clientBaseVersion,
+          serverVersion: cause.serverVersion,
         };
         return;
       }
-      // `MUTATION_ID_REUSED` and `REJECTED` carry a reason and no snapshot. The aggregate is still
-      // halted — `halted` is derived from the rows — but there is no canonical state to show
-      // beside the intent, so it is reported as an error rather than as a conflict banner.
-      lastError.value = 'reason' in response ? response.reason : 'The mutation was refused.';
+      // `MUTATION_ID_REUSED`, `REJECTED` and a permanent §17 refusal all carry a reason and no
+      // snapshot. The aggregate is still halted — `halted` is derived from the rows — but there is
+      // no canonical state to show beside the intent, so it is reported as an error rather than as
+      // a conflict banner.
+      lastError.value = cause.reason;
     },
     onQueueChanged: refreshQueue,
     onTransportError: (message) => {

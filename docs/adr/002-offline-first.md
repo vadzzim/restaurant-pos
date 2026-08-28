@@ -74,6 +74,14 @@ old id there would be answered `ALREADY_APPLIED` for something that never applie
 leaving the row `PENDING` would spin; and for a reused id, rebase is exactly the right resolution,
 because it mints the fresh id the server objected to the absence of.
 
+So does a §17 error envelope the server will produce again for this exact request —
+`VALIDATION_FAILED`, `PRODUCT_NOT_FOUND`, `ROUTE_NOT_FOUND`, `ORDER_NOT_FOUND`. That list is an
+explicit whitelist and the default is the other way: `INTERNAL_ERROR`, and any code this client has
+not heard of, are treated as transport and leave the row `PENDING`. An unfamiliar code then costs
+one pointless retry; halting by default would stop an aggregate behind a human-facing banner over a
+500 that cleared itself a second later. It is the same asymmetry, for the same reason, as
+`RECORD_REJECTIONS` in the worker's broker supervision.
+
 ### 4. The pointer is written by the screen, the cache by anyone
 
 `syncMetadata.currentOrderId` answers "which order is this device on", so only the actions that

@@ -945,3 +945,40 @@ one needed rewriting to do so: the first version let the current order's own ans
 put the pointer back, which hid the bug. The sequence that exposes it is the one the operator
 actually performs — step back to an older order, queue something there, return to the current one,
 and let the background drain.
+
+## M8 review round 2 — the two P2s
+
+Both were the sync engine treating a category of thing as a category it is not.
+
+**A §17 error envelope is not a transport failure.** `postMutation` throws `ApiRequestError` for
+the envelope and the catch could not tell `PRODUCT_NOT_FOUND` from a socket hang-up, so the row
+went back to `PENDING` and every trigger re-sent it — and because a transport failure ends the
+pass, the orders behind it were never tried, with no banner saying why. The permanent codes now
+halt the aggregate exactly as `MUTATION_ID_REUSED` does, which is the honest description: the
+server refused this mutation and will refuse it again, so a human chooses Discard or Rebase.
+
+The classification is an explicit whitelist with the default the other way, and that is the point
+worth keeping: `INTERNAL_ERROR` and any unfamiliar code stay transport. An unknown code then costs
+one pointless retry; halting by default would stop an aggregate behind a red banner over a 500 that
+cleared itself. The worker's `RECORD_REJECTIONS` made the same call for the same reason, and it is
+the third time in this project that the right answer was "whitelist the specific, default to the
+forgiving".
+
+**What the coalescing loop coalesced was a boolean.** `run(terminalId)` on a busy engine set
+`again = true` and the loop repeated with the terminal it had started with, so a route change
+during a pass — POS-1 to POS-2 — left the new screen's queue unsent, and with
+`realtime.websocket_push` off there is no reconnect trigger to rescue it. The pending request is
+now the terminal id itself. Re-requesting the same terminal, which is the ordinary mid-pass
+enqueue, behaves exactly as before; the flag was simply carrying less information than the call
+site had.
+
+**One move that was not a fix.** `ApiRequestError` came out of `api/client.ts` into `api/errors.ts`,
+because the engine has to ask `instanceof` about it and the store tests replace the whole of
+`api/client` with a mock — the engine was asking a mocked module for a class it does not define,
+and eight unrelated tests failed with a message about the mock. `OfflineError` had already been put
+in its own module for the same reason; the second occurrence is what made the rule visible. **A
+class that a non-mocked module needs `instanceof` on does not belong in a module the tests mock
+wholesale.**
+
+Both regression tests were checked by reverting each fix. The permanent-error one also asserts the
+half that is easy to lose: the order _behind_ the halted aggregate still syncs.

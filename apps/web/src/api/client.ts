@@ -8,19 +8,10 @@ import type {
   OrderSnapshot,
 } from '@pos/contracts';
 
+import { ApiRequestError } from './errors';
 import { assertOnline } from './offline';
 
-/** A §17 error envelope that came back from the API, surfaced with its code intact. */
-export class ApiRequestError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly httpStatus: number,
-  ) {
-    super(message);
-    this.name = 'ApiRequestError';
-  }
-}
+export { ApiRequestError };
 
 async function readJson(response: Response): Promise<unknown> {
   return (await response.json()) as unknown;

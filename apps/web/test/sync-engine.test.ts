@@ -1,10 +1,11 @@
 import type { MutationRequest, MutationResponse, OrderSnapshot } from '@pos/contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ApiRequestError } from '../src/api/errors';
 import { OfflineError } from '../src/api/offline';
 import { db } from '../src/persistence/db';
 import { localStore } from '../src/persistence/local-store';
-import { createSyncEngine } from '../src/sync/engine';
+import { createSyncEngine, type HaltCause } from '../src/sync/engine';
 
 /**
  * The engine against the **real** repository over a real IndexedDB implementation, with only the
@@ -75,12 +76,14 @@ async function queueMutation(
 interface Harness {
   post: ReturnType<typeof vi.fn>;
   canonical: OrderSnapshot[];
+  halts: HaltCause[];
   engine: ReturnType<typeof createSyncEngine>;
 }
 
 function harness(canonicalVersion = 5): Harness {
   const post = vi.fn<(orderId: string, request: MutationRequest) => Promise<MutationResponse>>();
   const canonical: OrderSnapshot[] = [];
+  const halts: HaltCause[] = [];
   let nextId = 0;
 
   const engine = createSyncEngine({
@@ -89,14 +92,14 @@ function harness(canonicalVersion = 5): Harness {
     canonicalVersion: () => canonicalVersion,
     onCanonical: async (terminalId, order) => {
       canonical.push(order);
-      await localStore.saveOrder(terminalId, order);
+      await localStore.cacheOrder(terminalId, order);
     },
-    onHalt: () => undefined,
+    onHalt: (_row, cause) => halts.push(cause),
     onQueueChanged: async () => undefined,
     onTransportError: () => undefined,
   });
 
-  return { post, canonical, engine };
+  return { post, canonical, halts, engine };
 }
 
 beforeEach(() => {
@@ -257,6 +260,117 @@ describe('§21.8 — a conflict halts the queue for that order and only that ord
       'CONFLICT',
       'BLOCKED',
     ]);
+  });
+});
+
+describe('a refusal the server will repeat, and one it may not', () => {
+  it('halts the aggregate on a permanent §17 error and keeps syncing the next order', async () => {
+    await queueMutation('a', 'order-1', 5, '2026-08-28T10:00:00.000Z');
+    await queueMutation('b', 'order-1', 6, '2026-08-28T10:00:01.000Z');
+    await queueMutation('other', 'order-2', 2, '2026-08-28T10:00:02.000Z');
+
+    const { post, engine } = harness();
+    post.mockRejectedValueOnce(new ApiRequestError('PRODUCT_NOT_FOUND', 'No such product.', 404));
+    post.mockResolvedValueOnce(applied('order-2', 3));
+
+    expect(await engine.run('pos-1')).toBe('halted');
+
+    // Left `PENDING` this would be re-sent by every trigger for ever, and because a transport
+    // failure ends the pass, order-2 would never be tried at all — with no banner to say why.
+    expect(post.mock.calls.map(([, request]) => request.mutationId)).toEqual(['a', 'other']);
+    expect((await localStore.readQueue('pos-1')).map((row) => row.status)).toEqual([
+      'CONFLICT',
+      'BLOCKED',
+    ]);
+  });
+
+  it('treats INTERNAL_ERROR as transport, because the next attempt may well succeed', async () => {
+    await queueMutation('a', 'order-1', 5, '2026-08-28T10:00:00.000Z');
+
+    const { post, engine } = harness();
+    post.mockRejectedValueOnce(new ApiRequestError('INTERNAL_ERROR', 'Boom.', 500));
+
+    expect(await engine.run('pos-1')).toBe('failed');
+
+    // The asymmetry is deliberate: an unfamiliar code costs one pointless retry, and halting by
+    // default would stop an aggregate behind a human-facing banner over a 500 that cleared itself.
+    expect((await localStore.readQueue('pos-1'))[0]?.status).toBe('PENDING');
+  });
+
+  it('reports the refusal to the screen with its code', async () => {
+    await queueMutation('a', 'order-1', 5, '2026-08-28T10:00:00.000Z');
+
+    const { post, engine, halts } = harness();
+    post.mockRejectedValueOnce(
+      new ApiRequestError('VALIDATION_FAILED', 'quantity must be >= 1', 400),
+    );
+    await engine.run('pos-1');
+
+    // No canonical state came back with it, so the screen has a reason and no banner — the halt
+    // itself is visible because it is derived from the rows.
+    expect(halts).toEqual([
+      { kind: 'refused', reason: 'VALIDATION_FAILED: quantity must be >= 1' },
+    ]);
+  });
+});
+
+describe('one pass at a time, for the terminal that asked last', () => {
+  it('drains the terminal requested during a running pass, not the one it started with', async () => {
+    await queueMutation('a', 'order-1', 5, '2026-08-28T10:00:00.000Z');
+    vi.setSystemTime(new Date('2026-08-28T10:00:01.000Z'));
+    await localStore.savePending({
+      mutationId: 'on-pos-2',
+      restaurantId: 'second-restaurant',
+      terminalId: 'pos-2',
+      orderId: 'order-9',
+      baseVersion: 1,
+      type: 'ADD_ITEM',
+      payload: { productId: 'burger', quantity: 1 },
+      status: 'PENDING',
+    });
+
+    const { post, engine } = harness();
+    let releaseFirst: (value: MutationResponse) => void = () => undefined;
+    let firstSent: () => void = () => undefined;
+    const sent = new Promise<void>((resolve) => {
+      firstSent = resolve;
+    });
+    post.mockImplementationOnce(() => {
+      firstSent();
+      return new Promise<MutationResponse>((resolve) => {
+        releaseFirst = resolve;
+      });
+    });
+    post.mockImplementation((orderId, request) =>
+      Promise.resolve(applied(orderId, request.baseVersion + 1)),
+    );
+
+    const first = engine.run('pos-1');
+    await sent;
+
+    // The operator walks to POS-2 while POS-1's pass is still in the air, and its hydration asks
+    // for a sync. A boolean coalescing flag repeated the loop with POS-1 and left this queue
+    // unsent — with push disabled there is no reconnect trigger to save it.
+    const second = engine.run('pos-2');
+    releaseFirst(applied('order-1', 6));
+    await Promise.all([first, second]);
+
+    expect(post.mock.calls.map(([, request]) => request.mutationId)).toEqual(['a', 'on-pos-2']);
+    expect(await localStore.readQueue('pos-2')).toEqual([]);
+  });
+
+  it('still coalesces a second request for the same terminal into one pass', async () => {
+    await queueMutation('a', 'order-1', 5, '2026-08-28T10:00:00.000Z');
+
+    const { post, engine } = harness();
+    post.mockImplementation((orderId, request) =>
+      Promise.resolve(applied(orderId, request.baseVersion + 1)),
+    );
+
+    const [one, two] = await Promise.all([engine.run('pos-1'), engine.run('pos-1')]);
+
+    expect(one).toBe(two);
+    expect(post).toHaveBeenCalledTimes(1);
   });
 });
 

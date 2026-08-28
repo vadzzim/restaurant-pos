@@ -16,9 +16,9 @@ delay controls, §21.12, §21.13, §21.16. Model: **Opus**. Size: **L**.
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
-`2666d4a` and its second at `6349dce`, M8 `8f72739` plus its first review round in this commit.
+`2666d4a` and its second at `6349dce`, M8 `8f72739` plus two review rounds through this commit.
 The tree passes typecheck, lint,
-build and **243 tests** (61 domain, 52 api, 22 worker, **108 web**) against a real PostgreSQL, plus
+build and **248 tests** (61 domain, 52 api, 22 worker, **113 web**) against a real PostgreSQL, plus
 **one integration test** against a real Redpanda that runs only under `pnpm verify:integration`
 (re-run at the end of M8 and green; M8 changed no server file).
 **Twelve** of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1, 21.2,
@@ -236,6 +236,20 @@ build and **243 tests** (61 domain, 52 api, 22 worker, **108 web**) against a re
 - **The engine has no timers.** It runs on an enqueue, on hydration, on the socket connecting, on
   `navigator.onLine`, on the offline toggle flipping, and on **Sync now**. A pass that hits a
   transport error stops and waits. A retry loop would make the offline demo non-deterministic.
+- **A §17 error is not automatically a transport failure.** `PERMANENT_API_ERRORS` in
+  `sync/engine.ts` is an explicit whitelist — `VALIDATION_FAILED`, `PRODUCT_NOT_FOUND`,
+  `ROUTE_NOT_FOUND`, `ORDER_NOT_FOUND` — and those **halt the aggregate** like a conflict does,
+  because retrying a request the server will refuse identically is a loop, not a recovery, and it
+  starves every order behind it. `INTERNAL_ERROR` and anything unfamiliar stay transport: the row
+  goes back to `PENDING`. **Do not invert that default** — the same asymmetry, and the same
+  reasoning, as `RECORD_REJECTIONS` in the worker.
+- **What the engine coalesces is the terminal, not the fact that something asked.** A trigger
+  during a running pass records *which* terminal it wants and the next iteration uses that one. A
+  boolean flag repeated the pass with the terminal it started with, so a route change mid-pass left
+  the new screen's queue unsent with no later trigger to save it.
+- **`ApiRequestError` lives in `api/errors.ts`, not in `api/client.ts`.** The engine asks
+  `instanceof` about it and the store tests replace the whole of `api/client` with a mock; importing
+  the class from a mocked module is a failure with nothing to do with what those tests check.
 - **`Simulate Offline` is in `apps/web/src/api/client.ts`, per terminal, and blocks reads too.**
   §19.3 depends on POS-1 not learning that POS-2 cancelled the order. **Not in the stores**, which
   would grow a second code path, and not via DevTools.
@@ -419,22 +433,6 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **The client has no backoff and no automatic retry.** By design (ADR 002): the engine runs on
   explicit triggers so the demo is deterministic. A server that is down and a socket that never
   reconnects therefore leave the queue sitting until the operator presses **Sync now**.
-- **OPEN P2 — a permanent API error is retried like a transport outage.** `postMutation` throws
-  `ApiRequestError` for the §17 envelope, and the engine's catch cannot tell `PRODUCT_NOT_FOUND` or
-  `VALIDATION_FAILED` from a socket hang-up: the row goes back to `PENDING`, every later trigger
-  re-sends it, and the pass returns before the orders behind it are tried. The queue is not halted,
-  so the screen offers no Discard or Rebase either. **The fix** is to classify the envelope's
-  `ApiErrorCode` — the non-retryable ones halt the aggregate exactly as `MUTATION_ID_REUSED` does,
-  and only a genuine transport failure keeps the row `PENDING`. Reachable today only through a
-  malformed request or a deleted product; §18's `Duplicate Next Mutation` and friends (M12) will
-  make it easy to hit, so it should be closed before then.
-- **OPEN P2 — a terminal switch during a pass can leave the new terminal's queue undrained.**
-  `engine.run(newTerminal)` joins a pass already running for the old one and only sets the
-  coalescing flag, so every iteration keeps using the terminal the pass started with. Hydration of
-  the new screen can therefore finish without sending its queue, and with `realtime.websocket_push`
-  off there is no reconnect trigger to save it. **The fix** is to coalesce per terminal, or to carry
-  the newly requested terminal into the next iteration. Narrow — it needs the route to change
-  inside the window of a single pass — and **Sync now** recovers it.
 - **A poison message on the realtime topic is lost to that consumer group permanently.** A
   consumer-side dead-letter topic is the real answer and is not built. The publish side already
   dead-letters through `outbox_events`.
