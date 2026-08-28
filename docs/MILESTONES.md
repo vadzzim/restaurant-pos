@@ -28,9 +28,9 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M5 | All remaining commands + conflict rules | **L** | **Opus** | yes | done |
 | M6 | Error model + logging + split health + CI | M | Sonnet | yes | done |
 | M7 | Dexie / IndexedDB persistence | M | Sonnet | yes | done |
-| M8 | Offline queue + sync + halt-on-conflict | **L** | **Opus** | yes | next |
-| M9 | Outbox hardening + crash-window tests | M | **Opus** | yes | |
-| M10 | BullMQ print job | M | Sonnet | yes | |
+| M8 | Offline queue + sync + halt-on-conflict | **L** | **Opus** | yes | done |
+| M9 | Outbox hardening + crash-window tests | **L** | **Opus** | yes | done |
+| M10 | BullMQ print job | M | Sonnet | yes | next |
 | M11 | Debug dashboard + counters + presence | M | Sonnet | yes | |
 | M12 | Failure simulator | M | Sonnet | yes | |
 | M13 | Feature flags + polling fallback | M | Sonnet | yes | |

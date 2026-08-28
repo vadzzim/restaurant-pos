@@ -2,6 +2,7 @@ import { ORDER_STATUSES } from '@pos/contracts';
 import { sql } from 'drizzle-orm';
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -146,6 +147,13 @@ export const outboxEvents = pgTable(
     deadLetteredAt: timestamp('dead_lettered_at', { withTimezone: true }),
     claimedBy: text('claimed_by'),
     claimUntil: timestamp('claim_until', { withTimezone: true }),
+    /**
+     * How many times a *previous* claimant's lease expired on this row. A reclaim means a worker
+     * died mid-publish, not that the event is bad, so it never spends an `attempt_count` and never
+     * dead-letters (ADR 010) — but a row being reclaimed over and over is the only visible symptom
+     * of a publisher crashing on it, so it is counted rather than left silent.
+     */
+    reclaimCount: integer('reclaim_count').notNull().default(0),
   },
   (table) => [
     index('outbox_events_pending_idx')
@@ -195,6 +203,26 @@ export const conflictLog = pgTable('conflict_log', {
   resolution: text('resolution'),
   createdAt,
 });
+
+/**
+ * The two §18 switches the outbox publisher honours: `Pause Outbox Publisher` and
+ * `Delay Outbox Publishing`. They live in PostgreSQL because the process that flips them (the API,
+ * once M12 gives them buttons) is not the process that obeys them, and because a switch a human
+ * threw must survive a worker restart — an environment variable satisfies neither.
+ *
+ * One row, `id = 'singleton'`: the publisher is a fleet-wide component, not a per-restaurant one.
+ * A missing row reads as the defaults, so nothing has to seed it.
+ */
+export const outboxControls = pgTable(
+  'outbox_controls',
+  {
+    id: text('id').primaryKey(),
+    paused: boolean('paused').notNull().default(false),
+    publishDelayMs: integer('publish_delay_ms').notNull().default(0),
+    updatedAt,
+  },
+  (table) => [check('outbox_controls_singleton', sql`${table.id} = 'singleton'`)],
+);
 
 export const featureFlags = pgTable('feature_flags', {
   key: text('key').primaryKey(),

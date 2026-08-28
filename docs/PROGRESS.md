@@ -5,37 +5,44 @@
 
 ## Current state
 
-**Last completed milestone:** M8 — the offline queue, the sequential sync engine, and §14.1's
-halt-on-conflict with an explicit discard-or-rebase.
+**Last completed milestone:** M9 — outbox hardening: the lease is now bounded from both ends, an
+abandoned claim is handed back instead of expiring, a reclaim is counted, and §18's two publisher
+switches are real operational state.
 **The entire order lifecycle is demoable end to end, a broker outage is demoable, reloading the tab
-mid-order is demoable, and now so are §19.2 and §19.3 — POS-1 works while cut off, and its queue
-stops rather than cascading when another terminal moves the order underneath it.**
-**Next:** M9 — outbox hardening and the crash windows: bounded backoff, lease reclaim, pause and
-delay controls, §21.12, §21.13, §21.16. Model: **Opus**. Size: **L**.
+mid-order is demoable, §19.2 and §19.3 are demoable, and now the publisher can be paused, delayed
+and watched from a terminal — the buttons for it are M12's.**
+**Next:** M10 — the BullMQ print job: a fake printer that fails on demand and honours an
+idempotency key, `print_jobs`, `ticket_hash` deduplication, bounded backoff, a dead-letter state,
+and a reconciliation sweep. Test §21.14, scenario §19.9. Model: **Sonnet**. Size: **M**.
+**M10 is the first milestone to cut if the budget is tight** — see `MILESTONES.md`.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
 four review commits through `50d4ac7`, M5 `f6888e6` plus two review commits through `c8dde81`,
 M6 `860b064` plus five review rounds through `fa1255a`, M7 `fe9d5d1` plus its first review round at
-`2666d4a` and its second at `6349dce`, M8 `8f72739` plus two review rounds through this commit.
+`2666d4a` and its second at `6349dce`, M8 `8f72739` plus two review rounds through `5414676`,
+M9 this commit.
 The tree passes typecheck, lint,
-build and **248 tests** (61 domain, 52 api, 22 worker, **113 web**) against a real PostgreSQL, plus
-**one integration test** against a real Redpanda that runs only under `pnpm verify:integration`
-(re-run at the end of M8 and green; M8 changed no server file).
-**Twelve** of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1, 21.2,
-21.3, 21.4, 21.5, 21.6, **21.7**, **21.8**, 21.9, 21.10, 21.11, 21.15.
+build and **254 tests** (61 domain, 52 api, **28 worker**, 113 web) against a real PostgreSQL, plus
+**two integration tests** against a real Redpanda that run only under `pnpm verify:integration`
+(both green at the end of M9; the second one is §21.13 and is new).
+**Fifteen** of the sixteen mandatory §21 tests exist and are named by their spec number: 21.1,
+21.2, 21.3, 21.4, 21.5, 21.6, 21.7, 21.8, 21.9, 21.10, 21.11, **21.12**, **21.13**, 21.15,
+**21.16**. Only **21.14** — print job deduplication — is left, and it is M10's.
 
 ## What exists
 
 - `CLAUDE.md`, `docs/spec.md`, `docs/MILESTONES.md`, `docs/build-log.md`.
-- `docs/milestones/M01.md` … `M08.md` — the completed briefs.
-- ADRs 001, **002**, 003, 004, 005, 006, 007, 009, 011, 012, 013 accepted.
+- `docs/milestones/M01.md` … `M09.md` — the completed briefs.
+- ADRs 001, **002**, 003, 004, 005, 006, 007, 009, **010**, 011, 012, 013 accepted. Only 008 (M13) is
+  left unwritten.
 - `packages/config` — zod environment, `TEST_DATABASE_URL`, Kafka topics, outbox tuning.
 - `packages/contracts` — statuses, the nine `MUTATION_TYPES`, the nine event types, every mutation
   and event payload, the §5 request/response shapes, `ConflictReason`, `PaymentMethod`,
   `KitchenTicketState`, `KITCHEN_TERMINAL_ID`, menu and config DTOs, socket names, `TERMINALS`.
 - `packages/domain` — `calculateTotalCents`, `isValidTransition`, and `decide()`: **the whole of
   §8**, table-driven, no database and no HTTP.
-- `packages/db` — schema (all thirteen tables), migrations, seed, `db:check`, `@pos/db/testing`.
+- `packages/db` — schema (fourteen tables: M9 added `outbox_controls`), two migrations, seed,
+  `db:check`, `@pos/db/testing`.
   **No schema change was needed in M5**; M2 wrote it in full, and `payments` and the rest of
   `kitchen_tickets.state` finally got used.
 - `apps/api` — `POST /api/orders/:orderId/mutations` with nine zod branches; the two §17 kitchen
@@ -45,6 +52,11 @@ build and **248 tests** (61 domain, 52 api, 22 worker, **113 web**) against a re
 - `apps/worker` — the §10 three-step outbox publisher with lease, backoff and dead-lettering; the
   Kafka producer and topic bootstrap; the kitchen consumer and its transactional projection, which
   now **advances** `state` from `OrderPreparing`, `OrderReady` and `OrderCancelled`.
+- **The hardened publisher (M9):** `modules/events/outbox-controls.ts` — the singleton
+  `outbox_controls` row, its writer and the poller the loop reads; `publishOnce` releases abandoned
+  claims, stops before its lease runs out, honours a pause between rows and a delay before each
+  send, and counts reclaims; `apps/worker/scripts/outbox-control.ts` behind
+  `pnpm -F @pos/worker outbox`. ADR 010.
 - `apps/web` — a POS screen with all six of its commands (add, ±quantity, remove, send, pay,
   cancel) and a kitchen screen with four columns and two command buttons. Pinia stores for menu,
   order, kitchen and connection. `/debug` and `/demo` are still the M1 placeholder (M11, M16).
@@ -271,6 +283,31 @@ build and **248 tests** (61 domain, 52 api, 22 worker, **113 web**) against a re
   at a time. The rule: an expectation may only be judged by a read *issued after* it was raised.
 - **The publisher claims only an order's earliest unpublished event**, so that order's events reach
   Redpanda in version order regardless of retries or worker count.
+- **A pass never publishes under a lease it may no longer hold.** The lease budget is measured from
+  *before* the claim — the claim's own round trip is spent out of it — a tenth of it is deliberately
+  never used, and the check counts the `publish_delay_ms` the next send is about to incur. Removing
+  this reintroduces the one failure mode worse than a duplicate: two workers publishing the same
+  order's consecutive events at once, which can reorder them on the topic.
+- **Three things end a pass early, and all three release the claims they will not use**: the
+  transport died, a human paused the publisher, or the lease is nearly up. The release is guarded on
+  `claimed_by = :workerId` so a lease that expired and was re-taken by another worker is never
+  stolen back, and its failure mode is "the lease expires as before" — which is why it can live
+  outside a transaction. `PublishRunResult.stoppedBecause` says which of the three it was.
+- **An attempt means "this event failed"; a reclaim means "a worker died".** A stopped batch spends
+  no `attempt_count`, and a row taken from an expired claim increments `reclaim_count` instead —
+  never `attempt_count`, and never towards a dead letter (ADR 010). The claim query selects its
+  candidates in their own CTE for exactly this: `RETURNING` gives back new values, so the previous
+  claimant has to be carried through the CTE to be seen at all.
+- **`markPublished` is deliberately not guarded on `claimed_by`.** If the lease did expire under a
+  worker, the record still reached the topic, and refusing to record that would republish it for
+  ever. A concurrent duplicate is the at-least-once guarantee working; a row that can never be
+  marked published is not.
+- **The §18 publisher switches live in `outbox_controls`**, one singleton row, polled every
+  `OUTBOX_POLL_MS`. The process that flips them is not the process that obeys them, and a switch a
+  human threw must survive a worker restart — so not an environment variable and not Redis. **A
+  failed read keeps the last known value**: reverting to the defaults would un-pause a paused
+  publisher exactly when the database is unhealthy. `pnpm -F @pos/worker outbox status|pause|resume|
+  delay <ms>` is the writer until M12.
 - Test databases: `TEST_DATABASE_URL` (`pos_test`), created and migrated by `@pos/db/testing`. The
   demo database is never truncated by a test run.
 - **`pnpm test` must stay runnable with PostgreSQL alone.** A suite needing a live broker is named
@@ -288,7 +325,8 @@ build and **248 tests** (61 domain, 52 api, 22 worker, **113 web**) against a re
 ## Decisions already made
 
 - Fastify over NestJS, Drizzle over Prisma.
-- Full scope, nothing cut. **Twenty milestones total, thirteen still to run.**
+- Full scope, nothing cut. **Twenty milestones total (M0–M19), ten still to run** — M10 through
+  M19. Earlier copies of this line undercounted.
 - **A demoable vertical slice landed at M4**, not M11. **Done.**
 - **The realtime consumer lives in the API process on one shared consumer group**, with the Redis
   adapter fanning a broadcast out to the other instances (ADR 006). M14's multi-instance smoke test
@@ -372,11 +410,27 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   drop list.
 - Infrastructure URLs intentionally have development defaults. M14 production images must require
   explicit values rather than inheriting localhost defaults.
-- **Kafka is in the test path once, and only once.** `apps/worker/test/kafka-roundtrip.integration
-  .test.ts` runs outbox row → producer → Redpanda → consumer group → projection for real, under
+- **Kafka is in the test path twice, and only twice.** `kafka-roundtrip.integration.test.ts` runs
+  outbox row → producer → Redpanda → consumer group → projection for real, and M9's
+  `consumer-redelivery.integration.test.ts` runs §21.13's offset window. Both are under
   `pnpm verify:integration`. Everything else still uses a fake transport or calls a handler
-  directly, **no test opens a socket**, and the realtime consumer's KafkaJS wiring is covered only
-  by the structurally identical worker path. §21.12 and §21.16 are M9's.
+  directly, **no other test opens a socket**, and the realtime consumer's KafkaJS wiring is covered
+  only by the structurally identical worker path.
+- **A row can be reclaimed for ever and nothing stops it.** `reclaim_count` climbs, a warning is
+  logged, and that is all: a poison event that kills the publisher process every time it is picked
+  up would loop indefinitely. Dead-lettering on a reclaim ceiling was rejected on purpose — a
+  rolling restart would then dead-letter healthy events (ADR 010) — so the answer is a human
+  reading M11's `/debug`, not a counter.
+- **The publish delay is per send, so a large one shrinks the batch.** With `publish_delay_ms` set
+  high, the lease guard stops each pass after a row or two and the rest of the claim is released and
+  re-claimed next pass. That is correct and it is also wasteful; it only happens while a human has
+  deliberately slowed the publisher down for a demo.
+- **A pause is observed within one `OUTBOX_POLL_MS`, not instantly**, and the worker keeps polling
+  the control row while paused. Both are the cost of the control living in PostgreSQL rather than in
+  the process that flips it.
+- **`outbox_controls` is fleet-wide.** Two workers cannot be paused independently, and nothing
+  records *who* paused the publisher or when — only `updated_at`. §18 asks for a demo switch, not an
+  audit trail.
 - **`/api/debug/dependencies` reports no consumer lag.** It needs a Kafka admin describing group
   offsets and belongs with §20's other counters in M11. The report is also a snapshot, not a
   monitor: it cannot say how long a dependency has been down, and the outbox backlog age is the
@@ -388,9 +442,6 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   seconds rather than an exit, which is easier to miss than a crash. The heartbeat carries
   `brokerConnected` for exactly that reason. Two supervision loops now exist, one per process,
   deliberately not shared (ADR 011).
-- **Abandoned outbox rows stay leased for `OUTBOX_LEASE_MS`.** When a batch is cut short by the
-  broker dying, the untouched rows keep their claim and are only republished once the lease expires
-  — up to 30 s after recovery. Releasing the claim eagerly belongs with M9's lease hardening.
 - **`GET /api/config` is the M4 stub of an M13 feature.** It reads `feature_flags` directly: no
   Redis cache, no percentage rollout, and the client fetches it once at bootstrap instead of every
   15 s. With the flag off the screens are correct but receive no live updates, because the polling
@@ -444,32 +495,39 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 ## First command of the next session
 
 ```
-Read docs/PROGRESS.md, then expand M9 from docs/MILESTONES.md into docs/milestones/M09.md and
-implement M9 only. Stop when the M09 Verification block passes.
+Read docs/PROGRESS.md, then expand M10 from docs/MILESTONES.md into docs/milestones/M10.md and
+implement M10 only. Stop when the M10 Verification block passes.
 
-M9 is server-side — the outbox publisher and the two crash windows — so it is the first
-milestone in three that does not touch `apps/web`. Six things worth knowing before you plan:
+M10 is the BullMQ print job: a fake local printer that can be made to fail on demand and that
+honours an idempotency key, `print_jobs` as the durable record, `ticket_hash` for deduplicating
+it, bounded backoff, a dead-letter state, and a periodic sweep that reconciles jobs missing
+against `kitchen_tickets`. Test §21.14, scenario §19.9. Model: Sonnet. Size: M.
 
-1. **The publisher already has a lease, backoff fields and dead-lettering.** M3 built
-   `attempt_count`, `next_attempt_at`, `last_error`, `claim_until` and the three-step claim →
-   publish → mark loop in `apps/worker`. M9 hardens what is there: it does not rebuild it.
-   Read the M3 and M6 entries in `build-log.md` for what the broker supervision already
-   guarantees, and ADR 010 for why retries live in Postgres rather than in BullMQ.
-2. **The known gap is named in Known problems**: a batch cut short by the broker dying leaves
-   its untouched rows leased for up to `OUTBOX_LEASE_MS`. Releasing the claim eagerly is M9's,
-   and it is a pair of writes — say which order survives a crash between them.
-3. **§21.12 and §21.13 are crash-window tests**, and the M5 lesson applies: a test that asserts
-   an invariant is not a proof that the unguarded code was broken. The deterministic ones in
-   this repo hold a row and poll `pg_stat_activity` until the interleaving is provable. Do
-   that, or say plainly in the test that it cannot fail falsely and is not a proof.
-4. **§21.16 needs two workers running concurrently against one PostgreSQL.** The lease exists
-   for exactly this; the test is what makes it more than a column.
-5. **The pause and delay controls are real operational switches**, not test hooks — M12 surfaces
-   them in `/debug`. Build them where the publisher loop can honour them without a restart.
-6. **Ask the second question.** M7 tabulated who may write each piece of state and still shipped
-   four review findings; M8 asked "for each pair of writes, which order survives a crash between
-   them?" and that question found the `savePending` regression before the code did. M9 is
-   *entirely* about crash windows, so put the pair table in the brief before writing anything.
+Six things worth knowing before you plan:
+
+1. **This is the milestone to cut.** `MILESTONES.md` names M10 first on the drop list, and
+   `PROGRESS.md` says why: it survives mainly because BullMQ was wanted as a résumé keyword. If
+   the usage budget is tight, say so and skip to M11 rather than half-building it.
+2. **BullMQ has exactly one justified job here, and ADR 010 says why.** The outbox does *not*
+   use it: retries there live in PostgreSQL because a job and a row would be two sources of
+   truth for one fact. Do not "unify" the two retry mechanisms — the ADR is accepted, and the
+   contrast between them is the interview point.
+3. **The guarantee is at-least-once and a duplicate ticket can physically print** (§12.3). The
+   UI and the docs must say that, not imply exactly-once. `ticket_hash` deduplicates the
+   *record*; the idempotency key deduplicates what the *endpoint* accepts; neither can promise
+   anything about paper. M9's ADR 010 is the model for writing that honestly.
+4. **The enqueue happens after the kitchen consumer's transaction commits**, never inside it —
+   §7 forbids the network call, and M9's §21.13 test is the reason the redelivery path has to
+   stay idempotent. So ask the pair question again: the projection commits, then the job is
+   enqueued, and a crash between them is what the reconciliation sweep exists to repair. Write
+   that table in the brief before writing code.
+5. **Redis becomes load-bearing for the first time.** Everywhere else it is a soft dependency
+   (ADR 011) and readiness ignores it. Decide explicitly whether a print queue changes that, and
+   record the answer — the default should be no.
+6. **`print_jobs` already exists in the schema** (`packages/db/src/schema.ts`, since M2) with
+   `ticket_hash` unique, `attempt_count`, `last_error` and `state`. Check whether it needs a
+   migration at all before generating one. `pnpm db:generate` works again as of M9; it had been
+   pointing at a schema path that does not exist.
 
 Verification is `pnpm -F @pos/worker test`, `pnpm -F @pos/api test`, lint, typecheck, build, and
 `pnpm verify:integration`. Run tests narrowly; do not run the whole monorepo suite.

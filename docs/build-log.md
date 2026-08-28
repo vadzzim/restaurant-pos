@@ -982,3 +982,72 @@ wholesale.**
 
 Both regression tests were checked by reverting each fix. The permanent-error one also asserts the
 half that is easy to lose: the order _behind_ the halted aggregate still syncs.
+
+## M9 — the lease, and the two windows nothing was watching
+
+The publisher already had backoff, dead-lettering and a lease before this milestone started. What
+it did not have was any answer to the question the brief made mandatory — _for each pair of writes,
+which order survives a crash between them?_ — and asking it found one real bug, one named gap, and
+one place where the schema was lying by omission.
+
+**The bug: a batch could outlive its own lease.** `publishOnce` claimed up to `OUTBOX_BATCH_SIZE`
+rows for `OUTBOX_LEASE_MS`, then published them one after another with nothing checking how much of
+that lease was left. With the shipped defaults — fifty rows, thirty seconds — a broker taking 600 ms
+a send finishes the batch after the lease has gone, and the last rows are published by a worker that
+no longer holds them. That is worse than the duplicate §10 already accepts: another worker can have
+claimed the same order's _next_ event in the meantime, so the two publishes race and the events can
+reach the topic out of version order. Everything downstream — the per-partition ordering guarantee,
+the projection's `source_event_version` guard — assumed this could not happen. The pass now measures
+its lease from before the claim (the claim's own round trip is spent out of the same budget),
+refuses to start a send that will not comfortably finish inside it, and hands the rest of the batch
+back. A tenth of the lease is deliberately never used: the local clock is not the database's.
+
+**The named gap: abandoned rows kept their claim.** M6 taught the pass to stop when the broker dies
+mid-batch, which was right, but the untouched rows stayed leased for up to thirty seconds for work
+nobody was doing. The release is one statement, guarded on `claimed_by = :workerId` so a lease that
+expired and was re-taken is never stolen back, and its failure mode is exactly the old behaviour —
+which is what makes it safe to run outside any transaction. The same release now covers all three
+ways a pass gives up: the transport died, a human paused the publisher, or the lease is nearly up.
+
+**The schema was lying by omission.** A worker that dies mid-publish leaves a lease that expires and
+a row another worker takes over. Nothing recorded that this had happened. `attempt_count` must not
+move — a reclaim says a _worker_ died, not that the event is bad, and charging it would let a
+rolling restart dead-letter healthy events — so a row could be reclaimed forever with no trace. That
+is a publisher crashing on one specific event, and it was invisible. `reclaim_count` is now
+incremented inside the claim itself: the candidate rows are selected in their own CTE so the UPDATE
+can see who held each row _before_ it, because `RETURNING` gives back new values only. ADR 010
+records why this is counted and deliberately not a dead-letter trigger.
+
+**The controls are a table, not an environment variable.** §18's `Pause Outbox Publisher` and
+`Delay Outbox Publishing` are thrown by one process (the API, once M12 gives them buttons) and
+obeyed by another, and a switch a human threw has to survive a worker restart. So they are a
+singleton row the worker polls every `OUTBOX_POLL_MS`. Two details matter: a failed read keeps the
+**last known** value rather than reverting to the defaults — a database blip must not silently
+un-pause a publisher at the worst possible moment — and a pause is checked _between rows_, not only
+between passes, because a publish delay large enough to demonstrate is large enough to make a pass
+take a minute. `pnpm -F @pos/worker outbox pause|resume|delay <ms>|status` writes the same row.
+
+**§21.12 without faking the crash.** The window is "the record reached Redpanda and `published_at`
+was never written". `publishOnce` opens exactly two transactions — the claim, then the mark — so a
+`Db` proxy that rejects the _second_ one is the crash itself, rather than a row edited afterwards to
+look like one. The lease is then expired by moving `claim_until` into the past instead of sleeping:
+the behaviour under test is "an expired lease is re-claimable", not "time passes", and a sleep long
+enough to be reliable on a loaded machine would have turned every one of these tests into a
+stopwatch race.
+
+**§21.13 had to be an integration test.** The window is entirely about Kafka's offset bookkeeping,
+so a fake that calls the handler twice proves nothing beyond §21.6, which has existed since M3. The
+test commits the offset for the first event, applies the second without committing it, disconnects,
+and lets a second consumer in the same group find out what the group still believes. Kafka
+redelivers exactly one event, `processed_events` answers `duplicate`, and the ticket's `updated_at`
+is unchanged — not merely its state. It runs under `pnpm verify:integration`, which now has two
+broker tests instead of one.
+
+**§21.16's concurrency half needs no clock at all.** Worker A's claim commits before its first send;
+that is the shape of the §10 protocol. Gating worker B on A's first send therefore means B provably
+runs while A holds every row, and `claimed: 0` is a proof rather than a race that usually passes.
+
+**One repair on the way past.** `packages/db/drizzle.config.ts` pointed at `./src/db/schema.ts`,
+which has never existed in this repo; `drizzle-kit generate` had been failing since M1 and the 0000
+migration was the only one anyone had needed. Fixing the path produced exactly the expected diff
+against the stored snapshot, which is the reassuring outcome.

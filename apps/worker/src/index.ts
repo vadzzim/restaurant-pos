@@ -4,6 +4,7 @@ import { loadConfig } from '@pos/config';
 import { closeDb, getDb } from '@pos/db';
 import pino from 'pino';
 
+import { watchOutboxControls } from './modules/events/outbox-controls.js';
 import { publishOnce } from './modules/events/outbox-publisher.js';
 import { connectBroker } from './shared/broker-session.js';
 import { supervise } from './shared/broker-supervisor.js';
@@ -24,6 +25,10 @@ const publisherOptions = {
 };
 
 const kafka = createKafka(config);
+
+// Awaited before the loop starts, so a worker that boots while the publisher is paused honours the
+// pause on its very first pass instead of draining a backlog a human deliberately stopped.
+const controls = await watchOutboxControls(db, config.OUTBOX_POLL_MS, logger);
 
 const broker = supervise({
   name: 'redpanda',
@@ -47,7 +52,9 @@ const publisherLoop = (async () => {
   while (running) {
     const connection = broker.current();
 
-    if (connection === undefined) {
+    // Paused means paused before the claim, not just before the send: a pass that claimed a batch
+    // and then released it would still have held every one of those rows for a round trip.
+    if (connection === undefined || controls.current().paused) {
       await sleep(config.OUTBOX_POLL_MS);
       continue;
     }
@@ -60,9 +67,19 @@ const publisherLoop = (async () => {
       const result = await publishOnce(db, connection.transport, {
         ...publisherOptions,
         isTransportAlive: connection.isAlive,
+        controls: controls.current,
       });
       if (result.claimed > 0) {
         logger.info({ workerId, ...result }, 'outbox batch processed');
+      }
+      if (result.reclaimed > 0) {
+        // Somebody's worker died holding these rows. It is not an error here — the lease did its
+        // job — but a row being reclaimed repeatedly is a publisher crashing on it, and nothing
+        // else in the system says so.
+        logger.warn(
+          { workerId, reclaimed: result.reclaimed },
+          'reclaimed rows from expired leases',
+        );
       }
       // A pass claims at most one event per order, to keep that order's events in version order.
       // Waiting a full poll interval between them would make a three-event order take seconds to
@@ -80,7 +97,11 @@ const publisherLoop = (async () => {
 
 const heartbeat = setInterval(() => {
   logger.info(
-    { workerId, brokerConnected: broker.current()?.isAlive() === true },
+    {
+      workerId,
+      brokerConnected: broker.current()?.isAlive() === true,
+      ...controls.current(),
+    },
     'Worker heartbeat',
   );
 }, config.WORKER_HEARTBEAT_MS);
@@ -88,6 +109,7 @@ const heartbeat = setInterval(() => {
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
   running = false;
   clearInterval(heartbeat);
+  controls.stop();
   try {
     await publisherLoop;
     await broker.stop();
