@@ -35,6 +35,7 @@ What was evaluated and why it was rejected.
 | `009-kitchen-projection.md` | M3 | why the kitchen consumer needs a real read model |
 | `006-realtime-consumer.md` | M4 | in the api process, one shared group, and the emit crash window |
 | `005-transactional-outbox.md` | M5 | the dual-write problem, and ordering within a partition |
+| `012-kitchen-command-base-version.md` | M5 | commanding from an eventually consistent projection |
 | `011-health-and-degradation.md` | M6 | why readiness ignores the broker |
 | `002-offline-first.md` | M8 | including why a conflict halts the queue |
 | `010-db-outbox-retries.md` | M9 | why retries live in Postgres and not in BullMQ |

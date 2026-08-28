@@ -65,11 +65,33 @@ export async function fetchOrder(orderId: string): Promise<OrderSnapshot | undef
  * status but are domain outcomes carrying a §5 body, so they are returned rather than thrown; only
  * the §17 error envelope becomes an exception.
  */
-export async function postMutation(
+export const postMutation = (
   orderId: string,
   request: MutationRequest,
-): Promise<MutationResponse> {
-  const response = await fetch(`/api/orders/${orderId}/mutations`, {
+): Promise<MutationResponse> => postMutationTo(`/api/orders/${orderId}/mutations`, request);
+
+/** What the two §17 kitchen adapters take: a mutation identity, with the type in the URL. */
+export interface KitchenCommandRequest {
+  mutationId: string;
+  terminalId: string;
+  restaurantId: string;
+  baseVersion: number;
+}
+
+/**
+ * The kitchen commands go through the §17 adapters rather than through `postMutation` with a type
+ * in the body. Both reach the same handler; using the endpoints that exist for this is what keeps
+ * them honest — an adapter nothing calls is an adapter nobody notices breaking.
+ */
+export const postKitchenCommand = (
+  orderId: string,
+  command: 'preparing' | 'ready',
+  request: KitchenCommandRequest,
+): Promise<MutationResponse> =>
+  postMutationTo(`/api/kitchen/orders/${orderId}/${command}`, request);
+
+async function postMutationTo(path: string, request: unknown): Promise<MutationResponse> {
+  const response = await fetch(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify(request),

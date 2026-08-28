@@ -5,241 +5,178 @@
 
 ## Current state
 
-**Last completed milestone:** M4 — the frontend vertical slice: Socket.IO with the Redis adapter,
-the §12.2 realtime consumer inside the API process, four read endpoints, and a POS screen and a
-kitchen screen in Vue. **The project is demoable from here on.**
-**Next:** M5 — the remaining six mutation types and the full §8 conflict matrix. Model: Sonnet.
+**Last completed milestone:** M5 — all nine mutation types, the whole of §8 in one domain
+component, the two §17 kitchen adapters, payments, and the kitchen rail moving on screen.
+**The entire order lifecycle is demoable end to end.**
+**Next:** M6 — error model, logging, the three-way health split, `verify:integration` and CI.
+Model: Sonnet.
 
 M0 `9a87b86`, M1 `3b498e8`, M2 `2ed4ce3` + `d43c194`, M3 `9637c92` + `507700f`, M4 `afc77c5` and
-four review commits through `50d4ac7`. The tree passes typecheck, lint, build and 82 tests (9 domain, 27 api, 11 worker,
-35 web) against a real PostgreSQL. The seven mandatory M3 tests §21.1, 21.2, 21.3, 21.5, 21.6,
-21.11 and 21.15 are still present and named by their spec number.
+four review commits through `50d4ac7`; M5 is `HEAD` (a commit cannot cite its own hash). The tree
+passes typecheck, lint, build and **155 tests**
+(61 domain, 37 api, 16 worker, 41 web) against a real PostgreSQL. Ten of the sixteen mandatory
+§21 tests exist and are named by their spec number: 21.1, 21.2, 21.3, **21.4**, 21.5, 21.6,
+**21.9**, **21.10**, 21.11, 21.15.
 
 ## What exists
 
 - `CLAUDE.md`, `docs/spec.md`, `docs/MILESTONES.md`, `docs/build-log.md`.
-- `docs/milestones/M01.md`, `M02.md`, `M03.md`, `M04.md` — the completed briefs.
-- ADRs 001, 003, 004, 006, 007, 009 accepted.
-- `packages/config` — zod environment, now including `TEST_DATABASE_URL`, the Kafka topic settings
-  and the outbox tuning knobs.
-- `packages/contracts` — statuses, mutation types, event types, order and event payload DTOs, the
-  §5 request/response shapes, `ConflictReason`, and (M4) `MenuItem`, `KitchenTicket`,
-  `ConfigResponse`, the socket event names, `SubscribeRequest`, and `TERMINALS` / `findTerminal`.
-- `packages/domain` — `calculateTotalCents`, `isValidTransition`, and `decide()`: the one place
-  that answers whether a mutation may apply to an order as it stands. No database, no HTTP.
-- `packages/db` — schema, migrations, seed, `db:check`, and `@pos/db/testing` (creates `pos_test`,
-  migrates, seeds, truncates between tests). **Moved here from `apps/api/src/db` in M3**, because
-  the worker needs the same tables and one app cannot import another app's source.
-- `apps/api` — `POST /api/orders/:orderId/mutations` (the only write path), zod validation, the
-  §7 transaction, the §17 error model, `buildApp()` so tests can `inject`. **M4 added** the reads
-  `GET /api/menu`, `GET /api/orders/:orderId`, `GET /api/kitchen/tickets?restaurantId=` and
-  `GET /api/config?restaurantId=`, plus `src/modules/realtime/` — the Socket.IO server with the
-  Redis adapter, `roomsFor()`, and the §12.2 consumer.
+- `docs/milestones/M01.md` … `M05.md` — the completed briefs.
+- ADRs 001, 003, 004, **005**, 006, 007, 009, **012** accepted.
+- `packages/config` — zod environment, `TEST_DATABASE_URL`, Kafka topics, outbox tuning.
+- `packages/contracts` — statuses, the nine `MUTATION_TYPES`, the nine event types, every mutation
+  and event payload, the §5 request/response shapes, `ConflictReason`, `PaymentMethod`,
+  `KitchenTicketState`, `KITCHEN_TERMINAL_ID`, menu and config DTOs, socket names, `TERMINALS`.
+- `packages/domain` — `calculateTotalCents`, `isValidTransition`, and `decide()`: **the whole of
+  §8**, table-driven, no database and no HTTP.
+- `packages/db` — schema (all thirteen tables), migrations, seed, `db:check`, `@pos/db/testing`.
+  **No schema change was needed in M5**; M2 wrote it in full, and `payments` and the rest of
+  `kitchen_tickets.state` finally got used.
+- `apps/api` — `POST /api/orders/:orderId/mutations` with nine zod branches; the two §17 kitchen
+  adapters `POST /api/kitchen/orders/:orderId/{preparing,ready}`; the reads `GET /api/menu`,
+  `/api/orders/:orderId`, `/api/kitchen/tickets`, `/api/config`; `src/modules/realtime/` — the
+  Socket.IO server with the Redis adapter, `roomsFor()`, and the §12.2 consumer.
 - `apps/worker` — the §10 three-step outbox publisher with lease, backoff and dead-lettering; the
-  Kafka producer and topic bootstrap; the kitchen consumer and its transactional projection.
-- `apps/web` — a working POS screen (`/pos/:terminalId`) and kitchen screen (`/kitchen`). Pinia
-  stores for menu, order, kitchen and connection; `src/api/client.ts` typed entirely from
-  `@pos/contracts`; `src/realtime/event-gate.ts` — the dedup + version filter of §12.2, unit
-  tested. `/debug` and `/demo` are still the M1 placeholder (M11, M16).
+  Kafka producer and topic bootstrap; the kitchen consumer and its transactional projection, which
+  now **advances** `state` from `OrderPreparing`, `OrderReady` and `OrderCancelled`.
+- `apps/web` — a POS screen with all six of its commands (add, ±quantity, remove, send, pay,
+  cancel) and a kitchen screen with four columns and two command buttons. Pinia stores for menu,
+  order, kitchen and connection. `/debug` and `/demo` are still the M1 placeholder (M11, M16).
 
-## Facts M5 depends on
+## Facts M6 depends on
 
-- **One write path.** `POST /api/orders/:orderId/mutations`. There is no `POST /api/orders`: the
-  client generates the `orderId` (uuid) and sends `CREATE_ORDER` with `baseVersion: 0`.
-- The client must send `mutationId` (uuid v4), `terminalId`, `restaurantId`, `baseVersion`, `type`
-  and `payload`; responses are exactly the §5 shapes, typed in `@pos/contracts` as
-  `MutationResponse`. Validation failures use the §17 `{ code, message, details }` envelope.
-- **`SUPPORTED_MUTATION_TYPES` in `@pos/contracts` is still the M3 three.** M5 widens it, extends
-  the zod discriminated union in `mutation-routes.ts`, the `EVENT_TYPE_BY_MUTATION` map and the
-  effect switch in `mutation-handler.ts`, and adds rules to `decide()`. The handler's shape does
-  not need to change — that was M3's stated contract with M5.
-- **The POS screen already issues real mutations,** so every new type M5 adds needs a button and
-  the same `baseVersion`-from-the-snapshot discipline the three existing ones use. The kitchen
-  screen has a `New` column only; `PREPARING` and `READY` and their two commands are M5's.
-- The kitchen projection is `kitchen_tickets`, written only from `OrderSentToKitchen`, with
-  `state = 'SENT_TO_KITCHEN'` and `source_event_version`. The kitchen screen reads it through
-  `GET /api/kitchen/tickets`. Once `START_PREPARING` and `MARK_READY` exist, the consumer has to
-  advance `state` from `OrderPreparing` and `OrderReady` or the screen will not move.
-- Events on `restaurant.order.events` are keyed by `orderId`; the envelope is `DomainEvent`.
-- **Two consumers now read that topic**, on separate groups: `kitchen` in `apps/worker` (builds the
-  projection) and `realtime` in `apps/api` (broadcasts). Both write `processed_events` under their
-  own `consumer_name`. A new event type has to be handled in both or it will be invisible on one
-  screen. See ADR 006.
-- **The browser filters what the socket delivers**: dedup by `eventId`, ignore `version` not
-  greater than what it holds, refetch the snapshot on reconnect. A socket message never carries
-  state into the UI — it only triggers `GET /api/orders/:id` or `GET /api/kitchen/tickets`.
+- **One write path, three routes into it.** `applyMutation` is the only function that writes an
+  order. The canonical `POST /api/orders/:orderId/mutations` and the two kitchen adapters all go
+  through `executeMutation` in `apps/api/src/modules/orders/api/mutation-reply.ts`, which is the
+  single place an outcome becomes an HTTP reply and a log line. **M6's correlation fields belong
+  there**, not in three route handlers.
+- The §17 error envelope `{ code, message, details }` and `ApiError` already exist in
+  `apps/api/src/shared/errors.ts`, and `buildApp()` already installs one error handler with no
+  stack traces in responses. M6 makes it typed and complete rather than inventing it.
+- **`decide()` owns §8 and nothing else does.** Nine mutation types, six statuses, one table-driven
+  function, one matrix test. A rule added anywhere else is a bug. The order of checks is fixed:
+  **domain rule first, version second** — §21.4 fails if that is reversed, because a client at v5
+  against a cancelled order at v6 must hear `ORDER_CANCELLED`, the reason it can act on.
+- **`decide()` returns the status the order should end in**, and `guardedVersionBump` writes it
+  unconditionally in one statement. For an item mutation that is the status it already had.
+- **Two §8 cases are `ALREADY_APPLIED`, and only two**: removing a line that is not there, and
+  cancelling a cancelled order. Everything else conflicts, including a repeated kitchen transition
+  (`INVALID_STATUS_TRANSITION`) and a quantity change to the value already stored (which applies
+  and bumps the version). The reasoning is in `build-log.md` under M5.
+- **`PAY` carries `{ method }`, never an amount.** `payments.amount_cents` is the order's canonical
+  total read inside the transaction; `payments.mutation_id` is unique as a backstop, but §21.9
+  passes through `processed_mutations` like every other repeat.
+- **The kitchen commands at `ticket.source_event_version`** — the only version its projection has.
+  It can lag, and then the command conflicts and the operator presses again. That is the designed
+  outcome, recorded in ADR 012. Kitchen commands carry `terminalId: 'kitchen-display'` unless a
+  display names itself; no table has a foreign key to `terminals`.
+- **A new event type has to be handled in three places or it is invisible somewhere**: the kitchen
+  projection's `STATE_BY_EVENT_TYPE`, `KITCHEN_EVENT_TYPES` in `broadcast.ts`, and the browser. The
+  four kitchen event types and the four the projection acts on are deliberately the same four —
+  `OrderPaid` is the counter-example: it moves the order but no ticket, so it stays out of the
+  kitchen room, and a kitchen that received it would burn its retry budget waiting for a projection
+  change that was never coming.
+- **Two consumers read `restaurant.order.events`**, on separate groups: `kitchen` in `apps/worker`
+  and `realtime` in `apps/api`. Both write `processed_events` under their own `consumer_name`
+  (ADR 006). Events are keyed by `orderId`; ordering holds within a partition and nowhere else
+  (ADR 005).
 - **Nothing orders the two consumer groups against each other.** A broadcast can arrive before the
   projection it refers to has been written, so the kitchen store reads until
-  `source_event_version >= event.version` on a bounded backoff. Any future screen that reads a
-  projection built by a different consumer needs the same wait; a screen reading `orders` does not,
-  because that row is written by the transaction that wrote the outbox row.
-- **The kitchen socket joins only `kitchen:{restaurantId}`,** and `roomsFor` decides which event
-  types reach it through `KITCHEN_EVENT_TYPES`. M5 adds `OrderPreparing`, `OrderReady` and
-  `OrderCancelled` there at the same time as it teaches the kitchen consumer to advance `state`.
-- **A mutation whose answer never came back keeps its identity** (`orderId`, `mutationId`,
-  `terminalId`, `restaurantId`) and is retried unchanged, so §9 resolves it as `ALREADY_APPLIED`.
-  **The slot is per terminal, and it halts that terminal:** while it is occupied every command from
-  it is refused, because sending another would overwrite the only id that can still settle the
-  first. The store is a singleton and the terminal is a route parameter, so the view announces
-  which terminal it renders (`useTerminal`) and only that one's mutation may be shown, retried or
-  adopted — otherwise a POS could paint another tenant's order onto its screen. Resolution is
-  explicit — Retry, or Discard and accept an unknown outcome. Same shape as §14.1, which is why M8
-  generalises it per aggregate rather than replacing it.
+  `source_event_version >= event.version` on a bounded backoff. A screen reading `orders` does not
+  need this, because that row is written by the transaction that wrote the outbox row.
+- **The browser filters what the socket delivers**: dedup by `eventId`, ignore `version` not
+  greater than what it holds, refetch the snapshot on reconnect. A socket message never carries
+  state into the UI — it only triggers a canonical read.
+- **A mutation whose answer never came back keeps its identity and blocks further commands.** On
+  the POS the slot is **per terminal**; in the kitchen it is **per order**, which is the aggregate
+  and the granularity §14.1 halts at. Both resolve explicitly — Retry (same `mutationId`, so §9
+  answers `ALREADY_APPLIED`) or Discard (accept an unknown outcome). M8 makes both durable.
 - **Client state that outlives a screen has an explicit owner.** `adopt` refuses a snapshot older
   than the one held for that order; `refetch` re-checks that the order it asked about is still
-  current before applying either a result or an error (`readError`, kept separate from `lastError`
-  because the two have different lifetimes); `connection.start`/`stop` claim a generation so a slow
-  bootstrap cannot outlive the `stop` that cancelled it.
-- **A list that is replaced wholesale is never loaded concurrently.** `createCoalescingLoader` runs
-  one read at a time and folds in whatever arrived meanwhile. The rule it encodes: an expectation
-  may only be judged by a read *issued after* it was raised — an in-flight read predates the event
-  and proves nothing about it, even when it happens to contain the effect.
+  current; `connection.start`/`stop` claim a generation. This class of bug is what three of the
+  four M4 review rounds found, and M7/M8 add durable client state — exactly where it reappears.
+- **A list replaced wholesale is never loaded concurrently.** `createCoalescingLoader` runs one read
+  at a time. The rule: an expectation may only be judged by a read *issued after* it was raised.
 - **The publisher claims only an order's earliest unpublished event**, so that order's events reach
-  Redpanda in version order regardless of retries or how many workers run. A pass that published
-  something immediately runs again instead of waiting out the poll interval.
-- Test databases: `TEST_DATABASE_URL` (`pos_test`), created and migrated automatically by
-  `@pos/db/testing`. The demo database is never truncated by a test run.
+  Redpanda in version order regardless of retries or worker count.
+- Test databases: `TEST_DATABASE_URL` (`pos_test`), created and migrated by `@pos/db/testing`. The
+  demo database is never truncated by a test run.
 - Workspace packages resolve through their `exports` to `dist`, so `pnpm run build:packages` runs
   before dev, typecheck, build, test and the db scripts. Vitest aliases the sources instead.
-- Root `pnpm test` runs the workspace suites with `--workspace-concurrency=1`, because they share
-  one test database.
+- Root `pnpm test` runs the suites with `--workspace-concurrency=1`; they share one test database.
 
 ## Decisions already made
 
 - Fastify over NestJS, Drizzle over Prisma.
-- Full scope, nothing cut. **Twenty milestones total, sixteen still to run.**
-- **A demoable vertical slice lands at M4**, not M11. The original ordering finished the backend
-  first, which risked reaching the usage limit with green tests and nothing to show. **Done.**
+- Full scope, nothing cut. **Twenty milestones total, fourteen still to run.**
+- **A demoable vertical slice landed at M4**, not M11. **Done.**
 - **The realtime consumer lives in the API process on one shared consumer group**, with the Redis
   adapter fanning a broadcast out to the other instances (ADR 006). M14's multi-instance smoke test
-  is what turns that adapter claim into a tested fact, and it only means something because the
-  group is shared.
+  is what turns that adapter claim into a tested fact.
 - **Redpanda and Redis are soft dependencies of the API.** `buildApp()` is routes-only; the socket
-  server and the consumer are wired in `index.ts`, and the consumer is *supervised* — retried both
-  when it cannot start and when it dies later — so it never blocks `listen()` and never leaves the
-  API alive with frozen screens. Readiness still checks PostgreSQL only (§17).
-- **Reads that span two tables are `repeatable read`.** `GET /api/orders/:id` reads `orders` and
-  `order_items`; at READ COMMITTED those two statements can straddle a commit and return a total
-  that matches neither version.
-- **A socket message is a hint, never data.** The client refetches the canonical snapshot; it does
-  not rebuild order state from event payloads (§13 forbids event-replay infrastructure). This is
-  also why M13's polling transport is the same code on a different trigger.
+  server and the supervised consumer are wired in `index.ts`. Readiness checks PostgreSQL only.
+- **Reads that span two tables are `repeatable read`.**
+- **A socket message is a hint, never data.** The client refetches the canonical snapshot (§13).
 - **The user starts the infrastructure.** Claude never runs `docker compose` and never reads
-  container logs — only code, tests and migrations. The reproducibility gap this creates is closed
-  by `pnpm verify:integration` (M6): one scripted command that brings Compose up, waits for
-  readiness, runs the integration suite, tears down, and writes output to a file. CI calls that
-  same command and declares no service containers of its own.
+  container logs. `pnpm verify:integration` (M6) is what closes the reproducibility gap: one
+  scripted command that brings Compose up, waits for readiness, runs the integration suite, tears
+  down, and writes output to a file. CI calls that same command and declares no service containers.
 - **Drop order if the interview date closes in:** M10 (print job), then M16 (`/demo`), then M17
-  (PWA). Do not drop M15 or M18 first — the role has Vue in the title, and rush-speed POS UX plus
-  a browser-level E2E test are what demonstrate frontend maturity.
+  (PWA). Do not drop M15 or M18 first.
 
-## Review round 1 — accepted
+## Review rounds 1 and 2, and the M4 reviews
 
-- Kitchen commands became real mutations (`START_PREPARING`, `MARK_READY`) through the same
-  transactional handler. Previously they bypassed the concurrency model entirely.
-- **A conflict halts the offline queue for that aggregate** (§14.1). Later mutations for the same
-  order are `BLOCKED` and never sent; the operator explicitly discards or rebases.
-- The kitchen consumer builds a real `kitchen_tickets` projection, so its idempotency is
-  demonstrable. The realtime consumer is documented honestly as at-least-once with a crash window,
-  mitigated by client-side `eventId`/version filtering.
-- `409 MUTATION_ID_REUSED` when a `mutationId` returns with a different `request_hash`.
-- Tenant scoping on every mutation.
-- Health split into `live`, `ready` (Postgres only) and `debug/dependencies`.
-- CI, production images, and a multi-instance smoke test that proves the Redis adapter claim.
-- BullMQ removed from outbox retries (Postgres owns them); redirected to the print job.
-- The feature flag retargeted from the write path to `realtime.websocket_push`, which has a
-  complete polling implementation as its other branch.
+Recorded in full in `docs/build-log.md`. The two habits worth carrying forward:
 
-## Review round 2 — accepted, and why each mattered
-
-- **Outbox lease.** The publisher held `FOR UPDATE SKIP LOCKED` across the Kafka publish, which
-  contradicted §7's own ban on external calls inside a transaction. Now three short steps: claim
-  by lease (`claimed_by`, `claim_until`) and commit, publish outside any transaction, mark in a
-  second transaction. Publication is explicitly at-least-once and the crash window is tested.
-  **Schema change — had to land before M2.**
-- **Order creation was the one unprotected write.** `POST /api/orders` sat outside the mutation
-  protocol, so a lost response plus a retry created two orders. Creation is now `CREATE_ORDER`
-  with a client-generated `orderId` and `baseVersion: 0`, through the same handler. The separate
-  endpoint is gone. Bonus: a terminal can now create an order while offline.
-  **Changes `MutationType`, so it had to land before M1.**
-- **The print job over-promised.** `ticket_hash` deduplicates a database row, not paper: if the
-  printer emits and the worker then dies, the retry reprints. Now stated as at-least-once, with
-  the reasoning that a missing ticket loses an order while a duplicate wastes paper. The test
-  covers the fake printer's idempotency-key contract, not a claim about hardware.
-- **"Safe merge" was impossible as written.** §8 promised to merge independent `ADD_ITEM`s while
-  §6's strict versioned UPDATE rejects any stale `baseVersion` — the merge path could never have
-  executed. Removed. All stale mutations conflict; merging happens only through the human-driven
-  rebase. Server-side replay of commutative operations is now discussed in the interview guide as
-  the road not taken. This was the only review point that *reduced* scope.
-- **Rebase is sequential.** A, B and C cannot share one fresh `baseVersion`; A rebases onto v6,
-  then B onto v7 after A applies, then C onto v8, each with a new `mutationId`.
-- **`POS-3` added to `Second Restaurant`.** Every terminal belonged to tenant one, so neither the
-  cross-tenant test nor a two-restaurant flag rollout could actually be shown. Also defined how an
-  open client learns a flag flipped: polling `GET /api/config` every 15 s. A WebSocket control
-  event would be circular when the flag disables WebSocket.
-- **CI was self-contradictory** — service containers plus a script that starts Compose would bind
-  the same ports twice. CI now calls `pnpm verify:integration` and declares no services.
-- Arithmetic: M0–M19 is twenty milestones, not nineteen. Corrected everywhere.
-
-## M4 reviews — four rounds, all findings fixed
-
-One external review and three Codex passes, over `afc77c5` … `50d4ac7`. The narrative is in
-`build-log.md`; every invariant that must survive M5 is in **Facts M5 depends on** above. Two
-things are worth carrying as habits rather than as facts:
-
-- **Three of the findings were one mistake:** client state that outlives the screen which created
-  it, with no explicit owner. The pending mutation now belongs to its terminal, a failed canonical
-  read to its order, a socket to its generation. **M7 and M8 add durable client state** — IndexedDB
-  and the mutation queue — which is exactly where this class reappears.
-- **Every round's findings were opened by the previous round's fix.** A fifth pass over the same
-  code is worth less than one after M5, when the remaining six mutation types exist.
+- **Client state that outlives the screen which created it, with no explicit owner**, was three of
+  the four M4 findings. It is the class of bug M7 and M8 will reopen.
+- **Every review round's findings were opened by the previous round's fix.** A pass over M3/M4 code
+  is now worth much less than a pass over M5, which is the newest and least examined.
 
 ## Known problems / open questions
 
-- Scope grew across the reviews and nothing was cut, by explicit choice. Watch the usage budget;
-  the drop order is recorded above.
-- M10 (print job) survives mainly because BullMQ was wanted as a résumé keyword. Both reviewers
-  independently flagged it as an invented responsibility, and it is first on the drop list.
+- **`START_PREPARING` and `MARK_READY` conflict on a repeat rather than answering
+  `ALREADY_APPLIED`.** This is deliberate (§8: out-of-order transitions conflict) and it is what
+  makes §21.10 legible, but it means a kitchen display that lost a response and then *discarded*
+  the pending command will be told `INVALID_STATUS_TRANSITION` if it presses again — technically
+  right, and it reads like a failure. Worth saying out loud in the interview.
+- **The kitchen commands from a lagging projection** and takes a conflict when it is behind
+  (ADR 012). The projection is therefore load-bearing for writes, not only for display: a kitchen
+  consumer that is down freezes the versions the rail commands at. M11's `/debug` is where that lag
+  becomes a number.
+- Scope grew across the reviews and nothing was cut, by explicit choice. Watch the usage budget.
+- M10 (print job) survives mainly because BullMQ was wanted as a résumé keyword; it is first on the
+  drop list.
 - Infrastructure URLs intentionally have development defaults. M14 production images must require
   explicit values rather than inheriting localhost defaults.
-- **Kafka is not in the test path.** The publisher is tested against a fake transport, and both
-  consumers are tested by calling their handlers directly. No test opens a socket either — the
-  broadcast is asserted through a fake emitter, and `roomsFor` is a pure function. The real round
-  trip is verified by hand and automated in M6 by `pnpm verify:integration`. §21.12 (crash after
-  publish) and §21.16 (lease expiry, two workers) belong to M9.
-- The worker connects to Redpanda at startup and will exit if the broker is down. **The API no
-  longer does** — M4 made its consumer start retry in the background. M6 should give the worker the
-  same treatment, or state why it should not.
-- **`GET /api/config` is the M4 stub of a M13 feature.** It reads `feature_flags` directly: no
-  Redis cache, no percentage-by-hash rollout, and the client fetches it once at bootstrap instead
-  of every 15 s. With the flag off today the screens are correct but receive no live updates,
-  because the polling transport — the flag's other, complete branch — is M13's.
-- **`GET /api/kitchen/tickets` is not in §17's endpoint list.** It was added because the kitchen
-  screen must read the projection and no listed endpoint returns it; see `build-log.md`.
-  `GET /api/restaurants/:restaurantId/orders` is still unbuilt — nothing needs it yet.
-- **The socket has no authentication.** Any browser can subscribe to any restaurant's rooms. That
-  is deliberate for a demo with no auth anywhere, and is worth saying out loud in the interview
-  rather than leaving for someone to notice.
-- **The projection wait is bounded and can still lose.** If the kitchen consumer is down, the
-  kitchen screen shows `PROJECTION LAG` and the ticket appears only when a later event lands or the
-  page is reloaded. M13's polling transport removes the reload as the last resort; M11's `/debug`
-  is where consumer lag becomes visible as a number.
-- **One pending mutation slot, not a queue.** It lives in memory and it halts the terminal while
-  occupied, which is correct but coarse: a POS that loses one response takes no orders until a
-  human presses Retry or Discard. M7 and M8 make it durable and per-aggregate, which is what makes
-  the halt tolerable in a real rush.
-- **A poison message on the realtime topic is lost to that consumer group permanently.** The offset
-  is committed and no later build will be offered it; recovery is by hand from the topic, while
-  retention lasts. A consumer-side dead-letter topic is the real answer and is not built. The
-  publish side already dead-letters through `outbox_events`.
-- **The concurrent-read test asserts an invariant, it does not force the interleaving.** It cannot
-  fail falsely, but it is not a proof that the old code was broken — the reasoning in
-  `build-log.md` is. A deterministic version would need statement-level hooks.
-- `outbox_events` and `processed_mutations` grow without bound. Archiving is out of scope and
-  worth saying out loud in the interview rather than pretending otherwise.
+- **Kafka is not in the test path.** The publisher is tested against a fake transport and both
+  consumers by calling their handlers directly. No test opens a socket. The real round trip is
+  verified by hand and automated in M6 by `pnpm verify:integration`. §21.12 and §21.16 are M9's.
+- The worker connects to Redpanda at startup and exits if the broker is down. **The API no longer
+  does.** M6 should give the worker the same treatment, or state why it should not.
+- **`GET /api/config` is the M4 stub of an M13 feature.** It reads `feature_flags` directly: no
+  Redis cache, no percentage rollout, and the client fetches it once at bootstrap instead of every
+  15 s. With the flag off the screens are correct but receive no live updates, because the polling
+  transport — the flag's other, complete branch — is M13's.
+- **`GET /api/kitchen/tickets` is not in §17's endpoint list**; it was added because the kitchen
+  screen must read the projection. `GET /api/restaurants/:restaurantId/orders` is still unbuilt.
+- **The socket has no authentication.** Any browser can subscribe to any restaurant's rooms.
+  Deliberate for a demo with no auth anywhere, and worth saying out loud.
+- **The projection wait is bounded and can still lose.** The kitchen screen shows `PROJECTION LAG`
+  and the ticket appears only when a later event lands or the page is reloaded.
+- **One pending mutation slot per terminal on the POS, one per order in the kitchen.** Both live in
+  memory. M7 and M8 make them durable and give the POS the per-aggregate form the kitchen already
+  has.
+- **A poison message on the realtime topic is lost to that consumer group permanently.** A
+  consumer-side dead-letter topic is the real answer and is not built. The publish side already
+  dead-letters through `outbox_events`.
+- **The concurrent tests assert invariants, they do not force the interleaving.** §21.1 and §21.10
+  cannot fail falsely, but neither is a proof that the unguarded code was broken — the reasoning in
+  `build-log.md` is.
+- `outbox_events` and `processed_mutations` grow without bound. Archiving is out of scope.
 
 ## First command of the next session
 
 ```
-Read docs/PROGRESS.md. Expand M5 from docs/MILESTONES.md into docs/milestones/M05.md, then implement M5 only. Stop when the Verification block passes.
+Read docs/PROGRESS.md. Expand M6 from docs/MILESTONES.md into docs/milestones/M06.md, then implement M6 only. Stop when the Verification block passes.
 ```

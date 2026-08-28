@@ -11,10 +11,17 @@ export const kitchenRoom = (restaurantId: string): string => `kitchen:${restaura
  * and — because it waits for the projection to catch up — spend its whole retry budget on an event
  * that was never going to appear.
  *
- * M5 adds `OrderPreparing`, `OrderReady` and `OrderCancelled` here, at the same time as it teaches
- * the kitchen consumer to advance `state` from them.
+ * The four here are exactly the four the kitchen projection acts on. That is not a coincidence to
+ * be maintained by hand — `OrderPaid` is the counter-example: it moves the order but no ticket, so
+ * it stays out, and a kitchen that received it would wait out its retry budget for a projection
+ * change that was never coming.
  */
-const KITCHEN_EVENT_TYPES = new Set(['OrderSentToKitchen']);
+const KITCHEN_EVENT_TYPES = new Set([
+  'OrderSentToKitchen',
+  'OrderPreparing',
+  'OrderReady',
+  'OrderCancelled',
+]);
 
 /**
  * Where one event has to land. A socket in several of these rooms still receives one copy —

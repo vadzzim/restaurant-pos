@@ -1,4 +1,4 @@
-import type { KitchenTicket, OrderItemSnapshot } from '@pos/contracts';
+import type { KitchenTicket, KitchenTicketState, OrderItemSnapshot } from '@pos/contracts';
 import { kitchenTickets, type Db } from '@pos/db';
 import { desc, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
@@ -34,7 +34,8 @@ export function registerKitchenReadRoutes(app: FastifyInstance, db: Db): void {
       tableNumber: row.tableNumber,
       // `items` is jsonb; the consumer writes exactly the §11 item shape into it.
       items: row.items as OrderItemSnapshot[],
-      state: row.state,
+      // `state` is text in the schema; the kitchen consumer writes only KITCHEN_TICKET_STATES.
+      state: row.state as KitchenTicketState,
       sourceEventVersion: row.sourceEventVersion,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),

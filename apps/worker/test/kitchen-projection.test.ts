@@ -95,3 +95,83 @@ describe('§21.6 kitchen consumer idempotency', () => {
     ).toHaveLength(1);
   });
 });
+
+function statusEvent(
+  orderId: string,
+  eventType: 'OrderPreparing' | 'OrderReady' | 'OrderCancelled' | 'OrderPaid',
+  version: number,
+): DomainEvent {
+  return {
+    eventId: randomUUID(),
+    eventType,
+    aggregateId: orderId,
+    restaurantId: 'demo-restaurant',
+    version,
+    occurredAt: new Date().toISOString(),
+    payload: { orderId, tableNumber: '12', status: 'PREPARING' },
+  };
+}
+
+describe('the ticket state the kitchen screen renders', () => {
+  it('walks SENT_TO_KITCHEN -> PREPARING -> READY as the mutations land', async () => {
+    const orderId = randomUUID();
+
+    await applyKitchenEvent(db(), sentToKitchen(orderId, 3, burger));
+    expect(await applyKitchenEvent(db(), statusEvent(orderId, 'OrderPreparing', 4))).toBe(
+      'applied',
+    );
+    expect((await tickets(orderId))[0]).toMatchObject({
+      state: 'PREPARING',
+      sourceEventVersion: 4,
+    });
+
+    expect(await applyKitchenEvent(db(), statusEvent(orderId, 'OrderReady', 5))).toBe('applied');
+    const [ready] = await tickets(orderId);
+    expect(ready).toMatchObject({ state: 'READY', sourceEventVersion: 5 });
+    // The items came from the SENT_TO_KITCHEN payload and a transition must not disturb them.
+    expect(ready?.items).toEqual(burger);
+  });
+
+  it('cancels a ticket the kitchen already has', async () => {
+    const orderId = randomUUID();
+
+    await applyKitchenEvent(db(), sentToKitchen(orderId, 2, pizza));
+    expect(await applyKitchenEvent(db(), statusEvent(orderId, 'OrderCancelled', 3))).toBe(
+      'applied',
+    );
+    expect((await tickets(orderId))[0]?.state).toBe('CANCELLED');
+  });
+
+  it('records a cancellation for an order the kitchen never saw, and builds no ticket', async () => {
+    // CANCEL is valid on an OPEN order, so this event legitimately has no projection to move.
+    // That is `recorded`, not `stale`: the two are debugged differently.
+    const orderId = randomUUID();
+
+    expect(await applyKitchenEvent(db(), statusEvent(orderId, 'OrderCancelled', 2))).toBe(
+      'recorded',
+    );
+    expect(await tickets(orderId)).toHaveLength(0);
+  });
+
+  it('leaves the ticket alone when a transition is redelivered behind the projection', async () => {
+    const orderId = randomUUID();
+
+    await applyKitchenEvent(db(), sentToKitchen(orderId, 4, burger));
+    await applyKitchenEvent(db(), statusEvent(orderId, 'OrderReady', 6));
+
+    // A different event id, so dedup cannot catch it: only the version guard can.
+    expect(await applyKitchenEvent(db(), statusEvent(orderId, 'OrderPreparing', 5))).toBe('stale');
+    expect((await tickets(orderId))[0]).toMatchObject({ state: 'READY', sourceEventVersion: 6 });
+  });
+
+  it('ignores payment, which moves the order but not the rail', async () => {
+    const orderId = randomUUID();
+
+    await applyKitchenEvent(db(), sentToKitchen(orderId, 2, burger));
+    await applyKitchenEvent(db(), statusEvent(orderId, 'OrderPreparing', 3));
+    await applyKitchenEvent(db(), statusEvent(orderId, 'OrderReady', 4));
+
+    expect(await applyKitchenEvent(db(), statusEvent(orderId, 'OrderPaid', 5))).toBe('recorded');
+    expect((await tickets(orderId))[0]).toMatchObject({ state: 'READY', sourceEventVersion: 4 });
+  });
+});

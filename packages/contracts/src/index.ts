@@ -23,11 +23,6 @@ export const MUTATION_TYPES = [
 
 export type MutationType = (typeof MUTATION_TYPES)[number];
 
-/** The three types the M3 vertical slice implements end to end. M5 adds the rest. */
-export const SUPPORTED_MUTATION_TYPES = ['CREATE_ORDER', 'ADD_ITEM', 'SEND_TO_KITCHEN'] as const;
-
-export type SupportedMutationType = (typeof SUPPORTED_MUTATION_TYPES)[number];
-
 export const EVENT_TYPES = [
   'OrderCreated',
   'OrderItemAdded',
@@ -88,11 +83,37 @@ export interface OrderItemAddedPayload {
   totalCents: number;
 }
 
+export interface OrderItemRemovedPayload {
+  orderId: string;
+  productId: string;
+  totalCents: number;
+}
+
+export interface OrderQuantityChangedPayload {
+  orderId: string;
+  productId: string;
+  quantity: number;
+  totalCents: number;
+}
+
 export interface OrderSentToKitchenPayload {
   orderId: string;
   tableNumber: string;
   items: OrderItemSnapshot[];
   totalCents: number;
+}
+
+/** `OrderPreparing`, `OrderReady` and `OrderCancelled` all carry this: a status and nothing more. */
+export interface OrderStatusChangedPayload {
+  orderId: string;
+  tableNumber: string;
+  status: OrderStatus;
+}
+
+export interface OrderPaidPayload {
+  orderId: string;
+  amountCents: number;
+  method: PaymentMethod;
 }
 
 export interface CreateOrderPayload {
@@ -106,13 +127,54 @@ export interface AddItemPayload {
 
 export type SendToKitchenPayload = Record<string, never>;
 
+export interface RemoveItemPayload {
+  productId: string;
+}
+
+export interface ChangeQuantityPayload {
+  productId: string;
+  quantity: number;
+}
+
+export const PAYMENT_METHODS = ['CASH', 'CARD'] as const;
+
+export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
+
+/**
+ * No amount. Money comes from the order's canonical `total_cents`, read inside the mutation's own
+ * transaction — a client-supplied amount would be a second source of truth for money, and the
+ * version guard already refuses a payment built on a total that has since moved.
+ */
+export interface PayPayload {
+  method: PaymentMethod;
+}
+
+export interface CancelPayload {
+  reason?: string | undefined;
+}
+
+export type StartPreparingPayload = Record<string, never>;
+
+export type MarkReadyPayload = Record<string, never>;
+
+export type MutationPayload =
+  | CreateOrderPayload
+  | AddItemPayload
+  | RemoveItemPayload
+  | ChangeQuantityPayload
+  | SendToKitchenPayload
+  | StartPreparingPayload
+  | MarkReadyPayload
+  | PayPayload
+  | CancelPayload;
+
 export interface MutationRequest {
   mutationId: string;
   terminalId: string;
   restaurantId: string;
   baseVersion: number;
-  type: SupportedMutationType;
-  payload: CreateOrderPayload | AddItemPayload | SendToKitchenPayload;
+  type: MutationType;
+  payload: MutationPayload;
 }
 
 /**
@@ -126,6 +188,7 @@ export const CONFLICT_REASONS = [
   'ORDER_ALREADY_SENT_TO_KITCHEN',
   'ORDER_ALREADY_EXISTS',
   'INVALID_STATUS_TRANSITION',
+  'ITEM_NOT_IN_ORDER',
 ] as const;
 
 export type ConflictReason = (typeof CONFLICT_REASONS)[number];
@@ -173,13 +236,26 @@ export interface MenuItem {
   priceCents: number;
 }
 
+/**
+ * What a ticket can be. It is not `OrderStatus`: the projection only ever learns about the events
+ * that reach the kitchen, so `OPEN` and `PAID` have no ticket state and never will.
+ */
+export const KITCHEN_TICKET_STATES = [
+  'SENT_TO_KITCHEN',
+  'PREPARING',
+  'READY',
+  'CANCELLED',
+] as const;
+
+export type KitchenTicketState = (typeof KITCHEN_TICKET_STATES)[number];
+
 /** One row of the kitchen projection (§12.1), as the kitchen screen reads it. */
 export interface KitchenTicket {
   orderId: string;
   restaurantId: string;
   tableNumber: string;
   items: OrderItemSnapshot[];
-  state: string;
+  state: KitchenTicketState;
   sourceEventVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -231,6 +307,13 @@ export const TERMINALS: readonly TerminalDescriptor[] = [
   { id: 'bar-1', restaurantId: 'demo-restaurant', label: 'BAR-1' },
   { id: 'pos-3', restaurantId: 'second-restaurant', label: 'POS-3' },
 ];
+
+/**
+ * The kitchen display is not one of the four seeded terminals — it belongs to a room, not to a
+ * till. Nothing has a foreign key to `terminals`, and a terminal id is only ever a label in
+ * `processed_mutations` and `conflict_log`, so a constant is enough (§5, and see ADR 012).
+ */
+export const KITCHEN_TERMINAL_ID = 'kitchen-display';
 
 export function findTerminal(terminalId: string): TerminalDescriptor | undefined {
   return TERMINALS.find((terminal) => terminal.id === terminalId);

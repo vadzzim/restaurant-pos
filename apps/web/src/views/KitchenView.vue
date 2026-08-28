@@ -1,22 +1,53 @@
 <script setup lang="ts">
-import type { DomainEvent } from '@pos/contracts';
-import { computed, onBeforeUnmount, onMounted } from 'vue';
+import type { DomainEvent, KitchenTicket, KitchenTicketState } from '@pos/contracts';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 
 import StateBadge from '../components/StateBadge.vue';
 import { useConnectionStore } from '../stores/connection';
-import { useKitchenStore } from '../stores/kitchen';
+import { nextCommand, useKitchenStore, type KitchenCommand } from '../stores/kitchen';
 
 const route = useRoute();
 const kitchen = useKitchenStore();
 const connection = useConnectionStore();
 
 const restaurantId = computed(() => String(route.query.restaurantId ?? 'demo-restaurant'));
+const busy = ref(false);
 
 const money = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 
 const ticketTotal = (items: { quantity: number; unitPriceCents: number }[]): number =>
   items.reduce((sum, item) => sum + item.quantity * item.unitPriceCents, 0);
+
+/** The rail, left to right. A cancelled ticket stays visible so the line sees it stop cooking. */
+const COLUMNS: { state: KitchenTicketState; title: string }[] = [
+  { state: 'SENT_TO_KITCHEN', title: 'New' },
+  { state: 'PREPARING', title: 'Preparing' },
+  { state: 'READY', title: 'Ready' },
+  { state: 'CANCELLED', title: 'Cancelled' },
+];
+
+const COMMAND_LABELS: Record<KitchenCommand, string> = {
+  preparing: 'Start preparing',
+  ready: 'Mark ready',
+};
+
+const inColumn = (state: KitchenTicketState): KitchenTicket[] =>
+  kitchen.tickets.filter((ticket) => ticket.state === state);
+
+async function run(action: () => Promise<unknown>): Promise<void> {
+  busy.value = true;
+  try {
+    await action();
+  } finally {
+    busy.value = false;
+  }
+}
+
+const send = (orderId: string, command: KitchenCommand): Promise<void> =>
+  run(() => kitchen.command(orderId, command));
+
+const retry = (orderId: string): Promise<void> => run(() => kitchen.retry(orderId));
 
 onMounted(async () => {
   await kitchen.load(restaurantId.value);
@@ -66,6 +97,13 @@ onBeforeUnmount(() => {
     </p>
 
     <p
+      v-if="kitchen.commandError"
+      class="rounded border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+    >
+      {{ kitchen.commandError }}
+    </p>
+
+    <p
       v-if="kitchen.lagging"
       class="rounded border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
     >
@@ -75,41 +113,98 @@ onBeforeUnmount(() => {
     </p>
 
     <p class="text-sm text-stone-600">
-      Read from the <code>kitchen_tickets</code> projection. <strong>Start Preparing</strong> and
-      <strong>Mark Ready</strong> arrive in M5, when they become real mutations with their own
-      <code>mutationId</code> and <code>baseVersion</code>.
+      Read from the <code>kitchen_tickets</code> projection. Both commands are real mutations with
+      their own <code>mutationId</code>, sent at the version the projection knows — so two displays
+      pressing the same button produce one success and one conflict (§21.10, ADR 012).
     </p>
 
-    <div>
-      <h2 class="mb-3 text-sm font-semibold tracking-wide text-stone-600 uppercase">
-        New ({{ kitchen.tickets.length }})
-      </h2>
+    <div class="grid gap-6 lg:grid-cols-4">
+      <div v-for="column in COLUMNS" :key="column.state">
+        <h2 class="mb-3 text-sm font-semibold tracking-wide text-stone-600 uppercase">
+          {{ column.title }} ({{ inColumn(column.state).length }})
+        </h2>
 
-      <p v-if="kitchen.loaded && kitchen.tickets.length === 0" class="text-stone-500">
-        Nothing sent to the kitchen yet.
-      </p>
-
-      <ul class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <li
-          v-for="ticket in kitchen.tickets"
-          :key="ticket.orderId"
-          class="rounded border border-stone-300 bg-white p-4"
+        <p
+          v-if="kitchen.loaded && inColumn(column.state).length === 0"
+          class="text-sm text-stone-400"
         >
-          <div class="mb-2 flex items-center justify-between">
-            <strong class="text-lg">Table {{ ticket.tableNumber }}</strong>
-            <StateBadge :label="`from v${ticket.sourceEventVersion}`" />
-          </div>
-          <ul class="mb-3 space-y-1 text-sm">
-            <li v-for="item in ticket.items" :key="item.productId">
-              {{ item.quantity }} × {{ item.name }}
-            </li>
-          </ul>
-          <p class="flex justify-between border-t border-stone-200 pt-2 text-sm font-semibold">
-            <span>{{ ticket.state }}</span>
-            <span>{{ money(ticketTotal(ticket.items)) }}</span>
-          </p>
-        </li>
-      </ul>
+          —
+        </p>
+
+        <ul class="space-y-4">
+          <li
+            v-for="ticket in inColumn(column.state)"
+            :key="ticket.orderId"
+            class="rounded border border-stone-300 bg-white p-4"
+            :class="{ 'opacity-60': ticket.state === 'CANCELLED' }"
+          >
+            <div class="mb-2 flex items-center justify-between">
+              <strong class="text-lg">Table {{ ticket.tableNumber }}</strong>
+              <StateBadge :label="`from v${ticket.sourceEventVersion}`" />
+            </div>
+
+            <ul class="mb-3 space-y-1 text-sm">
+              <li v-for="item in ticket.items" :key="item.productId">
+                {{ item.quantity }} × {{ item.name }}
+              </li>
+            </ul>
+
+            <p
+              class="flex justify-between border-t border-stone-200 pt-2 text-sm font-semibold"
+              :class="{ 'mb-3': nextCommand(ticket.state) !== undefined }"
+            >
+              <span>{{ ticket.state }}</span>
+              <span>{{ money(ticketTotal(ticket.items)) }}</span>
+            </p>
+
+            <p
+              v-if="kitchen.conflictByOrder.get(ticket.orderId)"
+              class="mb-3 rounded border border-rose-300 bg-rose-50 px-2 py-1 text-xs text-rose-900"
+            >
+              Refused: {{ kitchen.conflictByOrder.get(ticket.orderId) }}. The card above is what the
+              projection now says.
+            </p>
+
+            <div
+              v-if="kitchen.pendingByOrder.get(ticket.orderId)"
+              class="space-y-2 rounded border border-amber-300 bg-amber-50 px-2 py-2 text-xs text-amber-900"
+            >
+              <p>
+                No answer came back. Retrying reuses the same <code>mutationId</code>, so an already
+                applied command answers <code>ALREADY_APPLIED</code> instead of running twice.
+              </p>
+              <span class="flex gap-2">
+                <button
+                  type="button"
+                  class="rounded border border-amber-500 px-2 py-1 font-medium disabled:opacity-40"
+                  :disabled="busy"
+                  @click="retry(ticket.orderId)"
+                >
+                  Retry
+                </button>
+                <button
+                  type="button"
+                  class="rounded border border-amber-400 px-2 py-1 disabled:opacity-40"
+                  :disabled="busy"
+                  @click="kitchen.discard(ticket.orderId)"
+                >
+                  Discard
+                </button>
+              </span>
+            </div>
+
+            <button
+              v-else-if="nextCommand(ticket.state)"
+              type="button"
+              class="w-full rounded bg-[#17201c] px-3 py-2 font-medium text-white disabled:opacity-40"
+              :disabled="busy"
+              @click="send(ticket.orderId, nextCommand(ticket.state)!)"
+            >
+              {{ COMMAND_LABELS[nextCommand(ticket.state)!] }}
+            </button>
+          </li>
+        </ul>
+      </div>
     </div>
   </section>
 </template>

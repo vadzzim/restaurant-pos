@@ -1,9 +1,10 @@
+import { PAYMENT_METHODS } from '@pos/contracts';
 import type { Db } from '@pos/db';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { ApiError } from '../../../shared/errors.js';
-import { applyMutation } from '../application/mutation-handler.js';
+import { executeMutation } from './mutation-reply.js';
 
 const identity = {
   mutationId: z.uuid(),
@@ -11,9 +12,23 @@ const identity = {
   restaurantId: z.string().min(1),
 };
 
+/** Every mutation but creation targets an order that already has a version (§5, §6). */
+const existingOrder = { ...identity, baseVersion: z.number().int().min(1) };
+
+/** The four pure transitions take no payload at all; an absent body object is the same as `{}`. */
+const noPayload = z.object({}).default({});
+
+const productLine = {
+  productId: z.string().min(1),
+  quantity: z.number().int().positive(),
+};
+
 /**
  * Creation carries `baseVersion: 0` by definition (§5) and every other mutation targets an order
  * that already has a version, so the boundary can reject a nonsensical pair before the handler.
+ *
+ * One branch per `MutationType`. The discriminated union is what lets `toCommand` in the handler
+ * treat the payload as already validated against the type that selected it.
  */
 const mutationSchema = z.discriminatedUnion('type', [
   z.object({
@@ -23,19 +38,47 @@ const mutationSchema = z.discriminatedUnion('type', [
     payload: z.object({ tableNumber: z.string().min(1) }),
   }),
   z.object({
-    ...identity,
+    ...existingOrder,
     type: z.literal('ADD_ITEM'),
-    baseVersion: z.number().int().min(1),
-    payload: z.object({
-      productId: z.string().min(1),
-      quantity: z.number().int().positive(),
-    }),
+    payload: z.object(productLine),
   }),
   z.object({
-    ...identity,
+    ...existingOrder,
+    type: z.literal('REMOVE_ITEM'),
+    payload: z.object({ productId: z.string().min(1) }),
+  }),
+  z.object({
+    ...existingOrder,
+    type: z.literal('CHANGE_QUANTITY'),
+    // A quantity of zero is not a quantity change, it is a removal, and it has its own mutation
+    // type. Accepting it here would give the same intent two spellings and two audit trails.
+    payload: z.object(productLine),
+  }),
+  z.object({
+    ...existingOrder,
     type: z.literal('SEND_TO_KITCHEN'),
-    baseVersion: z.number().int().min(1),
-    payload: z.object({}).default({}),
+    payload: noPayload,
+  }),
+  z.object({
+    ...existingOrder,
+    type: z.literal('START_PREPARING'),
+    payload: noPayload,
+  }),
+  z.object({
+    ...existingOrder,
+    type: z.literal('MARK_READY'),
+    payload: noPayload,
+  }),
+  z.object({
+    ...existingOrder,
+    type: z.literal('PAY'),
+    // No amount: the server pays the order's own canonical total (§8, and see M05.md).
+    payload: z.object({ method: z.enum(PAYMENT_METHODS) }),
+  }),
+  z.object({
+    ...existingOrder,
+    type: z.literal('CANCEL'),
+    payload: z.object({ reason: z.string().min(1).max(200).optional() }).default({}),
   }),
 ]);
 
@@ -62,7 +105,7 @@ export function registerMutationRoutes(app: FastifyInstance, db: Db): void {
     }
 
     const input = body.data;
-    const outcome = await applyMutation(db, {
+    return executeMutation(db, request, reply, {
       orderId: params.data.orderId,
       mutationId: input.mutationId,
       terminalId: input.terminalId,
@@ -70,22 +113,6 @@ export function registerMutationRoutes(app: FastifyInstance, db: Db): void {
       baseVersion: input.baseVersion,
       type: input.type,
       payload: input.payload,
-      traceId: request.id,
     });
-
-    request.log.info(
-      {
-        traceId: request.id,
-        orderId: params.data.orderId,
-        mutationId: input.mutationId,
-        restaurantId: input.restaurantId,
-        terminalId: input.terminalId,
-        mutationType: input.type,
-        outcome: outcome.body.status,
-      },
-      'mutation processed',
-    );
-
-    return reply.status(outcome.httpStatus).send(outcome.body);
   });
 }

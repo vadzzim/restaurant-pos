@@ -308,3 +308,71 @@ The pattern across four rounds is worth naming: every round's findings were open
 round's fix, and three of the four were the same mistake — state that outlives the screen that
 created it, without an explicit owner. Round 3 gave the pending mutation an owner (its terminal).
 This one gives the read failure one (its order).
+
+## M5 — the remaining six commands and the whole of §8
+
+Nothing broke in a way that needed a fix; what this milestone produced instead is a set of rulings
+where the spec left two readings open. They are recorded here because each one is a question an
+interviewer can reasonably ask, and "it seemed right at the time" is not an answer.
+
+**§8's last bullet had to be rationed.** "A stale operation already reflected in server state:
+treat as idempotent where semantically safe" would, applied enthusiastically, swallow the matrix —
+almost every conflict can be argued into being already satisfied. It was granted to exactly two
+cases: removing a line that is not there, and cancelling a cancelled order. Both have the property
+that the operator's intent is met by the state as it stands. The tempting third, `CHANGE_QUANTITY`
+to the quantity already stored, was refused: §8 says concurrent quantity changes conflict and the
+server is canonical, the version guard is what decides that race, and a value comparison in front
+of it would be a second mechanism answering the same question. Note also that §8's `CANCELLED`
+reject list names seven mutation types and `CANCEL` is not one of them — the idempotent reading of
+a double cancel is the spec's, not an invention.
+
+**A repeated kitchen transition conflicts.** `MARK_READY` on an order that is already `READY`
+returns `INVALID_STATUS_TRANSITION` rather than `ALREADY_APPLIED`. "Out-of-order transitions
+conflict" is the rule, and a repeat is out of order. A genuine retry of the _same_ mutation never
+reaches the question: §9 answers it from `processed_mutations` first. This matters for the demo —
+two displays pressing Ready producing one success and one refusal is the headline of §21.10.
+
+**`PAY` carries no amount.** The payload is `{ method }` and `payments.amount_cents` is the order's
+own `total_cents`, read inside the mutation's transaction. A client-supplied amount would be a
+second source of truth for money and would need a mismatch rule; the version guard already refuses
+a payment built on a total that has moved, and does it earlier.
+
+**Which statuses accept `PAY` was already decided in M3** and was left alone: `ALLOWED_TRANSITIONS`
+permits `OPEN → PAID` and `READY → PAID`. Paying while the kitchen is cooking is
+`INVALID_STATUS_TRANSITION`. That is a real restaurant taking a real position — bar tab at the
+counter, table when the food is up — and M5 had no reason to reopen a table M3 wrote in full.
+
+**`CHANGE_QUANTITY` naming a line the order does not have is a conflict, not a 400.** Another
+terminal may have removed it a second ago. `ITEM_NOT_IN_ORDER` joined `ConflictReason`; a `400`
+would tell the operator their request was malformed when in fact the world moved.
+
+**`guardedVersionBump` lost its optional status parameter.** M3 had two SQL statements, one with a
+status and one without. `decide()` already returns the status the order should end in — the current
+one, for an item mutation — so writing it unconditionally collapses eight cases into one statement.
+
+**`SUPPORTED_MUTATION_TYPES` was deleted.** It existed to let the type system say that M3
+implemented three of the nine. After M5 it is `MutationType` with extra steps, and a second name
+for the same set invites a reader to hunt for the difference.
+
+### Two things that needed a decision the spec does not contain
+
+**The kitchen has no order version to command with.** It renders `kitchen_tickets`, whose only
+version is `source_event_version`. That is a real `baseVersion` — every event reaching the kitchen
+room carries the order version it was written at, and items are frozen after `SENT_TO_KITCHEN` — but
+it can lag, and then the command conflicts. Accepted as the designed outcome rather than engineered
+away; `docs/adr/012-kitchen-command-base-version.md` records the reasoning and the two rejected
+alternatives.
+
+**The projection needed a third result.** `advanceTicket` can find no ticket at all, because
+`CANCEL` is valid on an `OPEN` order the kitchen never saw. That is `recorded`, not `stale`: "the
+projection is behind" and "there was never a ticket" are debugged differently, so the update is
+followed by an existence check rather than collapsing both into one return value.
+
+### Verification
+
+`pnpm typecheck`, `pnpm lint` and `pnpm build` green. 155 tests pass against a real PostgreSQL:
+61 domain (including the §8 matrix — six statuses × eight non-creating mutation types, written out
+by hand rather than generated, so a rule that changes has to be changed twice), 37 api, 16 worker,
+41 web. §21.4, §21.9 and §21.10 are present and named by their spec number, alongside a lifecycle
+test that walks one order through all nine mutation types and asserts nine outbox rows at versions
+1…9.

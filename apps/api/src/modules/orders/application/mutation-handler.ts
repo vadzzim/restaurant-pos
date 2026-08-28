@@ -2,17 +2,24 @@ import { randomUUID } from 'node:crypto';
 
 import type {
   AddItemPayload,
+  CancelPayload,
+  ChangeQuantityPayload,
   ConflictReason,
   CreateOrderPayload,
   EventType,
+  MutationPayload,
   MutationResponse,
+  MutationType,
   OrderSnapshot,
-  SupportedMutationType,
+  OrderStatus,
+  PayPayload,
+  RemoveItemPayload,
 } from '@pos/contracts';
 import {
   conflictLog,
   orders,
   outboxEvents,
+  payments,
   processedMutations,
   products,
   type Db,
@@ -31,8 +38,8 @@ export interface MutationInput {
   terminalId: string;
   restaurantId: string;
   baseVersion: number;
-  type: SupportedMutationType;
-  payload: CreateOrderPayload | AddItemPayload | Record<string, never>;
+  type: MutationType;
+  payload: MutationPayload;
   traceId?: string | undefined;
 }
 
@@ -58,10 +65,16 @@ class ConflictSignal extends Error {
 /** The order already exists with identical content, so there is nothing to apply (§21.15). */
 class AlreadyAppliedSignal extends Error {}
 
-const EVENT_TYPE_BY_MUTATION: Readonly<Record<SupportedMutationType, EventType>> = {
+const EVENT_TYPE_BY_MUTATION: Readonly<Record<MutationType, EventType>> = {
   CREATE_ORDER: 'OrderCreated',
   ADD_ITEM: 'OrderItemAdded',
+  REMOVE_ITEM: 'OrderItemRemoved',
+  CHANGE_QUANTITY: 'OrderQuantityChanged',
   SEND_TO_KITCHEN: 'OrderSentToKitchen',
+  START_PREPARING: 'OrderPreparing',
+  MARK_READY: 'OrderReady',
+  PAY: 'OrderPaid',
+  CANCEL: 'OrderCancelled',
 };
 
 /**
@@ -155,7 +168,7 @@ async function runMutation(tx: Tx, input: MutationInput, hash: string): Promise<
     throw new AlreadyAppliedSignal();
   }
 
-  const order = await applyEffect(tx, input, command);
+  const order = await applyEffect(tx, input, command, decision.nextStatus, snapshot);
   const result: StoredResult = { order, serverVersion: order.version };
 
   await tx.insert(processedMutations).values({
@@ -180,10 +193,17 @@ async function runMutation(tx: Tx, input: MutationInput, hash: string): Promise<
   return { httpStatus: 200, body: { status: 'APPLIED', order, serverVersion: order.version } };
 }
 
+/**
+ * The write half of the mutation. Everything that is not a creation bumps the version under the
+ * §6 guard *first*, so a stale mutation rolls back before it can touch an item, a payment or a
+ * status, and only then applies whatever else it changes.
+ */
 async function applyEffect(
   tx: Tx,
   input: MutationInput,
   command: MutationCommand,
+  nextStatus: OrderStatus,
+  current: OrderSnapshot | undefined,
 ): Promise<OrderSnapshot> {
   if (command.type === 'CREATE_ORDER') {
     const inserted = await tx
@@ -213,37 +233,12 @@ async function applyEffect(
       }
       throw new ConflictSignal('ORDER_ALREADY_EXISTS');
     }
-  } else if (command.type === 'ADD_ITEM') {
-    const [product] = await tx
-      .select()
-      .from(products)
-      .where(eq(products.id, command.payload.productId))
-      .limit(1);
-
-    if (product === undefined) {
-      throw new ApiError(400, 'PRODUCT_NOT_FOUND', `Unknown product ${command.payload.productId}.`);
-    }
-
-    await guardedVersionBump(tx, input);
-
-    await tx.execute(sql`
-      insert into order_items (id, order_id, product_id, name, quantity, unit_price_cents)
-      values (${randomUUID()}, ${input.orderId}, ${product.id}, ${product.name},
-              ${command.payload.quantity}, ${product.priceCents})
-      on conflict (order_id, product_id) do update
-        set quantity = order_items.quantity + excluded.quantity, updated_at = now()
-    `);
-
-    await tx.execute(sql`
-      update orders
-      set total_cents = (
-        select coalesce(sum(quantity * unit_price_cents), 0)
-        from order_items where order_id = ${input.orderId}
-      )
-      where id = ${input.orderId}
-    `);
+  } else if (current === undefined) {
+    // runMutation refuses a missing order for every non-creating mutation before this point.
+    throw new Error(`Order ${input.orderId} disappeared between the read and the write.`);
   } else {
-    await guardedVersionBump(tx, input, 'SENT_TO_KITCHEN');
+    await guardedVersionBump(tx, input, nextStatus);
+    await applyChange(tx, input, command, current);
   }
 
   const order = await loadOrderSnapshot(tx, input.orderId);
@@ -254,25 +249,110 @@ async function applyEffect(
 }
 
 /**
+ * What each command changes beyond the status and the version. Four of the nine change nothing
+ * else — `SEND_TO_KITCHEN`, `START_PREPARING`, `MARK_READY` and `CANCEL` are pure transitions.
+ */
+async function applyChange(
+  tx: Tx,
+  input: MutationInput,
+  command: Exclude<MutationCommand, { type: 'CREATE_ORDER' }>,
+  current: OrderSnapshot,
+): Promise<void> {
+  switch (command.type) {
+    case 'ADD_ITEM': {
+      const [product] = await tx
+        .select()
+        .from(products)
+        .where(eq(products.id, command.payload.productId))
+        .limit(1);
+
+      if (product === undefined) {
+        throw new ApiError(
+          400,
+          'PRODUCT_NOT_FOUND',
+          `Unknown product ${command.payload.productId}.`,
+        );
+      }
+
+      await tx.execute(sql`
+        insert into order_items (id, order_id, product_id, name, quantity, unit_price_cents)
+        values (${randomUUID()}, ${input.orderId}, ${product.id}, ${product.name},
+                ${command.payload.quantity}, ${product.priceCents})
+        on conflict (order_id, product_id) do update
+          set quantity = order_items.quantity + excluded.quantity, updated_at = now()
+      `);
+
+      return recalculateTotal(tx, input.orderId);
+    }
+
+    case 'REMOVE_ITEM': {
+      await tx.execute(sql`
+        delete from order_items
+        where order_id = ${input.orderId} and product_id = ${command.payload.productId}
+      `);
+
+      return recalculateTotal(tx, input.orderId);
+    }
+
+    case 'CHANGE_QUANTITY': {
+      await tx.execute(sql`
+        update order_items set quantity = ${command.payload.quantity}, updated_at = now()
+        where order_id = ${input.orderId} and product_id = ${command.payload.productId}
+      `);
+
+      return recalculateTotal(tx, input.orderId);
+    }
+
+    case 'PAY': {
+      // The amount is the order's own total, read in this transaction and guarded by the version
+      // bump above. A client-supplied amount would be a second source of truth for money, and
+      // `payments.mutation_id` is unique so a repeat cannot insert a second row (§21.9).
+      await tx.insert(payments).values({
+        id: randomUUID(),
+        orderId: input.orderId,
+        mutationId: input.mutationId,
+        amountCents: current.totalCents,
+        method: command.payload.method,
+      });
+      return;
+    }
+
+    default:
+      return;
+  }
+}
+
+/**
+ * The total is derived from the lines, never accumulated. Money is integer cents, and summing in
+ * SQL from the rows that exist is the one arithmetic that cannot drift from them.
+ */
+async function recalculateTotal(tx: Tx, orderId: string): Promise<void> {
+  await tx.execute(sql`
+    update orders
+    set total_cents = (
+      select coalesce(sum(quantity * unit_price_cents), 0)
+      from order_items where order_id = ${orderId}
+    )
+    where id = ${orderId}
+  `);
+}
+
+/**
  * §6: the version comparison lives in the UPDATE itself. The earlier read is not a guard — two
  * transactions can both read version 5 and only one of them can bump it.
  */
 async function guardedVersionBump(
   tx: Tx,
   input: MutationInput,
-  nextStatus?: 'SENT_TO_KITCHEN',
+  nextStatus: OrderStatus,
 ): Promise<void> {
-  const result =
-    nextStatus === undefined
-      ? await tx.execute(sql`
-          update orders set version = version + 1, updated_at = now()
-          where id = ${input.orderId} and version = ${input.baseVersion}
-        `)
-      : await tx.execute(sql`
-          update orders
-          set version = version + 1, status = ${nextStatus}::order_status, updated_at = now()
-          where id = ${input.orderId} and version = ${input.baseVersion}
-        `);
+  // `decide()` returns the status the order should end in, which for an item mutation is the one
+  // it already has. Writing it unconditionally keeps one statement for all eight cases.
+  const result = await tx.execute(sql`
+    update orders
+    set version = version + 1, status = ${nextStatus}::order_status, updated_at = now()
+    where id = ${input.orderId} and version = ${input.baseVersion}
+  `);
 
   if ((result.rowCount ?? 0) === 0) {
     throw new ConflictSignal('ORDER_VERSION_CONFLICT');
@@ -324,8 +404,10 @@ async function conflictOutcome(
 }
 
 /**
- * The same order id created again with identical content: no effect, but the mutation is still
- * recorded so its own retries are cheap and consistent.
+ * A mutation whose intent is already satisfied by server state (§8): the same order created again
+ * with identical content, a line removed that is not there, an order cancelled twice. Nothing is
+ * applied and the version does not move, but the mutation is still recorded so its own retries are
+ * cheap and consistent, and the caller gets the canonical order to rebase on.
  */
 async function alreadyAppliedOutcome(db: Db, input: MutationInput): Promise<MutationOutcome> {
   const order = await loadOrderSnapshot(db, input.orderId);
@@ -392,47 +474,101 @@ function toAppliedOutcome(stored: StoredResult): MutationOutcome {
   };
 }
 
+/**
+ * The boundary has already validated the payload against the branch its `type` selects (zod, in
+ * `mutation-routes.ts`), so this is the one place the two are re-joined into the domain's tagged
+ * union. The casts are that validation being spent, not an assumption being made.
+ */
 function toCommand(input: MutationInput): MutationCommand {
   switch (input.type) {
     case 'CREATE_ORDER':
       return { type: 'CREATE_ORDER', payload: input.payload as CreateOrderPayload };
     case 'ADD_ITEM':
       return { type: 'ADD_ITEM', payload: input.payload as AddItemPayload };
-    default:
+    case 'REMOVE_ITEM':
+      return { type: 'REMOVE_ITEM', payload: input.payload as RemoveItemPayload };
+    case 'CHANGE_QUANTITY':
+      return { type: 'CHANGE_QUANTITY', payload: input.payload as ChangeQuantityPayload };
+    case 'SEND_TO_KITCHEN':
       return { type: 'SEND_TO_KITCHEN', payload: {} };
+    case 'START_PREPARING':
+      return { type: 'START_PREPARING', payload: {} };
+    case 'MARK_READY':
+      return { type: 'MARK_READY', payload: {} };
+    case 'PAY':
+      return { type: 'PAY', payload: input.payload as PayPayload };
+    case 'CANCEL':
+      return { type: 'CANCEL', payload: input.payload as CancelPayload };
   }
 }
 
+/**
+ * The §11 payload of the event this mutation produced, built from the order as it now stands. A
+ * consumer still treats an event as a hint and reads canonical state itself (§12, §13); the
+ * payload exists so the kitchen projection and `/debug` have something to show without a join.
+ */
 function eventPayload(
   input: MutationInput,
   command: MutationCommand,
   order: OrderSnapshot,
 ): Record<string, unknown> {
-  if (command.type === 'CREATE_ORDER') {
-    return {
-      orderId: order.id,
-      tableNumber: order.tableNumber,
-      status: order.status,
-      totalCents: order.totalCents,
-    };
-  }
+  switch (command.type) {
+    case 'CREATE_ORDER':
+      return {
+        orderId: order.id,
+        tableNumber: order.tableNumber,
+        status: order.status,
+        totalCents: order.totalCents,
+      };
 
-  if (command.type === 'ADD_ITEM') {
-    const item = order.items.find((candidate) => candidate.productId === command.payload.productId);
-    return {
-      orderId: order.id,
-      productId: command.payload.productId,
-      name: item?.name ?? command.payload.productId,
-      quantity: command.payload.quantity,
-      unitPriceCents: item?.unitPriceCents ?? 0,
-      totalCents: order.totalCents,
-    };
-  }
+    case 'ADD_ITEM': {
+      const item = order.items.find((line) => line.productId === command.payload.productId);
+      return {
+        orderId: order.id,
+        productId: command.payload.productId,
+        name: item?.name ?? command.payload.productId,
+        quantity: command.payload.quantity,
+        unitPriceCents: item?.unitPriceCents ?? 0,
+        totalCents: order.totalCents,
+      };
+    }
 
-  return {
-    orderId: order.id,
-    tableNumber: order.tableNumber,
-    items: order.items,
-    totalCents: order.totalCents,
-  };
+    case 'REMOVE_ITEM':
+      return {
+        orderId: order.id,
+        productId: command.payload.productId,
+        totalCents: order.totalCents,
+      };
+
+    case 'CHANGE_QUANTITY':
+      return {
+        orderId: order.id,
+        productId: command.payload.productId,
+        quantity: command.payload.quantity,
+        totalCents: order.totalCents,
+      };
+
+    case 'SEND_TO_KITCHEN':
+      return {
+        orderId: order.id,
+        tableNumber: order.tableNumber,
+        items: order.items,
+        totalCents: order.totalCents,
+      };
+
+    case 'PAY':
+      return {
+        orderId: order.id,
+        amountCents: order.totalCents,
+        method: command.payload.method,
+      };
+
+    // START_PREPARING, MARK_READY and CANCEL are pure transitions: the new status is the news.
+    default:
+      return {
+        orderId: order.id,
+        tableNumber: order.tableNumber,
+        status: order.status,
+      };
+  }
 }

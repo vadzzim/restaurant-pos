@@ -1,11 +1,16 @@
 import type {
   AddItemPayload,
+  CancelPayload,
+  ChangeQuantityPayload,
   ConflictReason,
   CreateOrderPayload,
   MutationRequest,
   MutationResponse,
+  MutationType,
   OrderSnapshot,
-  SupportedMutationType,
+  PayPayload,
+  PaymentMethod,
+  RemoveItemPayload,
 } from '@pos/contracts';
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
@@ -30,7 +35,7 @@ export interface MutationIdentity {
   mutationId: string;
   terminalId: string;
   restaurantId: string;
-  type: SupportedMutationType;
+  type: MutationType;
   baseVersion: number;
   payload: MutationRequest['payload'];
 }
@@ -60,7 +65,7 @@ export function acceptsSnapshot(held: OrderSnapshot | undefined, incoming: Order
  */
 export function sameMutation(
   pending: MutationIdentity | undefined,
-  type: SupportedMutationType,
+  type: MutationType,
   orderId: string | undefined,
   baseVersion: number,
   payload: MutationRequest['payload'],
@@ -244,7 +249,7 @@ export const useOrderStore = defineStore('order', () => {
    * over an operation that in fact succeeded — technically safe, and a lie to the operator.
    */
   function identityFor(
-    type: SupportedMutationType,
+    type: MutationType,
     orderId: string,
     terminalId: string,
     restaurantId: string,
@@ -316,6 +321,57 @@ export const useOrderStore = defineStore('order', () => {
     );
   }
 
+  async function removeItem(
+    terminalId: string,
+    restaurantId: string,
+    productId: string,
+  ): Promise<void> {
+    const current = order.value;
+    if (current === undefined) {
+      return;
+    }
+
+    const payload: RemoveItemPayload = { productId };
+    await send(
+      identityFor('REMOVE_ITEM', current.id, terminalId, restaurantId, current.version, payload),
+    );
+  }
+
+  /**
+   * The absolute quantity, not a delta. A delta sent twice after a lost response would apply
+   * twice if the retry were ever given a fresh `mutationId`; an absolute value cannot, and the
+   * operator's intent — "make it three" — is what the screen actually knows.
+   */
+  async function changeQuantity(
+    terminalId: string,
+    restaurantId: string,
+    productId: string,
+    quantity: number,
+  ): Promise<void> {
+    const current = order.value;
+    if (current === undefined) {
+      return;
+    }
+
+    // Zero is a removal and has its own mutation type; the API refuses it on this one.
+    if (quantity < 1) {
+      await removeItem(terminalId, restaurantId, productId);
+      return;
+    }
+
+    const payload: ChangeQuantityPayload = { productId, quantity };
+    await send(
+      identityFor(
+        'CHANGE_QUANTITY',
+        current.id,
+        terminalId,
+        restaurantId,
+        current.version,
+        payload,
+      ),
+    );
+  }
+
   async function sendToKitchen(terminalId: string, restaurantId: string): Promise<void> {
     const current = order.value;
     if (current === undefined) {
@@ -324,6 +380,33 @@ export const useOrderStore = defineStore('order', () => {
 
     await send(
       identityFor('SEND_TO_KITCHEN', current.id, terminalId, restaurantId, current.version, {}),
+    );
+  }
+
+  /** No amount is sent: the server pays the order's own canonical total (§8). */
+  async function pay(
+    terminalId: string,
+    restaurantId: string,
+    method: PaymentMethod,
+  ): Promise<void> {
+    const current = order.value;
+    if (current === undefined) {
+      return;
+    }
+
+    const payload: PayPayload = { method };
+    await send(identityFor('PAY', current.id, terminalId, restaurantId, current.version, payload));
+  }
+
+  async function cancel(terminalId: string, restaurantId: string, reason?: string): Promise<void> {
+    const current = order.value;
+    if (current === undefined) {
+      return;
+    }
+
+    const payload: CancelPayload = reason === undefined ? {} : { reason };
+    await send(
+      identityFor('CANCEL', current.id, terminalId, restaurantId, current.version, payload),
     );
   }
 
@@ -372,7 +455,11 @@ export const useOrderStore = defineStore('order', () => {
     refetch,
     createOrder,
     addItem,
+    removeItem,
+    changeQuantity,
     sendToKitchen,
+    pay,
+    cancel,
     retryPending,
     discardPending,
     clear,

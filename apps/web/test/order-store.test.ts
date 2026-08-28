@@ -1,4 +1,4 @@
-import type { OrderSnapshot } from '@pos/contracts';
+import type { KitchenTicket, OrderSnapshot } from '@pos/contracts';
 import { describe, expect, it } from 'vitest';
 
 import { ticketsSatisfy } from '../src/stores/kitchen';
@@ -93,7 +93,7 @@ describe('sameMutation (retrying with the same identity)', () => {
 });
 
 describe('ticketsSatisfy (has the projection caught up?)', () => {
-  const ticket = (orderId: string, sourceEventVersion: number) => ({
+  const ticket = (orderId: string, sourceEventVersion: number): KitchenTicket => ({
     orderId,
     restaurantId: 'demo-restaurant',
     tableNumber: '12',

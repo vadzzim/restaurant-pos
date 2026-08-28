@@ -2,6 +2,7 @@ import type { Db } from '@pos/db';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { registerConfigRoutes } from './modules/config/api/config-routes.js';
+import { registerKitchenCommandRoutes } from './modules/kitchen/api/kitchen-command-routes.js';
 import { registerKitchenReadRoutes } from './modules/kitchen/api/kitchen-read-routes.js';
 import { registerMenuRoutes } from './modules/menu/api/menu-routes.js';
 import { registerMutationRoutes } from './modules/orders/api/mutation-routes.js';
@@ -41,6 +42,7 @@ export function buildApp({ db, logLevel = 'info' }: BuildAppOptions): FastifyIns
   registerOrderReadRoutes(app, db);
   registerKitchenReadRoutes(app, db);
   registerMutationRoutes(app, db);
+  registerKitchenCommandRoutes(app, db);
 
   return app;
 }

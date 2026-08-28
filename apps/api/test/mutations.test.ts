@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
-import { conflictLog, orderItems, orders, outboxEvents } from '@pos/db';
+import {
+  conflictLog,
+  orderItems,
+  orders,
+  outboxEvents,
+  payments,
+  processedMutations,
+} from '@pos/db';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 
@@ -439,5 +446,289 @@ describe('races the review found', () => {
     const stored = await db().select().from(orders).where(eq(orders.id, orderId));
     expect(stored).toHaveLength(1);
     expect(stored[0]?.restaurantId).toBe(winner);
+  });
+});
+
+/** Walk an order forward one mutation at a time, asserting the version the server reports. */
+async function step(
+  orderId: string,
+  type: MutationInput['type'],
+  baseVersion: number,
+  payload: MutationInput['payload'] = {},
+): Promise<MutationOutcome> {
+  return applyMutation(db(), mutation({ orderId, type, baseVersion, payload }));
+}
+
+function appliedOrder(outcome: MutationOutcome) {
+  if (outcome.body.status !== 'APPLIED') {
+    throw new Error(`expected APPLIED, got ${outcome.body.status}`);
+  }
+  return outcome.body.order;
+}
+
+describe('§21.4 cancelled-order conflict', () => {
+  it('answers ORDER_CANCELLED rather than a version conflict, though both are true', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'ADD_ITEM', 1, { productId: 'burger', quantity: 1 });
+    await step(orderId, 'ADD_ITEM', 2, { productId: 'cola', quantity: 1 });
+    await step(orderId, 'ADD_ITEM', 3, { productId: 'pizza', quantity: 1 });
+    await step(orderId, 'ADD_ITEM', 4, { productId: 'coffee', quantity: 1 });
+    const cancelled = appliedOrder(await step(orderId, 'CANCEL', 5, {}));
+    expect(cancelled).toMatchObject({ status: 'CANCELLED', version: 6 });
+
+    // The client is still at v5 and knows nothing about the cancellation.
+    const stale = await step(orderId, 'ADD_ITEM', 5, { productId: 'french-fries', quantity: 1 });
+
+    expect(stale.httpStatus).toBe(409);
+    expect(stale.body).toMatchObject({
+      status: 'CONFLICT',
+      // Not ORDER_VERSION_CONFLICT: rebasing onto v6 would only be refused again, and for a
+      // reason the operator could have been told the first time.
+      reason: 'ORDER_CANCELLED',
+      clientBaseVersion: 5,
+      serverVersion: 6,
+    });
+
+    expect(await itemRows(orderId)).toHaveLength(4);
+    expect(await outboxRows(orderId)).toHaveLength(6);
+
+    const logged = await db().select().from(conflictLog).where(eq(conflictLog.orderId, orderId));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({ serverStatus: 'CANCELLED', clientBaseVersion: 5 });
+  });
+});
+
+describe('§21.9 payment idempotency', () => {
+  it('creates one payment for a mutation submitted twice', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'ADD_ITEM', 1, { productId: 'burger', quantity: 2 });
+
+    const pay = mutation({ orderId, type: 'PAY', baseVersion: 2, payload: { method: 'CARD' } });
+    const first = await applyMutation(db(), pay);
+    const second = await applyMutation(db(), pay);
+
+    expect(first.body.status).toBe('APPLIED');
+    expect(second.body.status).toBe('ALREADY_APPLIED');
+    expect(second.body).toMatchObject({ serverVersion: 3 });
+
+    const rows = await db().select().from(payments).where(eq(payments.orderId, orderId));
+    expect(rows).toHaveLength(1);
+    // The amount is the order's own total, never a number the client sent.
+    expect(rows[0]).toMatchObject({
+      amountCents: 2400,
+      method: 'CARD',
+      mutationId: pay.mutationId,
+    });
+
+    const events = await outboxRows(orderId);
+    expect(events.filter((event) => event.eventType === 'OrderPaid')).toHaveLength(1);
+  });
+
+  it('refuses a second payment arriving as a different mutation', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'ADD_ITEM', 1, { productId: 'cola', quantity: 1 });
+    await step(orderId, 'PAY', 2, { method: 'CASH' });
+
+    const again = await step(orderId, 'PAY', 3, { method: 'CASH' });
+
+    expect(again.httpStatus).toBe(409);
+    expect(again.body).toMatchObject({ status: 'CONFLICT', reason: 'ORDER_ALREADY_PAID' });
+    expect(await db().select().from(payments).where(eq(payments.orderId, orderId))).toHaveLength(1);
+  });
+});
+
+describe('§21.10 kitchen transition race', () => {
+  it('lets one of two MARK_READY mutations at the same baseVersion win', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'ADD_ITEM', 1, { productId: 'burger', quantity: 1 });
+    await step(orderId, 'SEND_TO_KITCHEN', 2);
+    await step(orderId, 'START_PREPARING', 3);
+
+    // Two kitchen displays, both looking at the same ticket, both pressing Ready.
+    const [first, second] = await Promise.all([
+      applyMutation(db(), mutation({ orderId, type: 'MARK_READY', baseVersion: 4 })),
+      applyMutation(db(), mutation({ orderId, type: 'MARK_READY', baseVersion: 4 })),
+    ]);
+
+    expect([first.body.status, second.body.status].sort()).toEqual(['APPLIED', 'CONFLICT']);
+
+    const [order] = await db().select().from(orders).where(eq(orders.id, orderId));
+    expect(order).toMatchObject({ status: 'READY', version: 5 });
+
+    const events = await outboxRows(orderId);
+    expect(events.filter((event) => event.eventType === 'OrderReady')).toHaveLength(1);
+  });
+
+  it('refuses a kitchen transition taken out of order', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'ADD_ITEM', 1, { productId: 'burger', quantity: 1 });
+    await step(orderId, 'SEND_TO_KITCHEN', 2);
+
+    const early = await step(orderId, 'MARK_READY', 3);
+
+    expect(early.httpStatus).toBe(409);
+    expect(early.body).toMatchObject({
+      status: 'CONFLICT',
+      reason: 'INVALID_STATUS_TRANSITION',
+      serverVersion: 3,
+    });
+  });
+});
+
+describe('the whole order lifecycle', () => {
+  it('walks create -> add -> change -> remove -> kitchen -> ready -> paid', async () => {
+    const orderId = randomUUID();
+    expect(appliedOrder(await createOrder(orderId))).toMatchObject({
+      status: 'OPEN',
+      version: 1,
+      totalCents: 0,
+    });
+
+    expect(
+      appliedOrder(await step(orderId, 'ADD_ITEM', 1, { productId: 'burger', quantity: 2 })),
+    ).toMatchObject({ version: 2, totalCents: 2400 });
+
+    expect(
+      appliedOrder(await step(orderId, 'ADD_ITEM', 2, { productId: 'cola', quantity: 1 })),
+    ).toMatchObject({ version: 3, totalCents: 2700 });
+
+    // An absolute quantity, not a delta: two burgers become one.
+    expect(
+      appliedOrder(await step(orderId, 'CHANGE_QUANTITY', 3, { productId: 'burger', quantity: 1 })),
+    ).toMatchObject({ version: 4, totalCents: 1500 });
+
+    expect(
+      appliedOrder(await step(orderId, 'REMOVE_ITEM', 4, { productId: 'cola' })),
+    ).toMatchObject({ version: 5, totalCents: 1200 });
+    expect(await itemRows(orderId)).toHaveLength(1);
+
+    expect(appliedOrder(await step(orderId, 'SEND_TO_KITCHEN', 5))).toMatchObject({
+      status: 'SENT_TO_KITCHEN',
+      version: 6,
+    });
+    expect(appliedOrder(await step(orderId, 'START_PREPARING', 6))).toMatchObject({
+      status: 'PREPARING',
+      version: 7,
+    });
+    expect(appliedOrder(await step(orderId, 'MARK_READY', 7))).toMatchObject({
+      status: 'READY',
+      version: 8,
+    });
+    expect(appliedOrder(await step(orderId, 'PAY', 8, { method: 'CASH' }))).toMatchObject({
+      status: 'PAID',
+      version: 9,
+      totalCents: 1200,
+    });
+
+    const events = await outboxRows(orderId);
+    expect(events.map((event) => event.eventVersion).sort((a, b) => a - b)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9,
+    ]);
+    expect(new Set(events.map((event) => event.eventType))).toEqual(
+      new Set([
+        'OrderCreated',
+        'OrderItemAdded',
+        'OrderQuantityChanged',
+        'OrderItemRemoved',
+        'OrderSentToKitchen',
+        'OrderPreparing',
+        'OrderReady',
+        'OrderPaid',
+      ]),
+    );
+  });
+
+  it('treats removing a line that is already gone as already applied, without a new version', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'ADD_ITEM', 1, { productId: 'burger', quantity: 1 });
+    await step(orderId, 'REMOVE_ITEM', 2, { productId: 'burger' });
+
+    const again = await step(orderId, 'REMOVE_ITEM', 3, { productId: 'burger' });
+
+    expect(again.httpStatus).toBe(200);
+    expect(again.body).toMatchObject({ status: 'ALREADY_APPLIED', serverVersion: 3 });
+    expect(await outboxRows(orderId)).toHaveLength(3);
+  });
+
+  it('cancels an order twice without moving it', async () => {
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'CANCEL', 1, {});
+
+    const again = await step(orderId, 'CANCEL', 2, {});
+
+    expect(again.body).toMatchObject({ status: 'ALREADY_APPLIED', serverVersion: 2 });
+    expect(await outboxRows(orderId)).toHaveLength(2);
+  });
+});
+
+describe('the kitchen command endpoints (§17)', () => {
+  it('constructs the same mutations the canonical write path would', async () => {
+    const app = testApp();
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'ADD_ITEM', 1, { productId: 'burger', quantity: 1 });
+    await step(orderId, 'SEND_TO_KITCHEN', 2);
+
+    const preparing = await app.inject({
+      method: 'POST',
+      url: `/api/kitchen/orders/${orderId}/preparing`,
+      payload: { mutationId: randomUUID(), restaurantId: DEMO_RESTAURANT, baseVersion: 3 },
+    });
+
+    expect(preparing.statusCode).toBe(200);
+    expect(preparing.json()).toMatchObject({
+      status: 'APPLIED',
+      serverVersion: 4,
+      order: { status: 'PREPARING' },
+    });
+
+    const ready = await app.inject({
+      method: 'POST',
+      url: `/api/kitchen/orders/${orderId}/ready`,
+      payload: {
+        mutationId: randomUUID(),
+        restaurantId: DEMO_RESTAURANT,
+        baseVersion: 4,
+        terminalId: 'kds-2',
+      },
+    });
+
+    expect(ready.json()).toMatchObject({ status: 'APPLIED', order: { status: 'READY' } });
+
+    // The default terminal id is what the adapter supplies when a display does not name itself.
+    const processed = await db()
+      .select()
+      .from(processedMutations)
+      .where(eq(processedMutations.orderId, orderId));
+    expect(processed.map((row) => row.terminalId)).toContain('kitchen-display');
+    expect(processed.map((row) => row.terminalId)).toContain('kds-2');
+
+    await app.close();
+  });
+
+  it('refuses a command carrying another restaurant, like any other mutation', async () => {
+    const app = testApp();
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    await step(orderId, 'ADD_ITEM', 1, { productId: 'burger', quantity: 1 });
+    await step(orderId, 'SEND_TO_KITCHEN', 2);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/kitchen/orders/${orderId}/preparing`,
+      payload: { mutationId: randomUUID(), restaurantId: SECOND_RESTAURANT, baseVersion: 3 },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ reason: 'CROSS_TENANT_MUTATION' });
+
+    await app.close();
   });
 });

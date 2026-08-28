@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { PaymentMethod } from '@pos/contracts';
 import { findTerminal } from '@pos/contracts';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
@@ -20,7 +21,21 @@ const busy = ref(false);
 
 const money = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 
-const canOrder = computed(() => orders.order?.status === 'OPEN' && !orders.blocked);
+const status = computed(() => orders.order?.status);
+
+/** Items may only change while the order is OPEN — after that the kitchen is cooking it (§8). */
+const canOrder = computed(() => status.value === 'OPEN' && !orders.blocked);
+/** `ALLOWED_TRANSITIONS` permits PAID from OPEN and from READY, and from nowhere else. */
+const canPay = computed(
+  () => (status.value === 'OPEN' || status.value === 'READY') && !orders.blocked,
+);
+const canCancel = computed(
+  () =>
+    status.value !== undefined &&
+    status.value !== 'PAID' &&
+    status.value !== 'CANCELLED' &&
+    !orders.blocked,
+);
 
 async function start(): Promise<void> {
   const restaurantId = terminal.value?.restaurantId;
@@ -76,11 +91,43 @@ const addItem = (productId: string): Promise<void> =>
     }
   });
 
+const removeItem = (productId: string): Promise<void> =>
+  run(async () => {
+    const restaurantId = terminal.value?.restaurantId;
+    if (restaurantId !== undefined) {
+      await orders.removeItem(terminalId.value, restaurantId, productId);
+    }
+  });
+
+const changeQuantity = (productId: string, quantity: number): Promise<void> =>
+  run(async () => {
+    const restaurantId = terminal.value?.restaurantId;
+    if (restaurantId !== undefined) {
+      await orders.changeQuantity(terminalId.value, restaurantId, productId, quantity);
+    }
+  });
+
 const sendToKitchen = (): Promise<void> =>
   run(async () => {
     const restaurantId = terminal.value?.restaurantId;
     if (restaurantId !== undefined) {
       await orders.sendToKitchen(terminalId.value, restaurantId);
+    }
+  });
+
+const pay = (method: PaymentMethod): Promise<void> =>
+  run(async () => {
+    const restaurantId = terminal.value?.restaurantId;
+    if (restaurantId !== undefined) {
+      await orders.pay(terminalId.value, restaurantId, method);
+    }
+  });
+
+const cancel = (): Promise<void> =>
+  run(async () => {
+    const restaurantId = terminal.value?.restaurantId;
+    if (restaurantId !== undefined) {
+      await orders.cancel(terminalId.value, restaurantId, 'Cancelled at the till');
     }
   });
 
@@ -233,10 +280,39 @@ watch(terminalId, async () => {
             <li
               v-for="item in orders.order.items"
               :key="item.productId"
-              class="flex justify-between py-2"
+              class="flex items-center justify-between gap-3 py-2"
             >
-              <span>{{ item.quantity }} × {{ item.name }}</span>
-              <span>{{ money(item.quantity * item.unitPriceCents) }}</span>
+              <span class="flex-1">{{ item.name }}</span>
+              <span class="flex items-center gap-1">
+                <button
+                  type="button"
+                  class="h-8 w-8 rounded border border-stone-300 leading-none disabled:opacity-30"
+                  :disabled="!canOrder || busy"
+                  :aria-label="`One fewer ${item.name}`"
+                  @click="changeQuantity(item.productId, item.quantity - 1)"
+                >
+                  −
+                </button>
+                <span class="w-8 text-center tabular-nums">{{ item.quantity }}</span>
+                <button
+                  type="button"
+                  class="h-8 w-8 rounded border border-stone-300 leading-none disabled:opacity-30"
+                  :disabled="!canOrder || busy"
+                  :aria-label="`One more ${item.name}`"
+                  @click="changeQuantity(item.productId, item.quantity + 1)"
+                >
+                  +
+                </button>
+              </span>
+              <span class="w-20 text-right">{{ money(item.quantity * item.unitPriceCents) }}</span>
+              <button
+                type="button"
+                class="rounded border border-stone-300 px-2 py-1 text-sm disabled:opacity-30"
+                :disabled="!canOrder || busy"
+                @click="removeItem(item.productId)"
+              >
+                Remove
+              </button>
             </li>
           </ul>
           <p v-else class="text-sm text-stone-500">No items yet.</p>
@@ -246,7 +322,7 @@ watch(terminalId, async () => {
             <span>{{ money(orders.order.totalCents) }}</span>
           </p>
 
-          <div class="flex gap-3">
+          <div class="flex flex-wrap gap-3">
             <button
               type="button"
               class="rounded bg-[#17201c] px-4 py-2 font-medium text-white disabled:opacity-40"
@@ -257,6 +333,30 @@ watch(terminalId, async () => {
             </button>
             <button
               type="button"
+              class="rounded bg-emerald-700 px-4 py-2 font-medium text-white disabled:opacity-40"
+              :disabled="!canPay || busy"
+              @click="pay('CARD')"
+            >
+              Pay card
+            </button>
+            <button
+              type="button"
+              class="rounded bg-emerald-700 px-4 py-2 font-medium text-white disabled:opacity-40"
+              :disabled="!canPay || busy"
+              @click="pay('CASH')"
+            >
+              Pay cash
+            </button>
+            <button
+              type="button"
+              class="rounded border border-rose-400 px-4 py-2 text-rose-800 disabled:opacity-40"
+              :disabled="!canCancel || busy"
+              @click="cancel"
+            >
+              Cancel order
+            </button>
+            <button
+              type="button"
               class="rounded border border-stone-300 px-4 py-2 disabled:opacity-40"
               :disabled="busy || orders.blocked"
               @click="orders.clear()"
@@ -264,6 +364,12 @@ watch(terminalId, async () => {
               New order
             </button>
           </div>
+
+          <p class="text-xs text-stone-500">
+            Payment is allowed from <code>OPEN</code> and from <code>READY</code>, never while the
+            kitchen is cooking; items are frozen once the order is sent. Every button above is a
+            mutation with its own <code>mutationId</code> and the version shown in the header.
+          </p>
         </div>
       </div>
     </div>
