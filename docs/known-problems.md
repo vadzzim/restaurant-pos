@@ -15,6 +15,24 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M18, P2]** `pnpm test:e2e` reuses an API already answering on `:3000` rather than starting one,
+  so a local run can report PASS for API code it did not build. The bundle is always this run's
+  (`preview` serves the `dist/` it just built) and the worker is always started fresh, so the gap is
+  the API process alone; CI has nothing listening and is unaffected. Proved by editing a route
+  handler, leaving the old API up, and watching the run pass.
+- **[M18, P3]** `test:e2e` kills its worker with `child.kill()`, which on Windows is a terminate: no
+  shutdown runs and no `LeaveGroup` is sent, so the `kitchen` group holds a dead member until its
+  session expires and the _next_ run waits out the rebalance. Absorbed rather than fixed — the wait
+  moved into `GROUP_JOIN_TIMEOUT_MS`, out of the assertion budget — because a graceful stop needs a
+  shutdown channel the worker does not have (stdin, or a control endpoint). Harmless on Linux and in
+  CI, where `kill` is a real SIGTERM. Proved by the escalating `duration` on `Consumer has joined the
+group` across consecutive runs in `.verify-output/e2e.log`.
+- **[M18, P3]** `API_READY_URL` in `verify-e2e.mjs` hard-codes `localhost:3000`, the same default
+  `vite.config.ts` hard-codes for its proxy. An `API_PORT` set to anything else makes the probe
+  answer about the wrong process. Proved by putting `API_PORT=3100` in `.env` and running it.
+- **[M18, P3]** The spec asserts no money. Both totals are on screen and ignored, so a server that
+  accepted every mutation and computed `totalCents` wrongly would pass. Proved by changing a seeded
+  price and asserting the order total and the ticket total against it.
 - **[M17, P2]** `activate` deletes the previous build's cache while a page running the old bundle is
   still open. Harmless today because `router.ts` imports all four views statically, so there are no
   lazily fetched chunks — but the day code splitting is introduced, that page can ask for a chunk no

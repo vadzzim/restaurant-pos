@@ -1954,3 +1954,66 @@ menu's refresh was pushed _after_ the snapshot and never awaited. The first vers
 rejection test therefore passed with the `catch` removed. `dispatch` now drains in waves until no
 new promise appears, and both halves of the fix were verified by flipping them: without `waitUntil`
 one test fails, with `waitUntil` but no `catch` two do. 251 web tests.
+
+## M18 — Playwright E2E
+
+§21's last line, and the one test that crosses every process. It went in without a fight; the
+interesting part is what the _harness_ had to learn, which is that a test needing running
+applications is a different problem from a test needing running infrastructure.
+
+**`lib/compose-run.mjs` grew `startService`, `waitForOutput`, `waitForHttp` and `crashedServices`.**
+The two existing runners only ever run steps that finish. This one needs an API and a worker that
+do not, so the runner now owns long-lived children and stops them in `finish()` before the Compose
+teardown — including under `--keep`, which is about containers a developer wants to poke at and was
+never about leaving an API holding `:3000`. They are spawned **without** `shell: true`, unlike
+`run`: a shell wrapper on Windows means `kill` reaps the wrapper and leaves the real process on the
+port. And `stop()` sets a flag before it kills, because on Windows `kill` is a terminate and the
+exit code is always 1 — without it every clean run ended in `exited with code 1`.
+
+**The first run reported FAIL with the spec passing, and it was right to.** `EADDRINUSE
+127.0.0.1:3000`: the user's API from the previous session was already there, so the child this
+script started lost the bind and shut down — while the spec sailed through against the _incumbent_.
+That is the whole reason `crashedServices()` exists rather than trusting Playwright's exit code.
+The fix is the courtesy `snapshot()` already extends to containers: probe `/api/health/ready` for
+two seconds first and reuse what answers, saying so in the RESULT line. `waitForHttp` grew an
+`optional` flag so a probe that finds nothing reads as an observation rather than as a failure.
+The residue is a P2 in `known-problems.md` — a reused API may be running code this run did not
+build.
+
+**Then the third trial run failed, and it was the most useful failure of the milestone.** The
+ticket never appeared: `brokerConnected: false` for the whole run, the `kitchen` group still
+rebalancing when the 45 s assertion gave up. Run 1 had joined after 14.8 s, run 2 after 28.5 s,
+run 3 not at all — an escalation, which is the shape of a leak rather than of a slow machine.
+
+The cause is in the harness, not the pipeline: **on Windows `child.kill()` is `TerminateProcess`, so
+the worker never runs its shutdown and never sends `LeaveGroup`.** Its place in the group is held
+until the session times out (30 s), and while a rebalance is in flight _no member consumes_ — so
+each run inherited the previous run's zombie and paid for it out of the spec's budget. Each run
+also created the next one.
+
+The fix is to charge it to the right account. `Worker started` is liveness — the broker connection
+is supervised behind it — so the script now also waits for `broker connected`, and for the API's
+`realtime consumer running` when it started the API itself, with a 120 s budget named
+`GROUP_JOIN_TIMEOUT_MS`. A group join is setup; only what happens after the assignment exists is
+the pipeline's, and `PIPELINE_TIMEOUT_MS` is now honestly a poll interval plus a broker round trip.
+Making the kill graceful would be the deeper fix and needs a shutdown channel the worker does not
+have; the residue is a P3.
+
+Worth keeping in mind: none of this bites CI, where the kill is a real SIGTERM and each run gets a
+fresh broker.
+
+**No test hooks in the production markup.** Locators are roles, labels and text; the product name
+is read out of a tile's `aria-label` rather than hard-coded, because the menu is seed data. The
+kitchen card is found by a cover unique to the run — the rail accumulates across runs and the demo
+database is deliberately never reset. The two POS assertions before `Send to kitchen` prove the
+_client_ (§14 draws the queue folded onto the last snapshot, so `SENT_TO_KITCHEN` appears before
+the server has answered); the `PENDING` badge going away is what says the server took all three;
+and `PREPARING` arriving back on the POS is the only assertion here that no single process could
+satisfy on its own.
+
+**One P1 from the review pass, mine.** Every return path in the script goes through
+`runner.finish`, which stops the children — except a throw. An orphaned worker holds a place in the
+`kitchen` group, so this run's crash would be paid for by the next run's rebalance. Wrapped.
+
+Green: `pnpm test:e2e` PASS, lint, typecheck (three projects now — `tsconfig.e2e.json` exists
+because Playwright resolves like a bundler), build, 251 web tests.

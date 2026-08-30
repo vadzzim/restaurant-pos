@@ -27,6 +27,7 @@ the file because its demo defaults are explicit, but local application processes
 pnpm lint && pnpm typecheck   # static checks
 pnpm test:unit                # the domain rules and the browser stores; no infrastructure needed
 pnpm verify:integration       # Compose up, the PostgreSQL- and broker-backed suites, teardown
+pnpm test:e2e                 # the same, plus the apps, plus §21's browser test
 pnpm verify:multi             # the production images, two API replicas, and §19.10
 ```
 
@@ -36,6 +37,16 @@ through the BullMQ print queue on a real Redis — and
 tears down **only the containers it started**, so a demo you already have running survives. Its full
 output lands in `.verify-output/integration.log`. Pass `--keep` to leave the containers up. CI runs
 this same command and declares no service containers of its own.
+
+`pnpm test:e2e` is §21's last line: one Playwright test that crosses every process — POS-1 opens an
+order, adds an item and sends it to the kitchen; the kitchen display shows the ticket, marks it
+PREPARING, and the POS follows without asking for anything. The script owns the whole lifecycle
+(Compose, migrate, seed, build, an API and a worker as child processes) and Playwright serves the
+**production** bundle on `:4173` — since M17 that is a different build from `pnpm dev`, and it is the
+one the image ships. Output in `.verify-output/e2e.log`. An API already listening on `:3000` is
+reused rather than duplicated, so this is safe to run against a demo you have up. `pnpm test:e2e:run`
+runs the spec alone against a stack you are already running, and takes Playwright's own flags —
+`--headed`, `--debug`, `--ui`. ADR 018 records the rest.
 
 `pnpm verify:multi` is the §22 one. It builds the three production images
 (`apps/{api,worker,web}/Dockerfile`, multi-stage and non-root — ADR 016), brings up

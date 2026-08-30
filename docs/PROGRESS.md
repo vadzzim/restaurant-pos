@@ -6,58 +6,55 @@
 
 ## Current state
 
-**Last completed:** M17 — PWA. Manifest, generated icons, a service worker caching **the shell and
-nothing else**: offline worked since M8, but *reloading* offline never reached the code that knows
-how to be offline. **ADR 017.**
+**Last completed:** M18 — Playwright E2E. §21's last line: one spec that crosses **every** process —
+POS-1 opens an order, adds an item, sends it; the kitchen display shows the ticket, marks it
+PREPARING, and the POS follows without asking for anything. **ADR 018.**
 
-**The policy is an allow-list in a pure module.** `src/sw/cache-policy.ts` imports nothing, touches
-no `fetch`/`caches`/DOM, and maps a request to `shell` / `asset` / `menu` / `passthrough`.
-`passthrough` means the handler **returns without calling `respondWith`** — the browser performs it
-as if no worker existed. Non-`GET` is decided first, **`navigate` last**: a tab pointed at
-`/api/health/ready` is a navigation too, and calling it `shell` writes that JSON under the shell's
-key. `GET /api/menu` is the only cached API response; `GET /api/orders/:id` never is — a stale
-snapshot looks like the server's truth, not an error. `cache-policy.test.ts` walks every endpoint
-in `src/api/client.ts`.
+**`pnpm test:e2e` owns the lifecycle; Playwright owns the bundle's server.** `scripts/verify-e2e.mjs`
+reuses `lib/compose-run.mjs` — up, migrate, seed, build, teardown of only what it started — and runs
+the API and the worker as long-lived `node dist/index.js` children. `webServer` serves `dist/` on
+**:4173 via `preview`, never `dev`**: since M17 those are different builds and only one has the
+service worker. `pnpm test:e2e:run` is the spec alone, against a stack you already have up.
 
-**`install` precaches, and this is the trap.** Runtime caching cannot cover the bundle: the load
-that registers the worker fetched it **before** the worker existed, and `clients.claim()` does not
-replay it, so a first visit plus an offline reload got a cached `index.html` whose script missed.
-`install` reads the asset list **out of the document it just fetched** (`shellAssetUrls`, every hit
-re-checked through `classifyRequest`): no build-time manifest to go stale, and the list can never
-be wider than the policy. **`/api/menu` lost the same race and is precached too**, best-effort, so
-a down API cannot fail the install.
+**The runner learned to hold processes open**: `startService`, `waitForOutput`, `waitForHttp`,
+`crashedServices`. Children are spawned **without `shell: true`** — a shell wrapper on Windows means
+`kill` reaps the wrapper and leaves the real process on the port — stopped in `finish()` before the
+Compose teardown and **even under `--keep`**; `stop()` sets a flag first so a signalled exit is not
+reported as a crash.
 
-**Registration is `import.meta.env.PROD`-only** — a worker in dev makes HMR lie — and updates are
-`skipWaiting` + `clientsClaim` + one guarded reload. Safe only while `router.ts` imports its views
-statically; ADR 017 calls that the condition to revisit.
+**An API already answering on :3000 is reused, not duplicated.** The first run reported FAIL with the
+spec passing: `EADDRINUSE`, the child lost the bind, and the spec sailed through against the
+incumbent. Hence `crashedServices()` rather than trusting Playwright's exit code. Residue: a reused
+API may run code the run did not build — P2.
 
-**Built by a nested Vite build into one classic `iife` at `/sw.js`, compiled by its own
-`tsconfig.sw.json`** — `WebWorker` and `DOM` cannot share a `lib`. Why: ADR 017, Consequences.
+**The Kafka group join is setup, not an assertion's budget.** This is the trap. `child.kill()` on
+Windows is a terminate, so the worker never sends `LeaveGroup`; the group holds a dead member for its
+session timeout, and **while a rebalance is in flight nobody consumes**. Joins escalated 14.8 s →
+28.5 s → never, and the third run failed. The script now waits for the worker's `broker connected`
+and — when it started the API — the API's `realtime consumer running`, on
+`GROUP_JOIN_TIMEOUT_MS = 120_000`. The spec then went from 25.2 s to **3.1 s**, which is the whole
+argument. **Do not fold that budget back into `PIPELINE_TIMEOUT_MS`.**
 
-**The hands-on check was done, in a real Chrome over CDP, offline by killing the server rather than
-by DevTools throttling** — and it found a P1 no unit test could: `Vary: Origin` made the precached
-bundle invisible. `Cache.match` compares the *stored* request's headers, the precache fetch has no
-`Origin`, and `<script crossorigin>` sends one — so the shell loaded and its script did not.
-**Every cache read now passes `{ ignoreVary: true }`; do not remove it.** The fake `CacheStorage`
-models `Vary` now, so it is a test. Confirmed after: shell, CSS, JS, menu, manifest and icons all
-`fromServiceWorker`, the order and all eleven products on screen through an ordinary reload, a fresh
-navigation and a hard reload alike, and the queue draining on restart.
+**No test hooks in the production markup** — roles, labels and text only; the product name comes out
+of a tile's `aria-label`, because the menu is seed data. **No database reset either**: the cover is
+unique per run and every kitchen locator is scoped to that card. The §18 arms and
+`realtime.websocket_push` are reset in the spec's `beforeEach`, not in the script, so
+`test:e2e:run` gets the same guarantee.
 
-**Green:** typecheck (two web projects), lint, build, **451 tests** (61 domain, 96 api, 55 worker,
-**251 web**). `verify:*` not re-run: nothing outside `apps/web` changed.
+**Green:** `pnpm test:e2e` PASS, lint, typecheck (**three** projects — `tsconfig.e2e.json` exists
+because Playwright resolves like a bundler), build, 451 tests unchanged. `verify:integration` not
+re-run: nothing it covers changed.
 
-**Three P1s, none from my own pass:** Codex found the precache and a navigate-ordering bug, the
-browser found `Vary` and an uncaught `update()` rejection. Codex's third — the menu refresh not
-held by `event.waitUntil` — is fixed too. **Nothing from M17's review is left open.**
+**One P1, mine:** every return path went through `runner.finish`, which stops the children — except a
+throw, which would orphan a worker. Wrapped. **Nothing from M18's review is left open.**
 
-**Next:** M18 — Playwright E2E. Sonnet, size M.
-
+**Next:** M19 — documentation and the finale. Opus, size **L**. The last milestone.
 
 ## What exists
 
 One line per unit; detail lives in the code and the ADRs.
 
-- **Docs** — what CLAUDE.md lists, plus `milestones/M01…M17.md`. **ADRs 001–017 accepted.**
+- **Docs** — what CLAUDE.md lists, plus `milestones/M01…M18.md`. **ADRs 001–018 accepted.**
 - `packages/` — `config` zod env (all defaulted); `contracts` the §5 shapes plus `TERMINALS` and
   `BAR_MENU`; `domain` `decide()`, **the whole of §8**; `db` fifteen tables, three migrations,
   seed (11 products), `@pos/db/testing`.
@@ -67,58 +64,59 @@ One line per unit; detail lives in the code and the ADRs.
 - `apps/worker` — the §10 outbox publisher (ADR 010), the producer, the kitchen consumer and its
   projection, `modules/printing/` (ADR 014). CLIs `outbox`/`printer`.
 - `apps/web` — POS, kitchen, `/debug`, `/demo`; seven Pinia stores; Dexie (ADR 013); the §14 sync
-  engine; `realtime/`; `domain/{pos-screen,demo-script}.ts`; and now **`sw/`, `pwa/`, `vite/`,
-  `public/`**.
+  engine; `realtime/`; `domain/`; `sw/`, `pwa/`, `vite/`, `public/`.
+- `e2e/` + `playwright.config.ts` + `tsconfig.e2e.json` — one spec and its preflight helpers.
 - **Images, Compose, scripts, CI** — a Dockerfile per app, `nginx.conf`, `docker-compose.multi.yml`
-  (the base file's `app` profile is the *dev* stack), `compose-run.mjs`, two `verify-*.mjs`.
+  (the base file's `app` profile is the *dev* stack), `compose-run.mjs`, **three** `verify-*.mjs`.
+  `ci.yml` jobs: `verify`, `e2e`, `images` over three apps.
 
 ## Standing decisions
 
 ADRs are canon; history in `progress-archive.md`. What is not in one:
 
-- Full scope, nothing cut (ADR 001, 007). **Two left: M18, M19.** Neither may be dropped.
+- Full scope, nothing cut (ADR 001, 007). **One left: M19.** It may not be dropped.
 - **`BAR_MENU` is in contracts, not a `products.category` column.** Argued beside the constant.
 - **Leaving a POS route detaches; it does not clear.** M16. Do not put `clear()` back.
 - **The icons are generated** — `apps/web/scripts/make-icons.mjs`, by hand, not by the build.
 
 ## Known problems
 
-`docs/known-problems.md`: limits, then the P2/P3 backlog — **twenty-three** entries, three from M17.
-**Badly overdue for its sweep**; if M18 lands early, sweep it. Not a session opener.
+`docs/known-problems.md`: limits, then the P2/P3 backlog — **twenty-seven** entries, four from M18.
+**Long overdue for its sweep.** Not a session opener, and M19 is an L: sweep only what §26 forces.
 
 ## First command of the next session
 
 ```
-Read CLAUDE.md and docs/PROGRESS.md, then expand M18 from docs/MILESTONES.md into
-docs/milestones/M18.md and implement M18 only. Stop when the M18 Verification block passes.
+Read CLAUDE.md and docs/PROGRESS.md, then expand M19 from docs/MILESTONES.md into
+docs/milestones/M19.md and implement M19 only. It is the last milestone.
 
-M18 is the §21 Playwright E2E: POS-1 creates an order, adds an item, sends it to the kitchen, the
-kitchen screen shows the ticket, PREPARING is marked, and the POS follows. Wired into CI.
-Verification: `pnpm test:e2e` green locally and in CI. Model: Sonnet. Size: M.
+M19 is §23 documentation plus the finale: docs/architecture.md with Mermaid (system diagram, the
+offline-sync sequence *including the blocked-queue branch*, the outbox sequence); the whole of
+docs/interview-guide.md — 5-minute pitch, 15-minute walkthrough, the §19 demo script for all ten
+scenarios, honest answers to every question §23 lists, and the weaknesses section; the scale
+section; the README. Then walk §26's Definition of done point by point, honestly.
+Verification: §26 walked, plus lint, typecheck, test, build, verify:integration and a hand smoke.
 
 Six things worth knowing before you plan:
 
-1. **This test needs the whole stack, and the user starts infrastructure** (CLAUDE.md rule 3).
-   Copy `scripts/verify-integration.mjs` — Compose up, wait for readiness, run, tear down, write
-   output to a file you `grep`. Do not stream container logs.
-2. **Do not test against `pnpm dev` on :5173.** M17 made a production build meaningfully different:
-   the service worker exists only there. Use `pnpm -F @pos/web preview` (:4173, same proxy) or the
-   web image. A worker serving a cached shell to a just-rebuilt test is a real flake source —
-   Playwright contexts are fresh, so it bites only if you reuse a profile.
-3. **The flow crosses the worker.** Send to kitchen → outbox → publisher → Kafka → consumer →
-   projection: the ticket is not synchronous. Poll the assertion; do not sleep. `apps/worker` must
-   run, and its outbox must not be paused by a leftover §18 arm.
-4. **Terminal ids and the seed are fixed** — `POS-1`, `POS-2`, `BAR-1`, `POS-3`, 11 products.
-   `TERMINALS` in contracts is the source; never hard-code a product name a reseed changes.
-5. **The §18 simulator arms are tab-local** (ADR 015), so a Playwright context starts clean. The
-   four server-side ones do not — a paused publisher survives and looks like "Kafka is broken".
-6. **`onBeforeUnmount` detaches, it does not clear** (M16). A test that leaves a POS screen and
-   returns must expect the order to still be there.
-
-Verification: `pnpm test:e2e` locally and the same job in `ci.yml`. Then lint, typecheck, build and
-`pnpm -F @pos/web test`. One review pass, P1s only.
+1. **This is a writing milestone with a large read surface, and the budget is the risk.** Every
+   answer §23 asks for is already argued in an ADR or in build-log.md. `grep` them for the
+   argument and *link*; do not re-derive and do not restate. ADRs 001-018 are canon.
+2. **The weaknesses section is not a formality — the honest material already exists.** It is
+   `docs/known-problems.md`: the accepted limits first, then twenty-seven P2/P3 entries. That file
+   is the source; the guide's job is to choose and frame, not to invent.
+3. **README says "M1 contains only the runnable monorepo".** It has been wrong for seventeen
+   milestones. Fix the top of that file, and add §23's "Engineering concepts demonstrated".
+4. **Nothing in §26 is aspirational — check each clause against a test or a command**, and where
+   one is only argued rather than tested, say so. `known-problems.md` already admits the two
+   concurrency tests assert invariants rather than forcing the interleaving.
+5. **Do not run `docker compose` by hand** (CLAUDE.md rule 3). `pnpm verify:integration`,
+   `pnpm test:e2e` and `pnpm verify:multi` each own their lifecycle and write to
+   `.verify-output/*.log`; read the tail. `test:e2e` reuses an API already on :3000 and says so.
+6. **`docs/spec.md` §23 lists ADR filenames that drifted** — `006-kafka-at-least-once` is
+   `006-realtime-consumer.md`. The `docs/adr/README.md` table is the real index; trust it.
 
 Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, and `pnpm dev` (:5173) or
-`pnpm -F @pos/web build && pnpm -F @pos/web preview` (:4173). Postgres, Redis and Redpanda were up
-and the API answering `/api/health/ready` at the end of M17.
+`pnpm -F @pos/web build && pnpm -F @pos/web preview` (:4173). Postgres, Redis and Redpanda were up,
+and an API and a worker were running on :3000, at the end of M18.
 ```

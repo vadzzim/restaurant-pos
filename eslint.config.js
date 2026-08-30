@@ -51,6 +51,16 @@ export default tseslint.config(
     },
   },
   {
+    // The E2E harness runs in Node, outside every app: `@pos/config` validates the *application's*
+    // environment and is bundled into the API, the worker and the browser, so it is the wrong door
+    // for two variables that belong to the test runner. The `process.env` reads are in the config
+    // file only — the spec takes its base URL from Playwright's fixtures.
+    files: ['playwright.config.ts', 'e2e/**/*.ts'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+  {
     files: ['**/*.{ts,vue}'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'error',

@@ -1,11 +1,14 @@
-// The Compose lifecycle that `verify-integration.mjs` and `verify-multi-instance.mjs` share:
-// bring services up, run a list of steps, tear down only what this run started, and write
-// everything to a file. These are the only two things in the repository that run `docker
-// compose` — see CLAUDE.md.
+// The Compose lifecycle the three `verify-*.mjs` scripts share: bring services up, run a list of
+// steps, tear down only what this run started, and write everything to a file. These are the only
+// things in the repository that run `docker compose` — see CLAUDE.md.
 //
-// The abstraction exists because there are now two runners with an identical lifecycle and
+// The abstraction exists because there are now three runners with an identical lifecycle and
 // different service lists. It is deliberately a runner, not a framework: the caller still owns
 // its own steps and its own summary lines.
+//
+// `startService` and `waitForHttp` arrived with M18, which is the first run that needs the *apps*
+// as well as the infrastructure: an end-to-end test has to talk to a running API, a running worker
+// and a served bundle, and none of the three can be a step that finishes.
 
 import { spawn } from 'node:child_process';
 import { mkdirSync, createWriteStream } from 'node:fs';
@@ -125,6 +128,10 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
     let exitCode = code;
     let result = summary;
 
+    // Before Compose, and regardless of `--keep`: `--keep` is about the containers a developer
+    // wants to poke at, never about leaving an API holding :3000 for the next run.
+    await stopServices();
+
     if (keep) {
       banner('Teardown skipped (--keep)');
     } else {
@@ -174,5 +181,184 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
     return { code: 0, failed: undefined };
   }
 
-  return { write, banner, run, compose, snapshot, up, runSteps, finish, outputFile };
+  /** Long-lived children this run started, newest first, so `finish` can stop them all. */
+  const appProcesses = [];
+
+  /**
+   * Start a long-lived process and keep it running until `finish`.
+   *
+   * Deliberately **without** `shell: true`, unlike `run`: these are killed rather than waited for,
+   * and a shell wrapper on Windows means `kill` reaps the wrapper and leaves the real process
+   * holding the port. So every caller passes an executable Node can spawn directly.
+   *
+   * @param {object} options
+   * @param {string} options.name        prefix for this process's lines in the log
+   * @param {string} options.command     an executable, not a shell builtin and not a `.cmd`
+   * @param {string[]} options.args
+   * @param {string} [options.cwd]       relative to the repository root
+   * @param {Record<string,string>} [options.env]
+   */
+  function startService({ name, command, args, cwd = '.', env }) {
+    write(`\n$ [${name}] ${command} ${args.join(' ')}\n`);
+    const child = spawn(command, args, {
+      cwd: join(repoRoot, cwd),
+      env: env === undefined ? process.env : { ...process.env, ...env },
+    });
+
+    let output = '';
+    const waiters = [];
+
+    for (const stream of [child.stdout, child.stderr]) {
+      stream.setEncoding('utf8');
+      stream.on('data', (chunk) => {
+        output += chunk;
+        // Prefixed, because three services write into one file and an unattributed stack trace is
+        // the hardest thing to read in it.
+        write(
+          chunk
+            .split('\n')
+            .filter((line) => line !== '')
+            .map((line) => `[${name}] ${line}\n`)
+            .join(''),
+        );
+        for (const waiter of waiters.splice(0)) {
+          waiter();
+        }
+      });
+    }
+
+    let exited = false;
+    // Set before a deliberate kill, so a signalled exit is not read as a crash. On Windows
+    // `kill` is a terminate and the code is always 1, which would make every clean run look
+    // failed.
+    let stopping = false;
+    child.on('error', (error) => {
+      exited = true;
+      write(`\n[${name}] could not be started: ${error.message}\n`);
+    });
+    child.on('close', (code) => {
+      exited = true;
+      write(`\n[${name}] ${stopping ? 'stopped' : `exited with code ${code ?? 1}`}\n`);
+    });
+
+    const service = {
+      name,
+      get exited() {
+        return exited;
+      },
+      /** Resolves once `pattern` has appeared in this process's output, or times out. */
+      async waitForOutput(pattern, timeoutMs = 60_000) {
+        const deadline = Date.now() + timeoutMs;
+        while (!pattern.test(output)) {
+          if (exited) {
+            return false;
+          }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            return false;
+          }
+          // Woken by the next chunk rather than by a poll interval, so a fast start is not taxed
+          // and a slow one is not truncated.
+          await new Promise((resolve) => {
+            const timer = setTimeout(resolve, Math.min(remaining, 250));
+            waiters.push(() => {
+              clearTimeout(timer);
+              resolve(undefined);
+            });
+          });
+        }
+        return true;
+      },
+      async stop() {
+        if (exited) {
+          return;
+        }
+        stopping = true;
+        child.kill();
+        // A grace period, then insist: the API and the worker both drain on a signal, and on
+        // Windows `kill` is already a terminate, so this second call is only ever a no-op there.
+        const gaveUp = await new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(true), 5_000);
+          child.on('close', () => {
+            clearTimeout(timer);
+            resolve(false);
+          });
+        });
+        if (gaveUp) {
+          child.kill('SIGKILL');
+        }
+      },
+    };
+
+    appProcesses.unshift(service);
+    return service;
+  }
+
+  /** The processes this run started that are no longer alive — a crash, in every real case. */
+  function crashedServices() {
+    return appProcesses
+      .filter((appProcess) => appProcess.exited)
+      .map((appProcess) => appProcess.name);
+  }
+
+  async function stopServices() {
+    if (appProcesses.length === 0) {
+      return;
+    }
+    banner('Stopping app processes');
+    for (const appProcess of appProcesses.splice(0)) {
+      write(`stopping ${appProcess.name}\n`);
+      await appProcess.stop();
+    }
+  }
+
+  /**
+   * Poll a URL until it answers 2xx. Used instead of a sleep for anything with an HTTP surface;
+   * `--wait` covers the containers and `waitForOutput` covers a process that has none.
+   *
+   * `optional` is for a *probe* rather than a wait — asking whether something is already there.
+   * Not answering is the expected case, so it is reported as an observation, not as a failure.
+   */
+  async function waitForHttp(
+    url,
+    { timeoutMs = 120_000, intervalMs = 500, optional = false } = {},
+  ) {
+    const deadline = Date.now() + timeoutMs;
+    let lastProblem = 'never answered';
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(url);
+        if (response.ok) {
+          write(`ready: ${url}\n`);
+          return true;
+        }
+        lastProblem = `HTTP ${response.status}`;
+      } catch (error) {
+        lastProblem = error instanceof Error ? error.message : String(error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    write(
+      optional
+        ? `nothing answering ${url} (${lastProblem})\n`
+        : `\nnot ready after ${timeoutMs} ms: ${url} — ${lastProblem}\n`,
+    );
+    return false;
+  }
+
+  return {
+    write,
+    banner,
+    run,
+    compose,
+    snapshot,
+    up,
+    runSteps,
+    startService,
+    stopServices,
+    crashedServices,
+    waitForHttp,
+    finish,
+    outputFile,
+  };
 }

@@ -1,0 +1,16 @@
+{
+  // The E2E harness: `playwright.config.ts` and `e2e/**`. Its own file because Playwright resolves
+  // like a bundler — extensionless relative imports, transpiled by its own loader — while every
+  // app in this repository is `NodeNext` and writes the `.js` extension. One project cannot be
+  // both, and the alternative was `.js` suffixes in a directory Node never loads.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["node"]
+  },
+  "include": ["playwright.config.ts", "e2e/**/*.ts"]
+}

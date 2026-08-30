@@ -52,6 +52,56 @@ jobs:
           path: .verify-output/integration.log
           if-no-files-found: ignore
 
+  # §21's browser test, and the only job that needs the *applications* running rather than only the
+  # infrastructure. Its own job rather than a step in `verify`: it owns a second Compose lifecycle
+  # plus an API, a worker and a served bundle, and a runner that already tore its containers down
+  # cannot host both. Same `services:` reasoning as above — `pnpm test:e2e` owns the lifecycle.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Chromium only, and `--with-deps` because a bare GitHub runner has none of the shared
+      # libraries a headless browser links against.
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      # Compose up, migrate, seed, build, API, worker, the spec, teardown — one command, the same
+      # one a developer runs. It builds internally, so there is no separate build step here.
+      - name: End-to-end verification
+        run: pnpm test:e2e
+
+      - name: Upload verification log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-e2e-log
+          path: .verify-output/e2e.log
+          if-no-files-found: ignore
+
+      # The trace of a retried failure, which is the only thing that makes a timeout in this
+      # pipeline diagnosable after the fact.
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+
   # The three §22 images, built and not pushed: there is no registry to push to and the point is
   # that the Dockerfiles stay buildable from a clean checkout. Deliberately *not* `verify:multi` —
   # that needs the whole stack plus a migrated database, and the `verify` job above already owns
