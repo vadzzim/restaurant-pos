@@ -15,6 +15,19 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M15, P1-in-M12]** `applyVersionConflictArm` tampers `baseVersion - 1`, so on an order at v1 it
+  sends 0 — which zod refuses with `VALIDATION_FAILED` instead of producing the version conflict the
+  switch promises. Guard on `baseVersion < 2`. Seen in the browser this session; proved by the 400
+  body in `apps/web/src/api/simulator-arms.ts:129`.
+- **[M15, P1-in-M12]** `spend()` in `postMutation` runs only if `postMutationTo` _returns_; a 4xx
+  throws, so a tamper that fails validation leaves the arm armed and **every** later mutation from
+  that tab is tampered too. The tab is wedged until it is reloaded. Proved by three consecutive 400s
+  after one arming. Both of these are one pass together — the arm is one control.
+- **[M15, P3]** `commit()` in `PosView.vue` has no `catch`, so a rejecting commit action surfaces as
+  an unhandled rejection rather than in the error banner. Inherited from M8's `run()`; the item path
+  (`tap`) does catch. Proved by making `orders.pay` reject and watching the console, not the banner.
+- **[M15, P3]** `engine.rebase` carries the same six-line comment twice
+  (`apps/web/src/sync/engine.ts`, above `if (reissued === undefined)`). Cosmetic.
 - **[M14, P2]** `pnpm verify:multi` migrates, seeds and then writes to the **demo** database, not to
   `pos_test`, so every smoke run leaves two throwaway orders on table 19 in `demo-restaurant`.
   Harmless data, but a demo opened straight after a verification run shows them.

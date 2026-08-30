@@ -269,44 +269,86 @@ export const useOrderStore = defineStore('order', () => {
   }
 
   /**
-   * Record an intent and attempt it. **This is the only way a mutation is created.**
+   * The local phase of every command, run one at a time.
    *
-   * There is no online fast path: online, the engine is kicked immediately and the row lives for a
-   * few hundred milliseconds; offline it lives until the toggle flips. One code path means the
-   * offline demo exercises the same machinery the normal flow does.
+   * `identityFor` stamps `baseVersion` from the **projection**, so a command that computes its
+   * identity before the previous one's row is in `queue` stamps a version the server has already
+   * consumed — and gets `VERSION_CONFLICT`, halting the queue over a race the operator never
+   * caused. Until M15 nothing enforced that: the POS screen's single `busy` flag disabled the
+   * whole till for the round trip, and serialization was a side effect of the disabling.
+   *
+   * The ordering belongs here rather than in a screen, because it is a property of how a mutation
+   * is stamped. The network attempt is deliberately **outside** this chain — that is what lets the
+   * till accept taps faster than the server answers them (§14, §16).
+   */
+  let localPhase: Promise<unknown> = Promise.resolve();
+
+  function serialize<T>(step: () => Promise<T>): Promise<T> {
+    const next = localPhase.then(step);
+    // The chain must survive a failed link: it orders writes, it does not propagate their errors.
+    localPhase = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  /**
+   * Record an intent. **This is the only way a mutation is created**, and it runs inside
+   * `serialize` in both of its callers.
    *
    * The row is written **before** anything is attempted (§14) and the screen updates from the
    * mirror, not from a prediction written anywhere — the projection is a pure function of the
    * cache and the queue, so a crash right here loses nothing and reproduces exactly.
+   *
+   * Returns whether the row reached disk, or `undefined` if the mutation was refused.
    */
-  async function enqueue(identity: MutationIdentity): Promise<void> {
+  async function stage(identity: MutationIdentity): Promise<boolean | undefined> {
     if (identity.terminalId !== activeTerminalId.value) {
       lastError.value = `That mutation belongs to ${identity.terminalId}.`;
-      return;
+      return undefined;
     }
 
     const stored = await localStore.savePending({ ...identity, status: 'PENDING' });
     await refreshQueue();
+    return stored;
+  }
 
-    if (!stored) {
-      // This device cannot store anything (private browsing, or quota) and the badge already says
-      // so. The queue is the only path to the server, so a command with no row would simply
-      // vanish — and M7's rule is that a storage failure never breaks a command. It is sent
-      // directly, through the same code that a pass would have used.
-      inFlight.value += 1;
-      try {
-        await engine.attemptOnce({
-          ...identity,
-          createdAt: new Date().toISOString(),
-          status: 'PENDING',
-        });
-      } finally {
-        inFlight.value -= 1;
-      }
+  /**
+   * Attempt what `stage` recorded.
+   *
+   * There is no online fast path: online, the engine is kicked immediately and the row lives for a
+   * few hundred milliseconds; offline it lives until the toggle flips. One code path means the
+   * offline demo exercises the same machinery the normal flow does.
+   */
+  async function settle(identity: MutationIdentity, stored: boolean): Promise<void> {
+    if (stored) {
+      await sync();
       return;
     }
 
-    await sync();
+    // This device cannot store anything (private browsing, or quota) and the badge already says
+    // so. The queue is the only path to the server, so a command with no row would simply
+    // vanish — and M7's rule is that a storage failure never breaks a command. It is sent
+    // directly, through the same code that a pass would have used.
+    inFlight.value += 1;
+    try {
+      await engine.attemptOnce({
+        ...identity,
+        createdAt: new Date().toISOString(),
+        status: 'PENDING',
+      });
+    } finally {
+      inFlight.value -= 1;
+    }
+  }
+
+  async function enqueue(identity: MutationIdentity): Promise<void> {
+    const stored = await serialize(() => stage(identity));
+    if (stored === undefined) {
+      return;
+    }
+    await settle(identity, stored);
   }
 
   /** The identity of a new mutation for the order on screen, stamped at the projected version. */
@@ -455,14 +497,27 @@ export const useOrderStore = defineStore('order', () => {
     restaurantId: string,
     payload: MutationRequest['payload'],
   ): Promise<void> {
-    if (halted.value) {
-      lastError.value = 'This order is halted on a conflict. Discard or rebase first.';
-      return;
-    }
+    // The halt check, the identity and the queue write are one indivisible step: all three read
+    // the projection, and a command that read it between another command's write and its own
+    // would stamp a stale `baseVersion`. `createOrder` goes through `enqueue`, which serializes
+    // the same way.
+    const staged = await serialize(async () => {
+      if (halted.value) {
+        lastError.value = 'This order is halted on a conflict. Discard or rebase first.';
+        return undefined;
+      }
 
-    const identity = identityFor(type, terminalId, restaurantId, payload);
-    if (identity !== undefined) {
-      await enqueue(identity);
+      const identity = identityFor(type, terminalId, restaurantId, payload);
+      if (identity === undefined) {
+        return undefined;
+      }
+
+      const stored = await stage(identity);
+      return stored === undefined ? undefined : { identity, stored };
+    });
+
+    if (staged !== undefined) {
+      await settle(staged.identity, staged.stored);
     }
   }
 

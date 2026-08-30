@@ -21,6 +21,12 @@ export const PRODUCTS = [
   { id: 'french-fries', name: 'French Fries', priceCents: 500 },
   { id: 'cola', name: 'Cola', priceCents: 300 },
   { id: 'coffee', name: 'Coffee', priceCents: 400 },
+  // The bar half of the menu. `BAR_MENU` in @pos/contracts is what decides that BAR-1 shows these
+  // and not the food; a product added here is invisible at the bar until it is named there too.
+  { id: 'draft-beer', name: 'Draft Beer', priceCents: 700 },
+  { id: 'house-red', name: 'House Red', priceCents: 900 },
+  { id: 'house-white', name: 'House White', priceCents: 900 },
+  { id: 'sparkling-water', name: 'Sparkling Water', priceCents: 350 },
 ] as const;
 
 export const FEATURE_FLAGS = [
@@ -40,7 +46,9 @@ export async function seedReferenceData(db: Db): Promise<void> {
 
     await tx
       .insert(terminals)
-      .values([...TERMINALS])
+      // `profile` is a screen property (@pos/contracts), not a column: the API never reads it, so
+      // it is projected out here rather than given a migration nothing on the server would use.
+      .values(TERMINALS.map(({ id, restaurantId, label }) => ({ id, restaurantId, label })))
       .onConflictDoUpdate({
         target: terminals.id,
         set: { restaurantId: excluded('restaurant_id'), label: excluded('label') },

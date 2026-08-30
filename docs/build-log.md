@@ -1612,3 +1612,64 @@ checked, not assumed — so it reaches `db:migrate` past the `--env-file-if-exis
 
 `verify-integration.mjs` does not have the same defect and was left alone: it starts no application
 containers, so there is no hard-coded address for a host-side one to disagree with.
+
+## M15 — POS UX for rush, and BAR-1
+
+### The screen was the thing that waited
+
+`PosView` set one `busy` flag around every action, and every action ended in `enqueue()` →
+`await sync()` → a network round trip. Every menu tile and every ± button was therefore disabled
+until the server answered a tap on any one of them. Locally that is invisible; with a 1.5 s delay
+injected into `fetch` it locks the till out for the whole round trip on every tap. §14 says the UI
+updates optimistically and never waits, and the store already obeyed it — `enqueue` writes the queue
+row and calls `refreshQueue()` _before_ it syncs, and `projected` is a pure function of cache +
+queue. The optimism was there. The view threw it away.
+
+### Why the fix had to go into the store
+
+Deleting the flag alone would have introduced a genuine defect. `identityFor` stamps `baseVersion`
+from the **projection**, so a second tap that computes its identity before the first tap's row is in
+`queue` stamps a version the server has already consumed — `ORDER_VERSION_CONFLICT`, and a queue
+halted over a race the operator never caused. The `busy` flag was serializing the local phase as a
+side effect of disabling the screen, and nothing else was.
+
+So the ordering moved to where it belongs. `enqueue` split into `stage` (validate, `savePending`,
+`refreshQueue`) and `settle` (sync, or `attemptOnce` on a storage-less device), and `serialize()`
+chains only the _local_ phase. `command()` runs its halt check, `identityFor` and `stage` inside one
+link, because all three read the projection. The network attempt is deliberately outside the chain —
+that is the whole point. Public promise semantics are unchanged, so the 153 existing tests were
+untouched.
+
+`test/rush-taps.test.ts` drives the store the way the screen now does, without awaiting. Confirmed
+it pins the defect by disabling `serialize` and re-running: `[3, 3, 3, 3]` instead of `[3, 4, 5, 6]`.
+
+### BAR-1
+
+`/pos/:terminalId` already routed `bar-1`; what was missing was that **nothing in the UI linked
+anywhere but POS-1** — the demo driver typed URLs. A terminal switcher is most of what "wired up"
+meant. `TerminalDescriptor` gained `profile`, and `BAR_MENU` sits beside `TERMINALS` in contracts
+rather than becoming a `category` column: a column would be a migration + contract + API + seed
+change to drive one client-side filter that no server code would ever read. `profile` is projected
+out of the seed's `terminals` insert for the same reason. Four drinks were added to the seed so a
+filtered bar screen is a screen and not two tiles.
+
+### What the browser said
+
+Driven at 1024 × 768, on `PUSH`, with `fetch` delayed 1.5 s for mutation POSTs.
+
+- Six taps issued as fast as they could be clicked: six mutations, `v7`, **nothing greyed out**, tile
+  badges and total tracking every tap, queue drained to zero with no conflict. Under the old flag
+  the same run would have been six sequential 1.5 s waits.
+- BAR-1 in one tap: drinks only, amber, tabs not tables. A reload restored the open tab (§14).
+- Caught one defect in the browser that no test would have: covers read `Tab 2` and the heading
+  prefixed the noun again — `Tab Tab 2`. Covers are bare values now, and a test says so.
+- The conflict banner was proved on a real race — POS-1 offline at v2, a `curl` mutation as POS-2
+  advancing the server to v3, POS-1 back online. Headline, two large buttons, evidence one tap below
+  and complete. Rebase reapplied the line on top of POS-2's, `v4`.
+
+### Two defects found in M12, not fixed here
+
+The `Create Version Conflict` switch tampers `baseVersion - 1`, which on an order at v1 sends 0 and
+is refused by zod as invalid rather than conflicting; and `spend()` only runs if the POST _returns_,
+so that failed tamper leaves the arm armed and wedges every later mutation from the tab. Both are in
+`known-problems.md` — they are M12's code, not this milestone's, and they are one pass together.

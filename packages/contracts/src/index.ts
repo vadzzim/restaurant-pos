@@ -445,7 +445,16 @@ export interface TerminalDescriptor {
   id: string;
   restaurantId: string;
   label: string;
+  /**
+   * What the till sells. A `bar` terminal shows `BAR_MENU` and calls a cover a *tab*; a `dining`
+   * one shows everything and calls it a *table*. It is a property of the terminal and not a
+   * `category` column on `products`, because the only thing that reads it is the screen — see
+   * `BAR_MENU`.
+   */
+  profile: TerminalProfile;
 }
+
+export type TerminalProfile = 'dining' | 'bar';
 
 /**
  * The demo terminals. This lives in contracts rather than in the seed alone because both sides
@@ -454,11 +463,32 @@ export interface TerminalDescriptor {
  * makes the tenant boundary and the §15 rollout visible on screen.
  */
 export const TERMINALS: readonly TerminalDescriptor[] = [
-  { id: 'pos-1', restaurantId: 'demo-restaurant', label: 'POS-1' },
-  { id: 'pos-2', restaurantId: 'demo-restaurant', label: 'POS-2' },
-  { id: 'bar-1', restaurantId: 'demo-restaurant', label: 'BAR-1' },
-  { id: 'pos-3', restaurantId: 'second-restaurant', label: 'POS-3' },
+  { id: 'pos-1', restaurantId: 'demo-restaurant', label: 'POS-1', profile: 'dining' },
+  { id: 'pos-2', restaurantId: 'demo-restaurant', label: 'POS-2', profile: 'dining' },
+  { id: 'bar-1', restaurantId: 'demo-restaurant', label: 'BAR-1', profile: 'bar' },
+  { id: 'pos-3', restaurantId: 'second-restaurant', label: 'POS-3', profile: 'dining' },
 ];
+
+/**
+ * What BAR-1 sells, by product id.
+ *
+ * This is deliberately **not** a `category` column on `products`. A column would be a migration, a
+ * contract change, an API change and a seed change to drive one client-side filter, and nothing on
+ * the server would ever read it — the API returns the whole menu and always has. It sits beside
+ * `TERMINALS` for the same reason that list does: the seed writes these rows and the browser
+ * decides which of them a given till shows, so the two must not drift.
+ *
+ * The price of that choice: a product added to the seed is invisible at the bar until it is named
+ * here. That is the right failure — a new dish should not appear at the bar by default.
+ */
+export const BAR_MENU: ReadonlySet<string> = new Set([
+  'cola',
+  'coffee',
+  'draft-beer',
+  'house-red',
+  'house-white',
+  'sparkling-water',
+]);
 
 /**
  * The kitchen display is not one of the four seeded terminals — it belongs to a room, not to a
