@@ -1,11 +1,16 @@
 import type {
   ApiErrorResponse,
+  ConflictsDebugResponse,
   ConfigResponse,
+  DependenciesResponse,
+  EventsDebugResponse,
   KitchenTicket,
   MenuItem,
+  MetricsResponse,
   MutationRequest,
   MutationResponse,
   OrderSnapshot,
+  OutboxDebugResponse,
 } from '@pos/contracts';
 
 import { ApiRequestError } from './errors';
@@ -40,6 +45,26 @@ export const fetchConfig = (restaurantId: string): Promise<ConfigResponse> =>
 
 export const fetchTickets = (restaurantId: string): Promise<KitchenTicket[]> =>
   get<KitchenTicket[]>(`/api/kitchen/tickets?restaurantId=${encodeURIComponent(restaurantId)}`);
+
+/**
+ * The five §17 debug reads. They deliberately do **not** go through `assertOnline`: `/debug` has no
+ * terminal, and the §18 offline switch is per terminal — cutting the debug page off because POS-1
+ * is pretending to be offline would hide the very state that switch exists to demonstrate.
+ */
+export const fetchDependencies = (): Promise<DependenciesResponse> =>
+  get<DependenciesResponse>('/api/debug/dependencies');
+
+export const fetchMetrics = (): Promise<MetricsResponse> =>
+  get<MetricsResponse>('/api/debug/metrics');
+
+export const fetchDebugEvents = (): Promise<EventsDebugResponse> =>
+  get<EventsDebugResponse>('/api/debug/events');
+
+export const fetchDebugConflicts = (): Promise<ConflictsDebugResponse> =>
+  get<ConflictsDebugResponse>('/api/debug/conflicts');
+
+export const fetchDebugOutbox = (): Promise<OutboxDebugResponse> =>
+  get<OutboxDebugResponse>('/api/debug/outbox');
 
 /**
  * An order that is not there yet is a normal state on this client, not an error.

@@ -1,7 +1,40 @@
+import type { MutationResponse } from '@pos/contracts';
 import type { Db } from '@pos/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
+import { incrementCounter } from '../../debug/application/counters.js';
 import { applyMutation, type MutationInput } from '../application/mutation-handler.js';
+
+/**
+ * §20's mutation counters, in the one function all three write routes pass through.
+ *
+ * They are counted from the *outcome* rather than at the branches inside the handler, so a new
+ * branch cannot be added without appearing here — the handler decides, this records. `CONFLICT` is
+ * deliberately absent: conflicts are counted from `conflict_log`, which is durable and fleet-wide,
+ * and two numbers for one fact is how a debug page starts lying.
+ */
+function countOutcome(status: MutationResponse['status']): void {
+  incrementCounter('mutationsReceived');
+
+  switch (status) {
+    case 'APPLIED':
+      incrementCounter('mutationsApplied');
+      return;
+    case 'ALREADY_APPLIED':
+      // §9: the mutation was applied once, by an earlier request, and this one was answered from
+      // `processed_mutations`. It is a prevented duplicate, not a second application.
+      incrementCounter('duplicateMutationsPrevented');
+      return;
+    case 'MUTATION_ID_REUSED':
+      incrementCounter('mutationIdReuseRejected');
+      return;
+    case 'REJECTED':
+      incrementCounter('crossTenantRejections');
+      return;
+    default:
+      return;
+  }
+}
 
 /**
  * The one place a mutation outcome becomes an HTTP reply. Three routes construct mutations — the
@@ -26,6 +59,8 @@ export async function executeMutation(
 ): Promise<FastifyReply> {
   const outcome = await applyMutation(db, { ...input, traceId: request.traceId });
   const body = outcome.body;
+
+  countOutcome(body.status);
 
   const fields = {
     orderId: input.orderId,

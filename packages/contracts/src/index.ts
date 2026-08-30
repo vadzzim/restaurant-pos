@@ -302,6 +302,8 @@ export interface DependenciesResponse {
   status: HealthStatus;
   dependencies: DependencyReport[];
   outbox: OutboxBacklog;
+  /** Per consumer group, since M11. Empty when no admin client is configured on this instance. */
+  consumerGroups: ConsumerLagReport[];
 }
 
 export interface MenuItem {
@@ -422,3 +424,200 @@ export const KITCHEN_TERMINAL_ID = 'kitchen-display';
 export function findTerminal(terminalId: string): TerminalDescriptor | undefined {
   return TERMINALS.find((terminal) => terminal.id === terminalId);
 }
+
+/* ------------------------------------------------------------------------------------------- *
+ * §20 observability and the §16 debug screen.
+ * ------------------------------------------------------------------------------------------- */
+
+/**
+ * Where a number on `/debug` comes from, and therefore what it means when it is small.
+ *
+ * This travels with every counter because §20's list mixes two very different things. A `process`
+ * counter is in-memory in one API instance and resets on restart; a `database` counter is derived
+ * from a row that already exists and survives everything. Rendering them side by side without
+ * saying which is which makes a restarted instance look like an idle system.
+ *
+ * `shared` is a Redis counter — the fact happens in the worker and has no row anywhere. `client`
+ * is counted in the browser, because the server cannot observe an offline sync at all.
+ */
+export type CounterSource = 'process' | 'database' | 'shared' | 'client';
+
+/** One §20 counter, with its provenance and, when it needs one, a caveat for the reader. */
+export interface CounterReading {
+  name: string;
+  /** `null` means the source could not be read — a Redis outage, never a zero in disguise. */
+  value: number | null;
+  source: CounterSource;
+  /** Present when the number means something narrower than its name suggests. */
+  note?: string;
+}
+
+/**
+ * A terminal Socket.IO currently holds, as Redis knows it. `pendingCount` and `offline` are
+ * reported by the browser — nothing else can know them — and everything else is server-observed.
+ */
+export interface PresenceEntry {
+  terminalId: string;
+  restaurantId: string;
+  role: 'pos' | 'kitchen';
+  socketId: string;
+  /** The client's own pending-mutation queue depth (§14). */
+  pendingCount: number;
+  /** The §18 per-terminal offline switch, as the browser has it. */
+  offline: boolean;
+  lastSeenAt: string;
+}
+
+/**
+ * `GET /api/debug/metrics`. Counters and presence together because both are gauges rather than
+ * stored records; every other debug endpoint returns rows.
+ */
+export interface MetricsResponse {
+  counters: CounterReading[];
+  terminals: PresenceEntry[];
+  /** Why `terminals` is empty and the `shared` counters are `null`, when that is the case. */
+  presenceError?: string;
+  /** This API instance's uptime, so a `process` counter can be read against it. */
+  processUptimeSeconds: number;
+}
+
+/** One row of `outbox_events` as `/debug` renders it (§16: dead-lettered rows included). */
+export interface OutboxRowView {
+  id: string;
+  aggregateId: string;
+  restaurantId: string;
+  eventType: string;
+  eventVersion: number;
+  createdAt: string;
+  publishedAt: string | null;
+  deadLetteredAt: string | null;
+  attemptCount: number;
+  /** Non-zero means a publisher died holding this row; see `known-problems.md`. */
+  reclaimCount: number;
+  lastError: string | null;
+  claimedBy: string | null;
+  nextAttemptAt: string;
+}
+
+/** One row of `print_jobs` as `/debug` renders it (§16: print job state). */
+export interface PrintJobRowView {
+  id: string;
+  orderId: string;
+  restaurantId: string;
+  ticketHash: string;
+  state: PrintJobState;
+  attemptCount: number;
+  lastError: string | null;
+  printedAt: string | null;
+  updatedAt: string;
+}
+
+/**
+ * `GET /api/debug/outbox` — the delivery view. Both halves are at-least-once pipelines with
+ * attempts, a last error and a dead-letter state, and the question a human asks of them is the
+ * same one: what is stuck?
+ */
+export interface OutboxDebugResponse {
+  outbox: {
+    pending: number;
+    published: number;
+    deadLettered: number;
+    rows: OutboxRowView[];
+  };
+  printJobs: {
+    pending: number;
+    printed: number;
+    failed: number;
+    deadLettered: number;
+    rows: PrintJobRowView[];
+  };
+}
+
+/**
+ * One event as the stream renders it. `consumedBy` is which consumers have recorded it, which is
+ * what makes "published but the kitchen has not seen it" visible without reading two tables.
+ */
+export interface DebugEventView {
+  eventId: string;
+  eventType: string;
+  aggregateId: string;
+  restaurantId: string;
+  version: number;
+  createdAt: string;
+  publishedAt: string | null;
+  deadLetteredAt: string | null;
+  traceId: string | null;
+  consumedBy: string[];
+}
+
+export interface EventsDebugResponse {
+  events: DebugEventView[];
+}
+
+/** One `conflict_log` row: versions, `mutationId`, resolution (§8, §16). */
+export interface ConflictView {
+  id: string;
+  orderId: string;
+  terminalId: string;
+  mutationId: string;
+  mutationType: string;
+  clientBaseVersion: number;
+  serverVersion: number;
+  serverStatus: OrderStatus;
+  resolution: string | null;
+  createdAt: string;
+}
+
+export interface ConflictsDebugResponse {
+  conflicts: ConflictView[];
+  /** Total rows, not just the page above. */
+  total: number;
+  /** Rows with no resolution: a client queue still halted under §14.1. */
+  unresolved: number;
+}
+
+/**
+ * Committed offsets against the high watermark for one consumer group. `lag: null` means the
+ * broker or the admin client could not answer — never a guessed zero, which would read as
+ * "the kitchen is up to date" during exactly the outage it must not.
+ */
+export interface ConsumerLagReport {
+  groupId: string;
+  topic: string;
+  lag: number | null;
+  error?: string;
+}
+
+export const SHARED_COUNTER_NAMES = ['duplicateKafkaEventsPrevented'] as const;
+
+export type SharedCounterName = (typeof SHARED_COUNTER_NAMES)[number];
+
+/**
+ * The Redis key one shared counter lives at. A pure function in `contracts` rather than a helper
+ * in either app, because the API reads what the worker writes and a key spelled twice is a key
+ * spelled two ways eventually.
+ */
+export const sharedCounterKey = (name: SharedCounterName): string => `metrics:counter:${name}`;
+
+export const presenceKey = (terminalId: string): string => `presence:terminal:${terminalId}`;
+
+export const PRESENCE_KEY_PATTERN = 'presence:terminal:*';
+
+/** What the browser sends on the presence heartbeat, and on every `subscribe` (§13). */
+export interface PresenceReport {
+  terminalId: string;
+  restaurantId: string;
+  role: 'pos' | 'kitchen';
+  pendingCount: number;
+  offline: boolean;
+}
+
+export const PRESENCE_EVENT_NAME = 'presence';
+
+/**
+ * How often a connected browser reports its presence, and therefore how old an entry may be before
+ * `/debug` marks it stale. It lives here rather than in the server's environment because the
+ * browser is what sends the beat; the server's `PRESENCE_TTL_MS` is three of these, so an entry
+ * survives two lost heartbeats and no more.
+ */
+export const PRESENCE_HEARTBEAT_MS = 5_000;

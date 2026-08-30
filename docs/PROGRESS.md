@@ -8,52 +8,55 @@
 
 ## Current state
 
-**Last completed:** M10 — the BullMQ print job (ADR 014): a fake printer that fails on demand and
-honours an idempotency key, `print_jobs` written only by the processor, `ticket_hash` as the
-record's identity, bounded backoff and a dead-letter state owned by BullMQ, and a reconciliation
-sweep that repairs every way an enqueue can be lost. Three review rounds, then a clean fourth:
-findings 2 → 2 → 2 → 0, five fixed and one investigated and rejected. The reasoning is in
-`build-log.md`; the one-line lesson is that M10's invariant — *Redis is soft, and nothing about
-printing may stop an order or a kitchen ticket* — was stated correctly in an ADR and attached to
-the wrong mechanism three times.
+**Last completed:** M11 — the debug dashboard. Five §17 endpoints with a decided ownership split,
+every §20 counter carrying **where it comes from** (`process` / `database` / `shared` / `client`),
+terminal presence in Redis with a TTL, consumer lag from a Kafka admin, and `/debug` rendering the
+seven §16 sections it owns. Read-only: not one button. One review pass, one P1 — a leaked Kafka
+admin client under overlapping polls, which would have stopped the API exiting on SIGTERM. The
+argument is in `build-log.md`; the one-line lesson is that **a fact with a row needs no transport**,
+so only one counter needed Redis.
 
-**Demoable end to end:** the whole order lifecycle, a broker outage, reloading the tab mid-order,
-§19.2, §19.3 and §19.9. The publisher and the printer are driven from a terminal, not a button.
+Two pre-existing defects surfaced by running the system, both fixed here because they blocked
+M11's verification: the worker could not boot under Node's ESM loader (`KafkaJSProtocolError` is
+not a detectable named export of a CommonJS `kafkajs` — green under vitest and tsup, `SyntaxError`
+in production), and `pnpm lint` was already red on two doc files.
 
-**Green:** typecheck, lint, build, **286 tests** (61 domain, 57 api, 55 worker, 113 web) against a
-real PostgreSQL, plus **three integration tests** that run only under `pnpm verify:integration` —
-two against a real Redpanda (§21.12, §21.13) and one against a real Redis and BullMQ worker.
-**All sixteen** mandatory §21 tests exist and are named by their spec number.
+**Demoable end to end:** the order lifecycle, a broker outage, reloading the tab mid-order, §19.2,
+§19.3, §19.9, and now `/debug` populating live. The publisher and the printer are still driven from
+a terminal, not a button.
 
-**Next:** M11 — the debug dashboard. Model **Sonnet**, size **M**. The brief is at the bottom.
+**Green:** typecheck, lint, build, **319 tests** (61 domain, 73 api, 55 worker, 130 web) against a
+real PostgreSQL, plus **three** under `pnpm verify:integration`. All sixteen mandatory §21 tests
+exist, named by their spec number.
+
+**Next:** M12 — the failure simulator. Model **Sonnet**, size **M**. The brief is at the bottom.
 
 ## What exists
 
 One line per unit. The detail is in the code and in the ADRs — do not restate it here.
 
-- **Docs** — the files CLAUDE.md lists, plus briefs `milestones/M01…M10.md`. ADRs 001–007 and
-  009–014 accepted; only 008 (M13) is unwritten.
-- `packages/config` — zod environment, Kafka topics, outbox and `PRINT_*` tuning.
-- `packages/contracts` — statuses, the nine mutation types, the nine event types, every payload,
-  the §5 shapes, `ConflictReason`, socket names, `TERMINALS`.
-- `packages/domain` — `calculateTotalCents`, `isValidTransition`, `decide()`: **the whole of §8**,
-  table-driven, no database and no HTTP.
-- `packages/db` — fifteen tables, three migrations, seed, `db:check`, `@pos/db/testing`, and
-  `printer-controls.ts` (the one reader and writer of the `Fail Printer` switch).
+- **Docs** — what CLAUDE.md lists, plus briefs `milestones/M01…M11.md`. ADRs 001–007 and 009–014
+  accepted; only 008 (M13) is unwritten.
+- `packages/config` — zod environment: topics, outbox, `PRINT_*`, `PRESENCE_TTL_MS`,
+  `DEBUG_ROW_LIMIT`.
+- `packages/contracts` — statuses, mutations, events, the §5 shapes, `ConflictReason`, socket
+  names, `TERMINALS`, and the M11 debug shapes: `CounterReading`/`CounterSource`, `PresenceEntry`,
+  `PresenceReport`, the four debug responses, `ConsumerLagReport`, and the two pure key functions
+  `sharedCounterKey` / `presenceKey` that stop two processes spelling one Redis key two ways.
+- `packages/domain` — `decide()` and the pricing and transition rules: **the whole of §8**.
+- `packages/db` — fifteen tables, three migrations, seed, `db:check`, `@pos/db/testing`.
 - `apps/api` — the nine-branch mutation endpoint, the two §17 kitchen adapters, the four reads,
-  `modules/realtime/` (Socket.IO, Redis adapter, `roomsFor()`, the §12.2 consumer),
-  `modules/printer/` (the fake device), `/api/health/{live,ready}`,
-  `/api/debug/dependencies`, the §17 error envelope, and `requestId`/`traceId` on every log line.
-- `apps/worker` — the §10 three-step outbox publisher with lease, backoff, dead-lettering and the
-  `outbox_controls` pause/delay (ADR 010); the Kafka producer and the kitchen consumer with its
-  transactional projection; `modules/printing/` — ticket hash, printer client, the processor that
-  is the only writer of `print_jobs`, the BullMQ queue and worker, the sweep, and
-  `shared/redis.ts` + `shared/timeout.ts` (ADR 014). Two CLIs:
-  `pnpm -F @pos/worker outbox` and `… printer`.
-- `apps/web` — the POS screen with all six commands and the kitchen screen with four columns and
-  two; Pinia stores for menu, order, kitchen and connection; Dexie persistence (ADR 013); the §14
-  sync engine with §14.1's halt and rebase, the optimistic queue projection, and the per-terminal
-  offline switch (ADR 002). `/debug` and `/demo` are still the M1 placeholders (M11, M16).
+  `modules/realtime/` (Socket.IO with presence writes, Redis adapter, the §12.2 consumer),
+  `modules/printer/`, `/api/health/{live,ready}`, `/api/debug/dependencies` (now with lag), and
+  **`modules/debug/`** — the counter registry, the reporting queries, the metrics assembly, the lag
+  probe, the Redis presence and shared-counter store, and the four debug routes.
+- `apps/worker` — the §10 outbox publisher (ADR 010), the Kafka producer, the kitchen consumer and
+  its transactional projection, `modules/printing/` (ADR 014). Two CLIs: `outbox` and `printer`.
+- `apps/web` — the POS and kitchen screens; Pinia stores for menu, order, kitchen, connection and
+  **debug**; Dexie persistence (ADR 013), now with `syncCounters` at schema v2; the §14 sync engine;
+  the offline switch (ADR 002); the presence heartbeat in `realtime/socket.ts`; `domain/debug-view.ts`
+  (every judgement `/debug` makes, as pure functions) and `views/DebugView.vue`. `/demo` is still
+  the M1 placeholder (M16).
 - **Scripts and CI** — `scripts/verify-integration.mjs`, `.github/workflows/ci.yml`.
 
 ## Standing decisions
@@ -61,61 +64,56 @@ One line per unit. The detail is in the code and in the ADRs — do not restate 
 ADRs are canon; the full historical list is in `progress-archive.md`. What is not in an ADR:
 
 - Full scope, nothing cut (Fastify and Drizzle: ADR 001, 007).
-- Twenty milestones, M0–M19. **Nine left: M11–M19.**
-- Drop order if the interview date closes in: M16 (`/demo`), then M17 (PWA). Do not drop M15 or
-  M18 first.
+- Twenty milestones, M0–M19. **Eight left: M12–M19.**
+- Drop order if the date closes in: M16 (`/demo`), then M17 (PWA). Never M15 or M18 first.
 
 ## Known problems
 
-In `docs/known-problems.md` — accepted limits first, then the P2/P3 review backlog. **Do not read
-it to start a session.** The entries that bear on the next milestone are named in the block below.
+In `docs/known-problems.md`: accepted limits, then the P2/P3 backlog, no longer empty. **Do not
+read it to start a session.** What bears on M12 is named in the block below.
 
 ## First command of the next session
 
 ```
-Read CLAUDE.md and docs/PROGRESS.md, then expand M11 from docs/MILESTONES.md into
-docs/milestones/M11.md and implement M11 only. Stop when the M11 Verification block passes.
+Read CLAUDE.md and docs/PROGRESS.md, then expand M12 from docs/MILESTONES.md into
+docs/milestones/M12.md and implement M12 only. Stop when the M12 Verification block passes.
 
-M11 is the debug dashboard: every counter from §20, the five read endpoints
-`GET /api/debug/{events,conflicts,outbox,dependencies,metrics}`, terminal presence in Redis, and
-the `/debug` page with all the sections §16 asks for — including dead-lettered outbox rows, print
-job state, and hard-versus-soft dependency marking. Verification: every section populates against
-live traffic. Model: Sonnet. Size: M.
+M12 is the failure simulator: §18's eleven controls, each with visible feedback, on `/debug`.
+Verification: exercise every control. Model: Sonnet. Size: M.
 
-Seven things worth knowing before you plan:
+Six things worth knowing before you plan:
 
-1. **`/debug` is the first screen that reads across every subsystem**, so its risk is not the SQL
-   but the shape: five endpoints, one page, and a temptation to let the page query whatever it
-   likes. Decide up front what each endpoint owns, and keep the counters in one module rather
-   than incremented at twenty call sites.
-2. **§20's counter list is long and half of it does not exist yet.** API requests and errors,
-   active sockets, mutations received/applied, duplicates prevented, id reuse rejected,
-   cross-tenant rejections, conflicts, blocked mutations, outbox pending/published/dead-lettered,
-   Kafka events consumed, duplicate events prevented, print jobs succeeded/failed/dead-lettered,
-   offline sync successes and failures. Some are database queries (outbox, conflicts, print jobs)
-   and some are in-process counters that reset on restart. **Say which is which on the page** —
-   a number that silently resets is worse than no number.
-3. **The counters live in two processes.** The worker publishes and prints; the API serves
-   `/debug`. An in-process counter in the worker is not readable from the API without either a
-   shared store (Redis) or a database read. Prefer deriving from the database where the fact is
-   already there — `outbox_events`, `print_jobs`, `conflict_log` all carry their own history —
-   and reach for Redis only for what genuinely has no row.
-4. **Consumer lag is the one dependency number that needs a Kafka admin client.**
-   `/api/debug/dependencies` has been reporting everything except lag since M6, and
-   `known-problems.md` names it as the gap. It belongs here.
-5. **Terminal presence in Redis is new state with a lifetime.** Decide what writes it (the
-   Socket.IO connection handler), what expires it (a TTL, refreshed on activity), and what a
-   stale entry means on screen. A presence list that only grows is a bug that looks like a
-   feature for the first ten minutes.
-6. **Read-only, and no new switches.** M12 owns §18's controls, including moving `Simulate
-   Offline`, `Pause Outbox Publisher`, `Delay Outbox Publishing` and `Fail Printer` onto this
-   page. M11 builds the page and the numbers; it does not build a single button.
-7. **Three entries in `known-problems.md` are things M11 turns into a number, not things to fix:**
-   a Redis outage is invisible today; a row can be reclaimed for ever with only a log line to show
-   for it; and the kitchen projection is load-bearing for writes (ADR 012), so its lag has to be
-   visible. Read those three entries; do not read the rest of the file.
+1. **Most of the switches already exist; almost none of them has a button.** `Simulate Offline` is
+   a per-terminal `ref` in `apps/web/src/api/offline.ts` with a toggle in the POS header;
+   `Pause Outbox Publisher` and `Delay Outbox Publishing` are the `outbox_controls` singleton row,
+   flipped by `pnpm -F @pos/worker outbox`; `Fail Printer` is the `printer_controls` singleton,
+   flipped by `… printer fail` / `fix`. M12 is mostly **wiring**, plus writes for the ones with no
+   mechanism yet. Read the `known-problems.md` entry that names where all eleven live today.
+2. **M11 built the page and deliberately built no control.** `/debug` polls five read-only
+   endpoints every 2 s and `apps/web/src/stores/debug.ts` writes nothing anywhere. The failure
+   simulator has a named placeholder section at the bottom of `DebugView.vue`; that is where it
+   goes. Every control needs a **write** endpoint, and §17's list has exactly one:
+   `POST /api/debug/flags/:key`, which is M13's. Decide up front what the new write surface is and
+   say so in the brief — inventing five endpoints is the failure mode here.
+3. **A control is only useful if its effect is visible on the same screen.** M11 gives you that
+   for free: pausing the publisher makes `outboxEventsPending` climb and the backlog age grow;
+   failing the printer moves `print_jobs` through `FAILED` and then `DEAD_LETTER`; taking a
+   terminal offline shows `OFFLINE` and a rising `PENDING n` on its presence row. Prefer a control
+   whose feedback is an existing number over one that needs a new indicator.
+4. **The switches live in three lifetimes, and that is the interesting part.** `Simulate Offline`
+   is per browser and dies with the tab; `outbox_controls` and `printer_controls` are singleton
+   rows a human threw that must survive a worker restart; anything you add in Redis expires. Say
+   which is which next to each control, exactly as M11 does for its counters.
+5. **The publisher observes a pause within one `OUTBOX_POLL_MS`, not instantly**, and
+   `outbox_controls` is fleet-wide — two workers cannot be paused independently. Both are in
+   `known-problems.md`. A button that implies otherwise is worse than no button.
+6. **Do not fix the M11 review backlog** — three entries, swept in a dedicated pass, not here.
 
 Verification is `pnpm -F @pos/api test`, `pnpm -F @pos/web test`, lint, typecheck, build, and
 `pnpm verify:integration`. Run tests narrowly; do not run the whole monorepo suite.
 One review pass at the end, P1s only — see CLAUDE.md, "Review discipline".
+
+Note on running the system: `pnpm -F @pos/api start` and `pnpm -F @pos/worker dev` both work, and
+the demo database is migrated. If a section of /debug is empty, check the worker is actually up
+before suspecting the query.
 ```

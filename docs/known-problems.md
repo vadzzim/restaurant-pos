@@ -1,7 +1,7 @@
 # Known problems and open questions
 
-> Not read at the start of a session. `PROGRESS.md` links here, and the *First command of the next
-> session* block names the two or three entries that actually block the next milestone.
+> Not read at the start of a session. `PROGRESS.md` links here, and the _First command of the next
+> session_ block names the two or three entries that actually block the next milestone.
 >
 > Two kinds of entry live here:
 >
@@ -9,20 +9,32 @@
 >    in the interview. Do not "fix" one without checking the ADR it came from.
 > 2. **The review backlog** — P2 and P3 findings from review rounds. Since 2026-08-30 a milestone
 >    gets **one** review pass and fixes only P1s; everything below P1 is written here as a line and
->    swept in a dedicated pass every three or four milestones. See `CLAUDE.md`, *Review discipline*.
+>    swept in a dedicated pass every three or four milestones. See `CLAUDE.md`, _Review discipline_.
 
 ## Review backlog (P2 / P3, not yet fixed)
 
-*Empty. The next review pass appends here instead of opening a second round.*
-
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
+
+- **[M11, P2]** `readDatabaseCounters` runs three times per `/debug` poll cycle — once each for
+  `conflicts`, `outbox` and `metrics` — so eleven `count(*)` scans every two seconds against tables
+  that grow without bound. `apps/api/src/modules/debug/api/debug-routes.ts`. A request-scoped
+  memo, or one endpoint owning the counts, would fix it; a seeded table of ~10^5 outbox rows and a
+  timing on `/api/debug/metrics` would prove it matters.
+- **[M11, P3]** A presence `terminalId` is validated only as 1–64 characters, not against
+  `TERMINALS`, so any browser can claim any name and appear on the active-terminals panel.
+  `apps/api/src/modules/realtime/socket-server.ts`. Harmless while the socket has no
+  authentication at all (see below), and bounded by the TTL; a whitelist against `TERMINALS` plus
+  `KITCHEN_TERMINAL_ID` is the fix.
+- **[M11, P3]** A socket that reports presence for one terminal and then another leaves the first
+  entry behind until its TTL: `claimed` in the connection handler tracks only the latest, so the
+  eager delete on disconnect covers one terminal per socket. No screen does this today — a POS tab
+  that changes terminal reconnects — and fifteen seconds of a stale row is the whole cost.
 
 ## Accepted limits and open questions
 
-
 - **`START_PREPARING` and `MARK_READY` conflict on a repeat rather than answering
   `ALREADY_APPLIED`.** This is deliberate (§8: out-of-order transitions conflict) and it is what
-  makes §21.10 legible, but it means a kitchen display that lost a response and then *discarded*
+  makes §21.10 legible, but it means a kitchen display that lost a response and then _discarded_
   the pending command will be told `INVALID_STATUS_TRANSITION` if it presses again — technically
   right, and it reads like a failure. Worth saying out loud in the interview.
 - **The kitchen commands from a lagging projection** and takes a conflict when it is behind
@@ -64,8 +76,10 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   that swallows bytes, and the fault itself produces unhandled `Connection is closed.` rejections
   from ioredis, which would fail the suite for a reason unrelated to this code. The reasoning that
   it is bounded is in `build-log.md`, round 3.
-- **A Redis outage is invisible until M11.** Nothing prints, the sweep logs a warning every
-  `PRINT_RECONCILE_MS`, readiness stays green (ADR 014), and no screen says why.
+- ~~**A Redis outage is invisible until M11.**~~ Fixed in M11: the `redis` dependency row goes
+  `down`, the `shared` counters read `null` rather than zero, and the active-terminals panel
+  empties. Nothing still prints and readiness is still green (ADR 014) — that part is the design;
+  what changed is that a screen now says why.
 - Infrastructure URLs intentionally have development defaults. M14 production images must require
   explicit values rather than inheriting localhost defaults.
 - **Kafka is in the test path twice, and only twice.** `kafka-roundtrip.integration.test.ts` runs
@@ -78,7 +92,8 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   logged, and that is all: a poison event that kills the publisher process every time it is picked
   up would loop indefinitely. Dead-lettering on a reclaim ceiling was rejected on purpose — a
   rolling restart would then dead-letter healthy events (ADR 010) — so the answer is a human
-  reading M11's `/debug`, not a counter.
+  reading `/debug`, not a counter. Since M11 that page is built: `reclaim_count` is a column on
+  every row of `GET /api/debug/outbox` and a non-zero one is badged `RECLAIMED n`.
 - **The publish delay is per send, so a large one shrinks the batch.** With `publish_delay_ms` set
   high, the lease guard stops each pass after a row or two and the rest of the claim is released and
   re-claimed next pass. That is correct and it is also wasteful; it only happens while a human has
@@ -95,12 +110,13 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   when that delay ends, which can be seconds. Both are the cost of the control living in PostgreSQL
   rather than in the process that flips it.
 - **`outbox_controls` is fleet-wide.** Two workers cannot be paused independently, and nothing
-  records *who* paused the publisher or when — only `updated_at`. §18 asks for a demo switch, not an
+  records _who_ paused the publisher or when — only `updated_at`. §18 asks for a demo switch, not an
   audit trail.
-- **`/api/debug/dependencies` reports no consumer lag.** It needs a Kafka admin describing group
-  offsets and belongs with §20's other counters in M11. The report is also a snapshot, not a
-  monitor: it cannot say how long a dependency has been down, and the outbox backlog age is the
-  only duration in it.
+- ~~**`/api/debug/dependencies` reports no consumer lag.**~~ Fixed in M11: per group, from a Kafka
+  admin client, and `null` with a reason when the broker cannot answer rather than a guessed zero.
+- **The dependency report is a snapshot, not a monitor.** It cannot say how long a dependency has
+  been down; the outbox backlog age is the only duration in it, and consumer lag is a depth rather
+  than a delay.
 - **A degraded API keeps receiving traffic, and that is the design.** Readiness green with Redpanda
   down means clients reach an instance whose screens do not update live; §13's reconnect-and-refetch
   and M13's polling transport are the mitigation, not the probe (ADR 011).
@@ -118,7 +134,7 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   Deliberate for a demo with no auth anywhere, and worth saying out loud.
 - **The projection wait is bounded and can still lose.** The kitchen screen shows `PROJECTION LAG`
   and the ticket appears only when a later event lands or the page is reloaded.
-- **One named residue in `expectationFor`:** a cancellation of an order that *was* sent to the
+- **One named residue in `expectationFor`:** a cancellation of an order that _was_ sent to the
   kitchen, but whose ticket this screen has not seen yet, gets no projection wait — the client
   cannot tell it apart from a cancellation of an `OPEN` order. Bounded by the next event or a
   reload. Closing it would mean putting "did this order ever reach the kitchen" into the
@@ -131,8 +147,8 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   the tab is showing POS-2. One screen per terminal is the assumption the whole client already
   makes; worth saying out loud, because a real fleet would want a background worker per device.
 - **A halted order the screen has left is listed, and can be returned to, and that is all.** New
-  commands are refused while the order *on screen* is halted, so a halt is resolved rather than
-  walked away from — but nothing stops the operator leaving an order *before* it conflicts and
+  commands are refused while the order _on screen_ is halted, so a halt is resolved rather than
+  walked away from — but nothing stops the operator leaving an order _before_ it conflicts and
   finding it halted later. `haltedElsewhere` and `focusOrder` exist for exactly that.
 - **The optimistic projection can differ from what the server produces.** It prices items from the
   menu, not from the order, and the item arithmetic is a second implementation of the server's SQL.
@@ -145,6 +161,11 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 - **A cached snapshot is briefly stale after a reload**, between hydration and the first refetch.
   That is what the cache is for, and it is visibly wrong for a moment against a server that moved
   on while the tab was closed.
+- **§20's `process` counters are one instance's, and reset with it.** `/debug` says so on every
+  group rather than hiding it, but with two API replicas (M14) the counter panel shows whichever
+  instance answered the poll. Everything durable is derived from PostgreSQL for exactly this
+  reason; making the in-process ones fleet-wide would mean shipping them to Redis, which buys a
+  number nobody asked for at the cost of a write on every request.
 - **§18's eleven controls are in three places, and none of them is `/debug`.** `Simulate Offline` is
   on the POS header, `Pause Outbox Publisher` and `Delay Outbox Publishing` are behind
   `pnpm -F @pos/worker outbox`, and `Fail Printer` is behind `pnpm -F @pos/worker printer`. M12
@@ -159,4 +180,3 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   cannot fail falsely, but neither is a proof that the unguarded code was broken — the reasoning in
   `build-log.md` is.
 - `outbox_events` and `processed_mutations` grow without bound. Archiving is out of scope.
-

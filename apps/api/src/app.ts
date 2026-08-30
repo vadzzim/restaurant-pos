@@ -3,6 +3,14 @@ import type { Db } from '@pos/db';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { registerConfigRoutes } from './modules/config/api/config-routes.js';
+import { registerDebugRoutes } from './modules/debug/api/debug-routes.js';
+import type { ConsumerLagProbe } from './modules/debug/application/consumer-lag.js';
+import { incrementCounter } from './modules/debug/application/counters.js';
+import type {
+  PresenceStore,
+  SharedCounterStore,
+  SocketGauge,
+} from './modules/debug/application/ports.js';
 import { registerHealthRoutes } from './modules/health/api/health-routes.js';
 import type { DependencyProbe } from './modules/health/application/dependency-probes.js';
 import { registerKitchenCommandRoutes } from './modules/kitchen/api/kitchen-command-routes.js';
@@ -36,6 +44,17 @@ export interface BuildAppOptions {
    * its own so it can read `physicalPrints()`, which is the assertion §21.14 actually rests on.
    */
   printer?: FakePrinter;
+  /**
+   * §20's `/debug` surface. Every one of these is optional and injected, for the reason ADR 006
+   * gives: `buildApp()` must build against PostgreSQL alone, so `fastify.inject` tests need
+   * neither Redis nor a broker. When one is absent the endpoint says so — presence comes back
+   * empty with a reason, lag comes back `null` — rather than pretending a zero.
+   */
+  socketGauge?: SocketGauge | undefined;
+  presence?: PresenceStore | undefined;
+  sharedCounters?: SharedCounterStore | undefined;
+  consumerLag?: ConsumerLagProbe | undefined;
+  debugRowLimit?: number;
 }
 
 /**
@@ -49,6 +68,11 @@ export function buildApp({
   probes,
   healthTimeoutMs,
   printer = createFakePrinter(),
+  socketGauge,
+  presence,
+  sharedCounters,
+  consumerLag,
+  debugRowLimit = 50,
 }: BuildAppOptions): FastifyInstance {
   const app = Fastify({
     logger: {
@@ -62,6 +86,21 @@ export function buildApp({
   });
 
   registerRequestContext(app);
+
+  /**
+   * §20's `apiRequests` / `apiErrors`, at the one place every response passes through.
+   *
+   * `onResponse` rather than a per-route wrapper: it counts the 404s and the malformed bodies too,
+   * which are exactly the requests a route handler never sees. The split is by status code and not
+   * by whether the error handler ran, because a 503 from readiness is an error to whoever is
+   * reading this page whether or not it was thrown.
+   */
+  app.addHook('onResponse', async (_request, reply) => {
+    incrementCounter('apiRequests');
+    if (reply.statusCode >= 400) {
+      incrementCounter('apiErrors');
+    }
+  });
 
   /**
    * The one place a failure becomes a response. Three kinds arrive here and each has one answer:
@@ -106,7 +145,7 @@ export function buildApp({
     return reply.status(404).send(body);
   });
 
-  registerHealthRoutes(app, { db, probes, timeoutMs: healthTimeoutMs });
+  registerHealthRoutes(app, { db, probes, timeoutMs: healthTimeoutMs, consumerLag });
   registerConfigRoutes(app, db);
   registerMenuRoutes(app, db);
   registerOrderReadRoutes(app, db);
@@ -114,6 +153,13 @@ export function buildApp({
   registerMutationRoutes(app, db);
   registerKitchenCommandRoutes(app, db);
   registerPrinterRoutes(app, db, printer);
+  registerDebugRoutes(app, {
+    db,
+    rowLimit: debugRowLimit,
+    socketGauge,
+    presence,
+    sharedCounters,
+  });
 
   return app;
 }

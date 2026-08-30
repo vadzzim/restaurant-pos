@@ -1310,3 +1310,93 @@ ready-then-unreachable half of that property is **not** covered: the proxy that 
 produces unhandled `Connection is closed.` rejections from the fault itself, which would make the
 suite red for a reason that has nothing to do with this code. That gap is recorded in
 `PROGRESS.md` rather than papered over with a test that ignores errors.
+
+## M11 — the debug dashboard
+
+### The two-process problem, answered by not solving it
+
+§20's counter list mixes facts that happen in the API with facts that happen in the worker, and
+`/debug` is served by the API. The obvious design ships the worker's counters somewhere the API can
+read them, and the obvious somewhere is Redis. That would have been eight or nine counters in
+Redis, every one of them a fire-and-forget write on a hot path, all of them zero after a `FLUSHALL`
+and none of them agreeing with the database they describe.
+
+The rule taken instead: **derive from the database wherever the fact already has a row.** Published
+events are `outbox_events.published_at`. Printed tickets are `print_jobs.state`. Consumed events are
+`processed_events`, grouped by `consumer_name`. Conflicts and blocked mutations are `conflict_log`.
+The idempotency ledger is `processed_mutations`. All of that is durable, fleet-wide, survives a
+restart of either process, and needs no transport at all — the worker writes rows and the API reads
+them, which is what the outbox pattern already made true.
+
+Exactly one counter is left with no row anywhere: a redelivery that dedup suppressed. Both consumers
+`INCR` one Redis key whose name comes from `sharedCounterKey()` in `@pos/contracts`, so the two
+processes cannot spell it differently. When Redis is unreachable it reads `null`, never `0` — and
+that is the point rather than an edge case: `known-problems.md` said a Redis outage was invisible,
+and a zero here would have been the most convincing way to keep it that way.
+
+Three sources, and the page names all three. A `process` counter resets with the API and says so; a
+`database` counter is durable and says so; a `shared` counter can be unreadable and says so. A
+fourth, `client`, is counted in the browser and persisted in Dexie, because the server genuinely
+cannot observe an offline sync: a queued mutation that finally arrives is indistinguishable from one
+typed a second ago.
+
+### Two endpoints over one table, on purpose
+
+`GET /api/debug/events` and `GET /api/debug/outbox` both read `outbox_events`. That looks like
+duplication and is not: one asks _what happened_ — newest first, with the consumers that recorded
+each event — and the other asks _what is stuck_ — dead-lettered first, then unpublished, with
+attempts, `reclaim_count` and the last error. Merging them gives either a log with retry columns
+nobody reads or a queue with a history nobody wanted. `outbox` also owns `print_jobs`, because both
+halves are at-least-once pipelines with a dead-letter state and the question asked of them is the
+same one.
+
+The conflict endpoint returns a page of rows and takes its totals from the counter query rather than
+from `rows.length`. Fifty out of four hundred calling itself the total would have been the one
+number on a page about honesty that lied.
+
+### Presence: the mechanism is the TTL, not the disconnect handler
+
+Presence is written only by the `presence` heartbeat, never by `subscribe`: the client is the one
+thing that knows its pending-mutation count and its §18 offline switch, and an entry derived from a
+subscribe would be a guess at half its fields. The key is `SET … PX`, one round trip, so there is no
+window in which a presence key exists without a lifetime.
+
+A disconnect deletes the key eagerly, and that is a courtesy. What makes the panel correct is the
+TTL: a browser killed, a lid closed, or the API instance holding the socket dying are all cases the
+handler never runs for. Stale is marked at two missed beats rather than one — a poll lands at an
+arbitrary point in the interval, so a one-beat threshold would call every healthy terminal stale
+about half the time — and a stale entry is shown, not hidden, because "POS-1 was here nine seconds
+ago" is information and dropping it would make a struggling terminal look like one that never
+connected.
+
+### The review round: a leak that only appears when the page is doing its job
+
+One P1. `createConsumerLagProbe` memoised the admin _client_ and awaited `connect()` between the
+check and the assignment. `/debug` polls every two seconds and a probe is allowed to take as long as
+its timeout, so overlapping calls are the ordinary case rather than a race worth waving away: two
+calls each build a client, one is overwritten while still connected, and nothing ever disconnects
+it. A leaked KafkaJS admin keeps its retry timers alive, so the API would stop exiting on SIGTERM —
+the same failure M10 spent three rounds on, in a new place. The fix memoises the _promise_, clears
+it on failure so a dead connection is not remembered as the connection, and `close()` awaits a
+connection still being opened rather than ignoring it. A test opens two probes against a held-open
+`connect()` and asserts one client is built and one disconnected.
+
+Two P3s and a P2 went to the review backlog unfixed, per the discipline: `readDatabaseCounters` runs
+three times per poll cycle, a `terminalId` is not checked against `TERMINALS`, and one socket can
+leave one stale presence entry behind for its TTL.
+
+### One pre-existing defect, found by trying to run the thing
+
+The milestone's own verification asks for every section to populate against live traffic, and that
+needs a worker. It would not start: `import { KafkaJSProtocolError } from 'kafkajs'` is a
+`SyntaxError` under Node's own ESM loader, because KafkaJS is CommonJS and Node detects its named
+exports by static analysis of the module body — `Kafka` is found that way and `KafkaJSProtocolError`
+is not. The import has been there since M9 and **every test passed against it**, because vitest and
+tsup both rewrite the import into a `require`. So the worker suite was green against a process that
+could not boot. Fixed by destructuring the default export, which is the interop Node itself
+suggests, with the reasoning in a comment so nobody tidies it back.
+
+The lesson is narrower than "test the built artefact": it is that a test runner which transpiles
+modules cannot answer a question about module loading, and the only thing that can is starting the
+process. The same session also found the demo database two migrations behind, which no test could
+have found either, for the same reason — the test database is created and migrated by the suite.

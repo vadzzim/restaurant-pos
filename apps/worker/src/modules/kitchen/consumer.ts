@@ -29,6 +29,12 @@ export async function startKitchenConsumer(
   logger: Logger,
   onFatalCrash: () => void = () => undefined,
   enqueuePrint?: PrintEnqueue,
+  /**
+   * §20's `duplicateKafkaEventsPrevented`. Injected and defaulted to a no-op: it is a Redis write,
+   * Redis is soft (ADR 014), and a redelivery that dedup correctly absorbed must never become a
+   * failed message handler because a counter could not be recorded.
+   */
+  onDuplicateEvent: () => void = () => undefined,
 ): Promise<KitchenConsumerHandle> {
   const consumer = kafka.consumer({ groupId: config.KITCHEN_CONSUMER_GROUP });
 
@@ -72,6 +78,10 @@ export async function startKitchenConsumer(
           },
           'kitchen event consumed',
         );
+
+        if (result === 'duplicate') {
+          onDuplicateEvent();
+        }
 
         if (result === 'applied' && event.eventType === 'OrderSentToKitchen') {
           await enqueueTicket(event, enqueuePrint, logger);

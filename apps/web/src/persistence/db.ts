@@ -75,10 +75,32 @@ export interface SyncMetadataRecord {
   updatedAt: string;
 }
 
+/**
+ * §20's two client counters — offline sync successes and failures — per terminal.
+ *
+ * They are here rather than in memory, and rather than on the server, for two reasons. The server
+ * cannot observe them at all: a queued mutation that finally reaches it is indistinguishable from
+ * one typed a second ago. And `/debug` is a different route in the same SPA, often a different
+ * tab; a counter held in a Pinia store would read zero there while POS-1 was busy syncing next to
+ * it. The client database is already shared by every tab on the origin, so this is where the two
+ * screens meet.
+ *
+ * A "sync" is one pass of the engine over one terminal's queue, not one mutation: `drained` is a
+ * success, and `halted` / `failed` / `offline` are the ways a pass ends without emptying the
+ * queue.
+ */
+export interface SyncCounterRecord {
+  terminalId: string;
+  successes: number;
+  failures: number;
+  updatedAt: string;
+}
+
 export class PosDatabase extends Dexie {
   declare orders: EntityTable<PersistedOrderRecord, 'id'>;
   declare pendingMutations: EntityTable<PendingMutationRecord, 'mutationId'>;
   declare syncMetadata: EntityTable<SyncMetadataRecord, 'terminalId'>;
+  declare syncCounters: EntityTable<SyncCounterRecord, 'terminalId'>;
 
   constructor(name = 'pos-client') {
     super(name);
@@ -90,6 +112,13 @@ export class PosDatabase extends Dexie {
       orders: 'id, terminalId',
       pendingMutations: 'mutationId, orderId, terminalId, createdAt',
       syncMetadata: 'terminalId',
+    });
+
+    // M11 adds one table and changes none of the three above, so an upgrade is additive and a
+    // database written by M8 opens without losing a queued mutation. Dexie needs the earlier
+    // version declared for that to be true, which is why `version(1)` stays.
+    this.version(2).stores({
+      syncCounters: 'terminalId',
     });
   }
 }

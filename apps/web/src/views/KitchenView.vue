@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import type { DomainEvent, KitchenTicket, KitchenTicketState } from '@pos/contracts';
+import {
+  KITCHEN_TERMINAL_ID,
+  type DomainEvent,
+  type KitchenTicket,
+  type KitchenTicketState,
+} from '@pos/contracts';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 
@@ -83,6 +88,16 @@ onMounted(async () => {
         restaurantId.value,
         event === undefined ? undefined : expectationFor(event, kitchen.tickets),
       ),
+    // The kitchen display belongs to a room, not to a till, so it reports the constant §5 uses for
+    // its mutations. It has no queue of its own — it issues commands through the POS write path
+    // and waits for the answer — so its pending count is zero by construction, not by omission.
+    presence: () => ({
+      terminalId: KITCHEN_TERMINAL_ID,
+      restaurantId: restaurantId.value,
+      role: 'kitchen',
+      pendingCount: 0,
+      offline: false,
+    }),
   });
 });
 

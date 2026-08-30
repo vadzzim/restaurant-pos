@@ -71,6 +71,19 @@ const environmentSchema = z.object({
    * the longest backoff a live job can be waiting out, or the sweep re-enqueues healthy retries.
    */
   PRINT_STALE_MS: z.coerce.number().int().positive().default(60_000),
+  /**
+   * How long a presence entry outlives its last heartbeat (§16: active terminals with their
+   * pending counts). The heartbeat interval itself is `PRESENCE_HEARTBEAT_MS` in `@pos/contracts`,
+   * because the browser is what sends it; this is the server's side of the same agreement and the
+   * default is three missed beats.
+   *
+   * A disconnect deletes the key eagerly; this TTL is what covers a browser that was killed, a
+   * closed laptop, or an API instance that died holding the socket. A presence list that only
+   * grows is a bug that looks like a feature for the first ten minutes.
+   */
+  PRESENCE_TTL_MS: z.coerce.number().int().positive().default(15_000),
+  /** How many rows each /debug listing returns. A page, not a table dump. */
+  DEBUG_ROW_LIMIT: z.coerce.number().int().positive().max(500).default(50),
 });
 
 export type AppConfig = z.infer<typeof environmentSchema>;

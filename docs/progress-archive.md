@@ -9,7 +9,7 @@
 > What replaced them:
 >
 > - **The invariants a milestone needs** are now written into `PROGRESS.md`'s
->   *First command of the next session* block by the session that finishes the previous milestone.
+>   _First command of the next session_ block by the session that finishes the previous milestone.
 >   That block is the context pack: the outgoing session knows what the next one needs, so it names
 >   it, in thirty lines rather than three hundred.
 > - **Review history has exactly one owner: `build-log.md`.** The summaries below were the second
@@ -120,7 +120,7 @@
   state into the UI — it only triggers a canonical read.
 - **A mutation whose answer never came back keeps its identity and is simply still in the queue.**
   The next trigger re-sends it with the same `mutationId`, so §9 answers `ALREADY_APPLIED`. There is
-  no Retry button on the POS any more and no `sameMutation`/`identityFor` — the row *is* the
+  no Retry button on the POS any more and no `sameMutation`/`identityFor` — the row _is_ the
   identity. **The kitchen still keeps one slot per order** with its own Retry and Discard: it
   already halts at the aggregate, and the engine never touches its rows because they carry
   `KITCHEN_TERMINAL_ID`.
@@ -138,7 +138,7 @@
   and `releaseTerminal` — because the terminal id outlives the screen and an id check would let a
   departed view write into its successor. M8 adds the next writer, the sync engine, to the same
   state.
-- **`adopt` displays; `send` and `refetch` cache.** Caching is keyed by the terminal that *asked*
+- **`adopt` displays; `send` and `refetch` cache.** Caching is keyed by the terminal that _asked_
   the server, which is not always the terminal on screen — an answer can land after the operator
   has walked to another till. Putting the write inside `adopt` keyed all three callers by whatever
   was showing, and the M7 review found it.
@@ -174,7 +174,7 @@
   drift; a stale mirror is a display bug, a divergent copy is a lost mutation.
 - **The optimistic view is derived on read and never stored** — `projectQueue(canonical, queue)` in
   `apps/web/src/domain/project-queue.ts`. This is what keeps `orders` canonical and what removes the
-  worst crash window in the milestone: there is one write per intent, not two. The *rules* come from
+  worst crash window in the milestone: there is one write per intent, not two. The _rules_ come from
   `decide()` in `@pos/domain`, the same function the API calls; only the item arithmetic is
   restated, because the server's is an atomic SQL upsert. **Do not write a prediction into
   `orders`.**
@@ -199,7 +199,7 @@
   goes back to `PENDING`. **Do not invert that default** — the same asymmetry, and the same
   reasoning, as `RECORD_REJECTIONS` in the worker.
 - **What the engine coalesces is the terminal, not the fact that something asked.** A trigger
-  during a running pass records *which* terminal it wants and the next iteration uses that one. A
+  during a running pass records _which_ terminal it wants and the next iteration uses that one. A
   boolean flag repeated the pass with the terminal it started with, so a route change mid-pass left
   the new screen's queue unsent with no later trigger to save it.
 - **`ApiRequestError` lives in `api/errors.ts`, not in `api/client.ts`.** The engine asks
@@ -219,21 +219,21 @@
   Vue reactive proxy raises `DataCloneError`. One `toRaw` helper in the repository, where the
   provenance of the values is known. `fake-indexeddb` implements cloning for real, so the test
   catches it; a mocked Dexie would not.
-- **The kitchen's hydration filter is by restaurant *and* terminal, the POS's by terminal alone.**
+- **The kitchen's hydration filter is by restaurant _and_ terminal, the POS's by terminal alone.**
   A POS terminal belongs to one restaurant; every kitchen display shares `kitchen-display` across
   all of them. Dropping the restaurant filter puts another tenant's commands on the rail.
 - **A list replaced wholesale is never loaded concurrently.** `createCoalescingLoader` runs one read
-  at a time. The rule: an expectation may only be judged by a read *issued after* it was raised.
+  at a time. The rule: an expectation may only be judged by a read _issued after_ it was raised.
 - **The publisher claims only an order's earliest unpublished event**, so that order's events reach
   Redpanda in version order regardless of retries or worker count.
-- **The lease bounds the send, not just the wait before it.** The budget is measured from *before*
+- **The lease bounds the send, not just the wait before it.** The budget is measured from _before_
   the claim — the claim's own round trip is spent out of it — a tenth is deliberately never used,
   the pre-send check counts the `publish_delay_ms` about to be incurred, and `sendWithinLease` races
   the publish itself against what is left. Review round 1 found the version that bounded only the
   delay. **Be precise about what this buys**, because the first version of this line was not: a
   record already handed to KafkaJS cannot be recalled and may still land late. What the guard
   prevents is this worker publishing — and writing `published_at` — under a claim another worker now
-  holds, and a hung producer holding the whole loop. A late record can only ever be a *duplicate* of
+  holds, and a hung producer holding the whole loop. A late record can only ever be a _duplicate_ of
   an event already on the topic, because a successor is unclaimable until its predecessor is
   published, and `processed_events` absorbs it. `onLeaseOverrun` ends the broker session, which
   closes the socket: the nearest thing to cancellation KafkaJS offers.
@@ -257,9 +257,9 @@
   failed read keeps the last known value**: reverting to the defaults would un-pause a paused
   publisher exactly when the database is unhealthy. **One read at a time** — the interval is the gap
   between reads, not a metronome, or a slow database gets overlapping reads that can settle out of
-  order and overwrite a newer pause with an older snapshot. The watcher takes a *reader function*,
+  order and overwrite a newer pause with an older snapshot. The watcher takes a _reader function_,
   not a `Db`, which is what makes that testable. `pnpm -F @pos/worker outbox status|pause|resume|
-  delay <ms>` is the writer until M12, and it **refuses a delay above `maxPublishDelayMs`** — half
+delay <ms>` is the writer until M12, and it **refuses a delay above `maxPublishDelayMs`** — half
   the lease budget — because a larger one is a permanent pause that does not say so.
 - Test databases: `TEST_DATABASE_URL` (`pos_test`), created and migrated by `@pos/db/testing`. The
   demo database is never truncated by a test run.
@@ -285,7 +285,7 @@
   including the sweep's repair and a human's retry.
 - **Redis is still soft** and readiness still checks PostgreSQL only, print queue or not (ADR 014) —
   and that claim rests on **three** guards in `createPrintQueue`, each covering what the others
-  cannot. The client's status is checked *before* anything is handed to BullMQ, so an outage starts
+  cannot. The client's status is checked _before_ anything is handed to BullMQ, so an outage starts
   no work and retains no tickets; `commandTimeout` on the producer connection bounds an `add` that
   was started; and a timeout race covers the seam where the client is ready when checked and drops
   before BullMQ reads it. None of them ends the connection, so the queue recovers on its own.
@@ -312,7 +312,6 @@
   the Socket.IO adapter. Mixing them is a type error, not a runtime one, and the error names a
   protected field on `AbstractConnector` rather than the version skew.
 
-
 ## Decisions already made
 
 - Fastify over NestJS, Drizzle over Prisma.
@@ -338,7 +337,6 @@
   derived fields whose restoration is meaningless (ADR 013). The snapshot is a cache; the
   `mutationId` is the fact worth keeping.
 
-
 ## Review-round summaries (superseded by `build-log.md`)
 
 ### M10's three review rounds, in one place
@@ -346,14 +344,14 @@
 Every one of them was about a **wait nobody was watching**, and each was opened by the previous
 one's fix — the seventh milestone in a row where that has been true.
 
-| Round | Finding | Where the rule was attached wrongly |
-|-------|---------|-------------------------------------|
-| 1 | `maxRetriesPerRequest: null` on the queue's *producer* connection meant an `add` that never settles, inside `eachMessage` — a soft dependency able to stop the kitchen | one helper built both connections, so BullMQ's requirement for the connection its **worker blocks on** landed on the one a **consumer awaits** |
-| 1 | the Compose `app` profile pointed `PRINTER_URL` at `localhost`, which inside that container is the worker | a default that is right for `pnpm dev` and wrong everywhere else, and no test starts that profile |
-| 2 | the abandoned `add` still held the ticket: BullMQ waits inside `waitUntilReady`, one retained job per event for the length of the outage | **a timeout is a statement about the caller, never about the callee** |
-| 2 | shutdown could hang for ever — `close()` and `quit()` against an unreachable Redis wait rather than fail, so `closeDb()` and the exit were unreachable | round 1's own test already worked around it with `disconnect()` before `close()`, and that knowledge never travelled twenty lines |
-| 3 | `printer retry` was refused against a healthy Redis, *after* resetting the dead letter to `PENDING` | round 2's readiness guard was justified by "the worker connects at boot" — true of one caller, and the CLI is the other |
-| 3 | *(rejected)* force-close the print worker so BullMQ's duplicated connection cannot hang the shutdown | implemented, then reverted: two tests could not tell the fixed version from the unfixed one, because `Worker.close()` disconnects that socket locally before any `QUIT` |
+| Round | Finding                                                                                                                                                                | Where the rule was attached wrongly                                                                                                                                     |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | `maxRetriesPerRequest: null` on the queue's _producer_ connection meant an `add` that never settles, inside `eachMessage` — a soft dependency able to stop the kitchen | one helper built both connections, so BullMQ's requirement for the connection its **worker blocks on** landed on the one a **consumer awaits**                          |
+| 1     | the Compose `app` profile pointed `PRINTER_URL` at `localhost`, which inside that container is the worker                                                              | a default that is right for `pnpm dev` and wrong everywhere else, and no test starts that profile                                                                       |
+| 2     | the abandoned `add` still held the ticket: BullMQ waits inside `waitUntilReady`, one retained job per event for the length of the outage                               | **a timeout is a statement about the caller, never about the callee**                                                                                                   |
+| 2     | shutdown could hang for ever — `close()` and `quit()` against an unreachable Redis wait rather than fail, so `closeDb()` and the exit were unreachable                 | round 1's own test already worked around it with `disconnect()` before `close()`, and that knowledge never travelled twenty lines                                       |
+| 3     | `printer retry` was refused against a healthy Redis, _after_ resetting the dead letter to `PENDING`                                                                    | round 2's readiness guard was justified by "the worker connects at boot" — true of one caller, and the CLI is the other                                                 |
+| 3     | _(rejected)_ force-close the print worker so BullMQ's duplicated connection cannot hang the shutdown                                                                   | implemented, then reverted: two tests could not tell the fixed version from the unfixed one, because `Worker.close()` disconnects that socket locally before any `QUIT` |
 
 The honest line for the interview is not that the print job was right, but that **its one invariant —
 "Redis is soft, and nothing about printing may stop an order or a kitchen ticket" — was stated
@@ -361,7 +359,6 @@ correctly in an ADR and attached to the wrong mechanism three times**, and that 
 returned nothing. The rejected finding is worth telling too: a fix whose test cannot distinguish it
 from its absence is a fix for something that is not happening, and removing it took out more risk
 than it left behind.
-
 
 ## Review rounds 1 and 2, the M4 reviews, and the M5 review
 
@@ -396,14 +393,14 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
 - **Five rounds, findings 4 → 3 → 2 → 1 → 0.** The cycle converged to a clean report. The honest
   line for the interview is not "the code was right" but "the invariant was stated precisely and
   attached to a mechanism imprecisely four times, and an external reviewer caught each one".
-- **M7's review found three, and all three were about *when* a write happens rather than whether
+- **M7's review found three, and all three were about _when_ a write happens rather than whether
   it does.** The pending row was deleted before the answer that settles it was cached; hydration
   left the refresh to a view that only performs it on one of two transports; and the owner check
   used the terminal id, which outlives the screen. The brief had listed the owners in a table
   before any code and still missed all three — because the table asked "who may write this?" and
   every finding answered "the right writer, at the wrong moment". **Add the second question to the
   next milestone's brief: for each pair of writes, which order survives a crash between them?**
-  That is the M8 question exactly: the sync engine is the *third* writer of this state, and it is
+  That is the M8 question exactly: the sync engine is the _third_ writer of this state, and it is
   the first that runs without a screen asking it to.
 - **Round 2 found one, and it was opened by round 1's fix — the fifth milestone running.** Pulling
   the persist out of `adopt` moved the write and left the rule behind: `acceptsSnapshot` still
@@ -411,17 +408,17 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   asking which of its invariants belonged to which half, and I moved the code without asking.
 - **M10's lesson came from the pair question a third time, and it moved a write rather than fixing
   one.** The obvious place to insert the `print_jobs` row is where the job is enqueued; putting it
-  in the *processor* instead is what makes "a ticket with no row" mean "nothing has ever tried to
+  in the _processor_ instead is what makes "a ticket with no row" mean "nothing has ever tried to
   print this". The same table, the same column, one step later in the sequence, and the difference
   is that the reconciler stops having to guess. **When a repair mechanism needs a timeout to tell
   two states apart, suspect the write that created the ambiguity, not the repair.**
 - **M10's review round is the M6 lesson again, one library down.** `maxRetriesPerRequest: null` is
-  BullMQ's requirement for the connection its worker *blocks* on; I set it on both connections
+  BullMQ's requirement for the connection its worker _blocks_ on; I set it on both connections
   because one helper built both, and on the producer it means "wait for ever" — inside a Kafka
   consumer's `eachMessage`. The rule ("Redis is soft") was stated correctly in an ADR written the
   same day and attached to the wrong object, which is now the sixth time. **Two connections that
   differ only in options are two things, and a helper that builds both hides which is which.** The
-  second half is newer: bounding it needed *two* guards, because a connection that broke and a
+  second half is newer: bounding it needed _two_ guards, because a connection that broke and a
   connection that was never ready fail at different layers — and the obvious single fix covers only
   the first.
 - **M10: 2 → 2 → 2 → 0, the second cycle in this repository to converge to a clean report.** The
@@ -442,4 +439,3 @@ Recorded in full in `docs/build-log.md`. The habits worth carrying forward:
   than to read — round 1's own test called `redis.disconnect()` before `queue.close()`, with a
   comment saying it would otherwise hang, and that knowledge never travelled the twenty lines into
   the shutdown path. **A test that works around a behaviour is reporting a bug.**
-

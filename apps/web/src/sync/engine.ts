@@ -253,6 +253,11 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     for (;;) {
       requested = undefined;
       const outcome = await pass(terminalId);
+      // §20's offline sync counters, recorded per *pass* and attributed to the terminal the pass
+      // actually ran for — which, thanks to the coalescing above, is not always the one that asked.
+      // `drained` is the only outcome that emptied the queue; `offline` counts as a failure because
+      // from the operator's point of view a sync that did not happen is a sync that did not happen.
+      await localStore.recordSyncOutcome(terminalId, outcome === 'drained');
       await deps.onQueueChanged();
       if (requested === undefined) {
         return outcome;

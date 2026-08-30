@@ -5,6 +5,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { Consumer, Kafka } from 'kafkajs';
 import { z } from 'zod';
 
+import { incrementCounter } from '../debug/application/counters.js';
 import { roomsFor, type RealtimeEmitter } from './broadcast.js';
 
 export const REALTIME_CONSUMER = 'realtime';
@@ -112,6 +113,7 @@ async function connectConsumer(
   config: AppConfig,
   logger: FastifyBaseLogger,
   onFatalCrash: () => void,
+  onDuplicateEvent: () => void,
 ): Promise<Consumer> {
   const consumer = kafka.consumer({ groupId: config.REALTIME_CONSUMER_GROUP });
 
@@ -147,6 +149,16 @@ async function connectConsumer(
         }
 
         const result = await handleRealtimeEvent(db, emitter, event);
+
+        // §20, at the one place the outcome is known. The broadcast count is this instance's own
+        // and resets with the process; the duplicate count is shared with the worker's kitchen
+        // consumer, because "how many redeliveries did dedup absorb" is one number about the
+        // system and neither process owns it.
+        if (result === 'emitted') {
+          incrementCounter('realtimeEventsBroadcast');
+        } else {
+          onDuplicateEvent();
+        }
 
         logger.info(
           {
@@ -188,6 +200,11 @@ export function superviseRealtimeConsumer(
   emitter: RealtimeEmitter,
   config: AppConfig,
   logger: FastifyBaseLogger,
+  /**
+   * How a suppressed duplicate is recorded. Injected and defaulted to a no-op because it is a
+   * Redis write and Redis is soft: an API built without it counts nothing rather than failing.
+   */
+  onDuplicateEvent: () => void = () => undefined,
 ): RealtimeConsumerHandle {
   let wanted = true;
   let current: Consumer | undefined;
@@ -200,7 +217,15 @@ export function superviseRealtimeConsumer(
       });
 
       try {
-        current = await connectConsumer(kafka, db, emitter, config, logger, () => wake?.());
+        current = await connectConsumer(
+          kafka,
+          db,
+          emitter,
+          config,
+          logger,
+          () => wake?.(),
+          onDuplicateEvent,
+        );
         logger.info({ groupId: config.REALTIME_CONSUMER_GROUP }, 'realtime consumer running');
 
         await died;

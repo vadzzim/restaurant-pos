@@ -1,4 +1,4 @@
-import type { DomainEvent } from '@pos/contracts';
+import type { DomainEvent, PresenceReport } from '@pos/contracts';
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 
@@ -27,6 +27,11 @@ export interface RealtimeStartOptions {
    * `undefined` means this is a reconnect refresh with nothing specific to wait for.
    */
   refresh: (event: DomainEvent | undefined) => Promise<void>;
+  /**
+   * What this screen reports for §16's active-terminals panel, or `undefined` when it has no
+   * terminal to report — the kitchen display is not one of the four seeded terminals.
+   */
+  presence?: () => PresenceReport | undefined;
 }
 
 export const useConnectionStore = defineStore('connection', () => {
@@ -112,6 +117,9 @@ export const useConnectionStore = defineStore('connection', () => {
           socketState.value = 'DISCONNECTED';
         }
       },
+      // Guarded by the same generation check as everything else here: a superseded connection
+      // must not keep reporting a terminal the screen has left.
+      presence: () => (mine === generation ? options.presence?.() : undefined),
       onEvent: (event: DomainEvent) => {
         if (mine !== generation) {
           return;

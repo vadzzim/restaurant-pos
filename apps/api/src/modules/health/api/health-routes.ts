@@ -8,6 +8,7 @@ import type {
 import type { Db } from '@pos/db';
 import type { FastifyInstance } from 'fastify';
 
+import type { ConsumerLagProbe } from '../../debug/application/consumer-lag.js';
 import {
   postgresProbe,
   readOutboxBacklog,
@@ -24,6 +25,12 @@ export interface HealthRouteOptions {
    */
   probes?: DependencyProbe[] | undefined;
   timeoutMs?: number | undefined;
+  /**
+   * Consumer lag, injected for the same reason the probes are: it needs a Kafka admin client, and
+   * an injected test app has no broker. Absent means the panel says lag is unknown — which is the
+   * honest answer, and the one M6 left in place until this milestone.
+   */
+  consumerLag?: ConsumerLagProbe | undefined;
 }
 
 function overallStatus(reports: DependencyReport[]): HealthStatus {
@@ -41,7 +48,7 @@ function overallStatus(reports: DependencyReport[]): HealthStatus {
  * unreadiness — is in `docs/adr/011-health-and-degradation.md`.
  */
 export function registerHealthRoutes(app: FastifyInstance, options: HealthRouteOptions): void {
-  const { db, probes = [postgresProbe(db)], timeoutMs = 2_000 } = options;
+  const { db, probes = [postgresProbe(db)], timeoutMs = 2_000, consumerLag } = options;
   const hard = probes.filter((probe) => probe.kind === 'hard');
 
   // A readiness probe with nothing to check would answer 200 forever and quietly keep a broken
@@ -78,13 +85,16 @@ export function registerHealthRoutes(app: FastifyInstance, options: HealthRouteO
 
   /**
    * The informational third leg (§16, §17): everything readiness deliberately ignores, graded hard
-   * against soft, plus the outbox backlog that puts a number on a broker outage.
+   * against soft, plus the outbox backlog that puts a number on a broker outage — and, since M11,
+   * consumer lag per group.
    *
-   * Consumer lag is not here. It needs a Kafka admin describing group offsets and it belongs with
-   * §20's other counters in M11; guessing at it would be worse than its absence.
+   * Lag is on this panel rather than with §20's counters because it is a statement about a
+   * *dependency*, not about this process: it is how far the read models are behind the topic, and
+   * under ADR 012 the kitchen projection is load-bearing for writes, so its lag belongs next to
+   * "redpanda: up".
    */
   app.get('/api/debug/dependencies', async (): Promise<DependenciesResponse> => {
-    const [dependencies, outbox] = await Promise.all([
+    const [dependencies, outbox, consumerGroups] = await Promise.all([
       Promise.all(probes.map((probe) => runProbe(probe, timeoutMs))),
       // The backlog is a second read of the hard dependency. If PostgreSQL is down this fails too,
       // and an empty backlog next to `postgres: down` is the honest answer.
@@ -93,8 +103,11 @@ export function registerHealthRoutes(app: FastifyInstance, options: HealthRouteO
         deadLettered: 0,
         oldestPendingAgeSeconds: null,
       })),
+      // The probe reports its own failure as `lag: null` per group and never rejects, so a broker
+      // outage degrades this panel rather than emptying it.
+      consumerLag?.() ?? Promise.resolve([]),
     ]);
 
-    return { status: overallStatus(dependencies), dependencies, outbox };
+    return { status: overallStatus(dependencies), dependencies, outbox, consumerGroups };
   });
 }

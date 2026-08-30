@@ -90,6 +90,15 @@ async function start(): Promise<void> {
       await orders.sync();
       await orders.refetch();
     },
+    // §16's active-terminals panel. The queue depth and the §18 offline switch exist only here,
+    // so the browser reports them rather than the server inferring them from the socket.
+    presence: () => ({
+      terminalId: terminalId.value,
+      restaurantId,
+      role: 'pos',
+      pendingCount: orders.pendingCount,
+      offline: isTerminalOffline(terminalId.value),
+    }),
   });
 }
 

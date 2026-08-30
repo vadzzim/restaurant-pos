@@ -1,6 +1,7 @@
 import { hostname } from 'node:os';
 
 import { loadConfig } from '@pos/config';
+import { sharedCounterKey } from '@pos/contracts';
 import { closeDb, getDb } from '@pos/db';
 import pino from 'pino';
 
@@ -80,11 +81,26 @@ const controls = await watchOutboxControls(
   logger,
 );
 
+/**
+ * §20's one *shared* counter. Every other worker fact `/debug` shows already has a row —
+ * `outbox_events.published_at`, `print_jobs.state` — and is read from PostgreSQL, which survives a
+ * restart of either process. A suppressed duplicate has no row anywhere, so it is the one thing
+ * that has to be shipped, and Redis is where the two processes already meet.
+ *
+ * Fire and forget on the queue's producer connection, which is bounded by `commandTimeout`: this
+ * runs inside `eachMessage`, and a counter that could block would be a kitchen that stops
+ * projecting because Redis is slow.
+ */
+function countDuplicateEvent(): void {
+  void queueRedis.incr(sharedCounterKey('duplicateKafkaEventsPrevented')).catch(() => undefined);
+}
+
 const broker = supervise({
   name: 'redpanda',
   retryMs: config.WORKER_BROKER_RETRY_MS,
   logger,
-  connect: async () => connectBroker(kafka, db, config, logger, printQueue.enqueue),
+  connect: async () =>
+    connectBroker(kafka, db, config, logger, printQueue.enqueue, countDuplicateEvent),
 });
 
 logger.info({ workerId, topic: config.KAFKA_ORDER_EVENTS_TOPIC }, 'Worker started');

@@ -1,12 +1,22 @@
 import type { AppConfig } from '@pos/config';
 import type { Db } from '@pos/db';
-import { KafkaJSProtocolError, type Kafka } from 'kafkajs';
+import kafkajs, { type Kafka } from 'kafkajs';
 import type { Logger } from 'pino';
 
 import type { EventTransport } from '../modules/events/outbox-publisher.js';
 import { startKitchenConsumer, type PrintEnqueue } from '../modules/kitchen/consumer.js';
 import type { BrokerSession } from './broker-supervisor.js';
 import { createKafkaTransport, ensureOrderEventsTopic } from './kafka.js';
+
+/**
+ * KafkaJS is CommonJS, and Node's ESM loader detects its named exports by static analysis of the
+ * module body. `Kafka` is found that way; `KafkaJSProtocolError` is not, so
+ * `import { KafkaJSProtocolError } from 'kafkajs'` is a `SyntaxError` at load time under Node's
+ * own ESM — which is how the worker is actually run. It is only invisible under vitest and tsup,
+ * both of which rewrite the import into a `require`, so the whole test suite passes against a
+ * process that cannot start. Destructuring the default export is the interop Node itself suggests.
+ */
+const { KafkaJSProtocolError } = kafkajs;
 
 /**
  * What a live session hands the publisher. `isAlive` belongs to **this** session, not to the
@@ -100,6 +110,7 @@ export async function connectBroker(
   config: AppConfig,
   logger: Logger,
   enqueuePrint?: PrintEnqueue,
+  onDuplicateEvent?: () => void,
 ): Promise<BrokerSession<BrokerConnection>> {
   await ensureOrderEventsTopic(kafka, config);
 
@@ -120,13 +131,19 @@ export async function connectBroker(
   producer.on(producer.events.DISCONNECT, die);
   await producer.connect();
 
-  const kitchen = await startKitchenConsumer(kafka, db, config, logger, die, enqueuePrint).catch(
-    async (error: unknown) => {
-      // The producer is already connected; a consumer that fails to start must not leave it open.
-      await producer.disconnect().catch(() => undefined);
-      throw error;
-    },
-  );
+  const kitchen = await startKitchenConsumer(
+    kafka,
+    db,
+    config,
+    logger,
+    die,
+    enqueuePrint,
+    onDuplicateEvent,
+  ).catch(async (error: unknown) => {
+    // The producer is already connected; a consumer that fails to start must not leave it open.
+    await producer.disconnect().catch(() => undefined);
+    throw error;
+  });
 
   const transport = guardTransport(
     createKafkaTransport(producer, config.KAFKA_ORDER_EVENTS_TOPIC),

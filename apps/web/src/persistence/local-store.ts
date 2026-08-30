@@ -7,6 +7,7 @@ import {
   type PendingMutationRecord,
   type PendingMutationStatus,
   type PersistedOrderRecord,
+  type SyncCounterRecord,
 } from './db';
 
 /**
@@ -493,6 +494,46 @@ export const localStore = {
           await db.orders.bulkDelete(stale);
         }),
       undefined,
+    );
+  },
+
+  /**
+   * Record how one sync pass ended (§20: offline sync successes and failures).
+   *
+   * Read-modify-write inside a transaction, so two terminals syncing in two tabs cannot lose a
+   * count to each other — they are different rows, but the same table and the same lock, and the
+   * cheapest correct thing is to let Dexie serialise it.
+   *
+   * `guarded` like every other write here: a counter that could not be stored must never break a
+   * sync pass. On a device with no IndexedDB the numbers stay zero, which is the same thing the
+   * persistence banner is already saying.
+   */
+  async recordSyncOutcome(terminalId: string, succeeded: boolean): Promise<void> {
+    await guarded(
+      'Recording a sync outcome',
+      () =>
+        db.transaction('rw', db.syncCounters, async () => {
+          const current = await db.syncCounters.get(terminalId);
+          await db.syncCounters.put({
+            terminalId,
+            successes: (current?.successes ?? 0) + (succeeded ? 1 : 0),
+            failures: (current?.failures ?? 0) + (succeeded ? 0 : 1),
+            updatedAt: now(),
+          });
+        }),
+      undefined,
+    );
+  },
+
+  /** Every terminal's sync counters, for `/debug`. Ordered so the page does not have to sort. */
+  async readSyncCounters(): Promise<SyncCounterRecord[]> {
+    return guarded(
+      'Reading the sync counters',
+      async () =>
+        (await db.syncCounters.toArray()).sort((left, right) =>
+          left.terminalId.localeCompare(right.terminalId),
+        ),
+      [],
     );
   },
 };

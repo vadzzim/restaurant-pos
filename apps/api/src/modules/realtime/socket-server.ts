@@ -1,13 +1,20 @@
 import type { Server as HttpServer } from 'node:http';
 
 import type { AppConfig } from '@pos/config';
-import { REALTIME_EVENT_NAME, SUBSCRIBE_EVENT_NAME, type DomainEvent } from '@pos/contracts';
+import {
+  PRESENCE_EVENT_NAME,
+  REALTIME_EVENT_NAME,
+  SUBSCRIBE_EVENT_NAME,
+  type DomainEvent,
+  type PresenceReport,
+} from '@pos/contracts';
 import { createAdapter } from '@socket.io/redis-adapter';
 import type { FastifyBaseLogger } from 'fastify';
 import { Redis } from 'ioredis';
 import { Server as SocketServer, type Socket } from 'socket.io';
 import { z } from 'zod';
 
+import type { PresenceStore } from '../debug/application/ports.js';
 import { kitchenRoom, orderRoom, restaurantRoom, type RealtimeEmitter } from './broadcast.js';
 
 const subscribeSchema = z.object({
@@ -16,9 +23,31 @@ const subscribeSchema = z.object({
   orderId: z.uuid().optional(),
 });
 
+/**
+ * The presence heartbeat (§16: active terminals with their pending counts).
+ *
+ * The client is the only thing that knows two of these fields — its own pending-mutation queue
+ * depth and whether its §18 offline switch is on — so presence is *reported*, not inferred from
+ * the socket. The server supplies what the client cannot forge usefully: the socket id and the
+ * timestamp.
+ *
+ * `pendingCount` is bounded rather than merely non-negative: this value is written straight into a
+ * Redis entry that a debug page renders, and an unbounded number from a client is an unbounded
+ * number on a screen.
+ */
+const presenceSchema = z.object({
+  terminalId: z.string().min(1).max(64),
+  restaurantId: z.string().min(1).max(64),
+  role: z.enum(['pos', 'kitchen']),
+  pendingCount: z.number().int().min(0).max(100_000),
+  offline: z.boolean(),
+});
+
 export interface RealtimeServer {
   io: SocketServer;
   emitter: RealtimeEmitter;
+  /** §20's `activeWebSocketConnections`, for this instance. A gauge: it goes down. */
+  socketCount: () => number;
   /**
    * Reaches Redis over the adapter's own publisher client, so `/api/debug/dependencies` reports
    * the connection the broadcasts actually travel on rather than a second one that might differ.
@@ -38,6 +67,11 @@ export function createRealtimeServer(
   httpServer: HttpServer,
   config: AppConfig,
   logger: FastifyBaseLogger,
+  /**
+   * Where presence is recorded. Optional and best effort throughout: Redis is soft, and a terminal
+   * whose presence could not be written must still be connected and receiving events.
+   */
+  presence?: PresenceStore,
 ): RealtimeServer {
   const io = new SocketServer(httpServer, {
     // The browser is served by Vite on another port in development; the proxy only covers /api.
@@ -83,7 +117,50 @@ export function createRealtimeServer(
 
   io.adapter(createAdapter(pub, sub));
 
+  /**
+   * Presence is written on every heartbeat and never awaited by anything the client is waiting for.
+   * A failure is logged at `debug`, not `warn`: during a Redis outage this fires once per terminal
+   * every `PRESENCE_HEARTBEAT_MS`, and a log line per beat would bury the outage it is reporting.
+   * The `redis` dependency row and the `null` shared counters are what say Redis is down.
+   */
+  function recordPresence(report: PresenceReport, socketId: string): void {
+    void presence?.touch(report, socketId).catch((error: unknown) => {
+      logger.debug({ err: error, terminalId: report.terminalId }, 'could not record presence');
+    });
+  }
+
   io.on('connection', (socket: Socket) => {
+    /**
+     * The terminal this socket last claimed, so a disconnect can delete its entry eagerly.
+     *
+     * The TTL is what makes presence correct; this only makes it *prompt*. Everything the eager
+     * delete cannot cover — a browser killed, a lid closed, this very API instance dying while
+     * holding the socket — is covered by the entry expiring, which is why the TTL is the mechanism
+     * and this is the courtesy.
+     */
+    let claimed: string | undefined;
+
+    socket.on(PRESENCE_EVENT_NAME, (payload: unknown) => {
+      const parsed = presenceSchema.safeParse(payload);
+      if (!parsed.success) {
+        logger.debug({ socketId: socket.id }, 'rejected an invalid presence report');
+        return;
+      }
+
+      claimed = parsed.data.terminalId;
+      recordPresence(parsed.data, socket.id);
+    });
+
+    socket.on('disconnect', () => {
+      if (claimed === undefined) {
+        return;
+      }
+      const terminalId = claimed;
+      void presence?.forget(terminalId).catch((error: unknown) => {
+        logger.debug({ err: error, terminalId }, 'could not clear presence');
+      });
+    });
+
     socket.on(SUBSCRIBE_EVENT_NAME, (payload: unknown) => {
       const parsed = subscribeSchema.safeParse(payload);
       if (!parsed.success) {
@@ -129,6 +206,10 @@ export function createRealtimeServer(
   return {
     io,
     emitter,
+    // `engine.clientsCount` is this instance's own sockets. Deliberately not a cluster-wide
+    // number: the Redis adapter could give one, but presence already answers "who is connected"
+    // across the fleet, and a per-instance gauge is what makes an uneven load balancer visible.
+    socketCount: () => io.engine.clientsCount,
     ping: async () => {
       // Two questions, two sources. *Is the adapter connected?* is about the client the broadcasts
       // actually travel on, and only that client's state can answer it. *Is Redis answering?* has
