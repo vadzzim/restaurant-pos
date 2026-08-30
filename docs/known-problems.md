@@ -15,6 +15,10 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M18, P3]** The two `getByText('WS CONNECTED')` socket assertions match by substring, which is a
+  looser contract than they mean: `WS DISCONNECTED` does not match (checked), but a future label such
+  as `WS CONNECTED (degraded)` would. `{ exact: true }` or `/^WS CONNECTED$/`. Raised by Codex as a
+  P1 on the wrong mechanism and demoted after measuring it; see `build-log.md`.
 - **[M18, P2]** `pnpm test:e2e` reuses an API already answering on `:3000` rather than starting one,
   so a local run can report PASS for API code it did not build. The bundle is always this run's
   (`preview` serves the `dist/` it just built) and the worker is always started fresh, so the gap is

@@ -2040,5 +2040,27 @@ Worth naming the pattern, because it is the one an E2E suite rots by: an asserti
 satisfied by a cheaper path than the one under test is not a test of that path. Neither of these
 was visible in a green run; both were visible in the code.
 
+**A third round on the fix commit, and this one Codex got wrong.** It reported the two new
+`getByText('WS CONNECTED')` assertions as a P1: Playwright matches strings by substring, so the
+initially visible `WS DISCONNECTED` badge would match too and the assertion would pass immediately,
+leaving the false positive exactly where it was.
+
+The mechanism does not hold. `WS CONNECTED` is not a substring of `WS DISCONNECTED` — `DIS` sits
+between the two words. Checked rather than argued, because the previous two rounds were both cases
+of an assertion doing less than it looked like it did: a throwaway Playwright script rendered
+PosView's header structure with the disconnected badge and counted matches for the loose form, the
+`exact` form and an anchored regex. All three: **0**. Against the connected page: 1. Ancestors were
+in the page too, so text concatenated across sibling badges cannot form the string either.
+
+So the polling claim inverts as well: on §15's fallback the badge reads `WS DISCONNECTED`, the
+locator finds nothing, and the assertion **times out** rather than passing — which is the behaviour
+the fix commit claimed. Left alone. The one grain worth keeping is that a substring match is a
+looser contract than the intent, so a future label like `WS CONNECTED (degraded)` would satisfy it;
+that is a P3 in `known-problems.md`, not a fix.
+
+Worth recording that a reviewer with no way to execute the code produced two findings that were
+right for reasons I had not seen, and one that was wrong for a reason a single command settles. The
+asymmetry is the lesson, not the score: read the argument, then check the mechanism.
+
 Green: `pnpm test:e2e` PASS, lint, typecheck (three projects now — `tsconfig.e2e.json` exists
 because Playwright resolves like a bundler), build, 251 web tests.
