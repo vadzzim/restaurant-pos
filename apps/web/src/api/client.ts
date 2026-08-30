@@ -167,7 +167,20 @@ export async function postMutation(
   // kitchen adapters below are untouched: all three are POS-queue demonstrations (§19.3–§19.5),
   // and two of them need an `orderId` and a payload the kitchen commands do not carry.
   const { request: outgoing, spend } = applyVersionConflictArm(request);
-  const response = await postMutationTo(`/api/orders/${orderId}/mutations`, outgoing);
+
+  let response: MutationResponse;
+  try {
+    response = await postMutationTo(`/api/orders/${orderId}/mutations`, outgoing);
+  } catch (error) {
+    // An `ApiRequestError` **is** the server answering — the arm did its work and is spent. Any
+    // other throw is the offline gate or a dead socket, where the request never left the browser
+    // and the arm must stay armed for the send that does leave.
+    if (error instanceof ApiRequestError) {
+      spend();
+    }
+    throw error;
+  }
+
   spend();
 
   if (response.status === 'APPLIED') {

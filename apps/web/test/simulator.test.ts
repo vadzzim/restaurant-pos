@@ -160,6 +160,41 @@ describe('Create Version Conflict', () => {
     expect(bodiesSent(fetchMock)[0]?.baseVersion).toBe(0);
     expect(isArmed('create-version-conflict')).toBe(true);
   });
+
+  it('stays armed at v1, where a decrement is refused as invalid rather than as conflicting', async () => {
+    const fetchMock = stubFetch();
+    setArm('create-version-conflict', true);
+
+    await postMutation('order-1', request({ baseVersion: 1 }));
+
+    // `mutation-routes.ts` validates an existing order's baseVersion as `min(1)`, so v1 - 1 is a
+    // VALIDATION_ERROR: the queue would not halt, and §19.3 would demonstrate nothing.
+    expect(bodiesSent(fetchMock)[0]?.baseVersion).toBe(1);
+    expect(isArmed('create-version-conflict')).toBe(true);
+
+    // v2 is the first version it can tamper with and still produce a conflict.
+    await postMutation('order-1', request({ baseVersion: 2, mutationId: 'm-2' }));
+    expect(bodiesSent(fetchMock)[1]?.baseVersion).toBe(1);
+    expect(isArmed('create-version-conflict')).toBe(false);
+  });
+
+  it('is spent by a request the server refused with an error envelope', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementation(() =>
+          jsonResponse({ error: { code: 'VALIDATION_ERROR', message: 'no' } }, 400),
+        ),
+    );
+    setArm('create-version-conflict', true);
+
+    await expect(postMutation('order-1', request())).rejects.toThrow();
+
+    // The request reached the server; the arm did its work. Leaving it armed would tamper with
+    // every later mutation from this tab, which is a wedged till rather than a one-shot.
+    expect(isArmed('create-version-conflict')).toBe(false);
+  });
 });
 
 describe('the offline switch and the arms together', () => {

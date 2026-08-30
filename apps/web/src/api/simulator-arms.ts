@@ -109,9 +109,11 @@ export function resetSimulatorArms(): void {
  * **Only the wire request is tampered with.** The pending row in IndexedDB keeps its true
  * `baseVersion`, so Rebase still has something correct to re-stamp from.
  *
- * **It stays armed against a `CREATE_ORDER`.** Creation is defined at `baseVersion` 0 (§5) and the
- * boundary schema says so, so a decrement there would produce a 400 rather than a conflict —
- * a different demonstration wearing this one's label. The arm waits for a mutation it can act on.
+ * **It stays armed below v2.** Creation is defined at `baseVersion` 0 (§5) and every other mutation
+ * is `z.number().int().min(1)` at the boundary, so tampering with a create *or* with the first
+ * mutation on a v1 order produces a 400 `VALIDATION_ERROR` rather than a conflict — a different
+ * demonstration wearing this one's label, and one that halts nothing. The arm waits for a mutation
+ * it can genuinely make conflict, which is the first at v2 or above.
  */
 export interface ArmedRequest {
   request: MutationRequest;
@@ -121,12 +123,20 @@ export interface ArmedRequest {
    * throws before `fetch`, and a dead network throws during it. An arm spent by a request that
    * never left the browser is a control that silently does nothing, which is the one thing a
    * demo switch must not be.
+   *
+   * The mirror of that: **a request the server answered spends the arm even when the answer was an
+   * error envelope.** `CONFLICT` and `MUTATION_ID_REUSED` come back as values, but a 4xx from the
+   * boundary is thrown, and an arm left armed by one goes on tampering with every later mutation
+   * from this tab — a wedged till, from a control that was supposed to fire once.
    */
   spend: () => void;
 }
 
+/** The lowest `baseVersion` a decrement can leave valid. See the note above. */
+const LOWEST_TAMPERABLE_VERSION = 2;
+
 export function applyVersionConflictArm(request: MutationRequest): ArmedRequest {
-  if (!isArmed('create-version-conflict') || request.baseVersion < 1) {
+  if (!isArmed('create-version-conflict') || request.baseVersion < LOWEST_TAMPERABLE_VERSION) {
     return { request, spend: () => undefined };
   }
 

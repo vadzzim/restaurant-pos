@@ -234,6 +234,55 @@ describe('a reload keeps the order and the identity of what was in flight', () =
   });
 });
 
+describe('leaving a POS screen is not the operator finishing with the table', () => {
+  it('detach empties the screen but keeps the pointer, so coming back finds the cover open', async () => {
+    const store = useOrderStore();
+    store.useTerminal('pos-1');
+
+    postMutationMock.mockImplementationOnce((orderId) =>
+      Promise.resolve({ status: 'APPLIED', serverVersion: 1, order: snapshot(orderId, 1) }),
+    );
+    await store.createOrder('pos-1', 'demo-restaurant', '12');
+    const orderId = store.currentOrderId ?? '';
+    expect(orderId).not.toBe('');
+
+    // The walk to /debug or /demo. Until M16 this was `clear()`, and the order was gone for good —
+    // which meant a §18 arm pressed on /demo could only ever be spent on the CREATE_ORDER an
+    // emptied till has to start with.
+    await store.detach();
+    store.releaseTerminal();
+    expect(store.currentOrderId).toBeUndefined();
+    expect(store.order).toBeUndefined();
+
+    // The walk back.
+    fetchOrderMock.mockResolvedValue(snapshot(orderId, 1));
+    store.useTerminal('pos-1');
+    await store.hydrate('pos-1');
+
+    expect(store.currentOrderId).toBe(orderId);
+    expect(store.projected?.id).toBe(orderId);
+  });
+
+  it('still forgets the table when the operator says so, and hydration does not bring it back', async () => {
+    const store = useOrderStore();
+    store.useTerminal('pos-1');
+
+    postMutationMock.mockImplementationOnce((orderId) =>
+      Promise.resolve({ status: 'APPLIED', serverVersion: 1, order: snapshot(orderId, 1) }),
+    );
+    await store.createOrder('pos-1', 'demo-restaurant', '12');
+
+    // "New table" — a decision, unlike leaving the route.
+    await store.clear();
+    store.releaseTerminal();
+
+    store.useTerminal('pos-1');
+    await store.hydrate('pos-1');
+
+    expect(store.currentOrderId).toBeUndefined();
+  });
+});
+
 describe('hydration is a checked writer, not a privileged one', () => {
   it('does not install the cached order over one created while it was reading', async () => {
     await localStore.saveOrder('pos-1', snapshot('order-a', 3));

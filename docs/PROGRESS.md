@@ -6,61 +6,60 @@
 
 ## Current state
 
-**Last completed:** M15 — POS UX for rush, and BAR-1. §16's POS in full: large touch targets, the
-menu tile *is* the quantity control, a one-tap cover pad instead of a keyboard, a conflict banner
-leading with its two actions, a terminal switcher, BAR-1 as a bar rather than a third POS.
+**Last completed:** M16 — `/demo`. All ten §19 scenarios as a guided walkthrough: what to press, in
+which window, and what to watch. The script is **data** in `domain/demo-script.ts`; `DemoView.vue`
+only renders it, so "does every scenario name a control that exists" is a test, not a walk-through.
 
-**It turned out to be a concurrency fix wearing a UX hat.** `PosView` held one `busy` flag around
-every action, each ending in `await sync()` — so the till was disabled for a round trip on every
-tap. §14's optimism was already in the store; the view threw it away.
+**One `SimulatorPanel`, not two.** `/debug` already renders §18's eleven controls and they are the
+same module state, so `/demo` embeds that component; each step links to a control's row by anchor,
+and control names come from one `CONTROL_LABELS` map the panel's buttons read too — a step saying
+"press X" beside a button reading "Y" is the defect this milestone is judged on.
+`demo-script.test.ts` reads the **real** `SimulatorPanel.vue` and `router.ts`, not a copy.
 
-**Deleting the flag alone would have broken correctness — this is the invariant to carry forward.**
-`identityFor` stamps `baseVersion` from the *projection*, so two overlapping taps stamp the **same**
-version and the second is answered `ORDER_VERSION_CONFLICT`. The flag was serializing the local
-phase as a side effect of disabling the screen. `enqueue` split into `stage` (validate, save,
-refresh) and `settle` (the network), and `serialize()` chains **only the local phase**.
+**Two M12 P1s fixed in `Create Version Conflict`, both flagged in advance by M15's handoff.** It
+sent `baseVersion - 1` from v1, which `mutation-routes.ts` refuses as `min(1)` — a 400, not a
+conflict; the threshold is now **v2**. And `spend()` ran only on a returned response, so that 400
+left the arm armed and tampered with every later mutation from the tab; it is now spent on an
+`ApiRequestError` too — the server answered — but still **not** on the offline gate or a dead
+socket, which is what the original guard is for.
 
-**Codex then found five P1s, all one family: not everything reading the projection had moved into
-the chain.** Three fixed — the ± steppers computed their absolute quantity in the **template**, off
-a row several taps stale, so one `+` overwrote everything queued behind it; `createOrder` and
-`clear` moved the order pointer **outside** the chain, re-pointing taps still staging; and
-`committing` did not close the item controls, leaving a gap where a tap queued behind a status
-change halts the order. So `command()` takes a *plan* evaluated inside the link, the pointer moves
-inside it, and `canTouchItems = can.order && !committing`. Two logged as `[M15, P2]` — paths M15 did
-not create. Each fix was checked by reverting it and watching the new tests fail. **Anything that
-queues a mutation, or moves the order pointer, goes through `serialize()`.**
+**`onBeforeUnmount` no longer calls `clear()`.** M15 left this decision open and it was
+load-bearing: one-shots are armed on `/demo` and live in the tab (ADR 015), so a till emptied on
+every route change could only ever spend an arm on its own `CREATE_ORDER` — three of eleven controls
+were undemonstrable on an item. New **`detach()`** drops the in-memory view and leaves the pointer on
+disk for `hydrate()`. It cannot simply skip the clear: the store outlives the component, and POS-1's
+order left in `order.value` would be drawn on POS-2 until its own read answered. `clear()` is
+untouched and is still what **New table** means.
 
-**A browser was opened** — the first since M10; the run is in `build-log.md`. 1024 × 768, `PUSH`,
-`fetch` delayed 1.5 s. Six taps as fast as they could be clicked: six mutations, `v7`, nothing
-greyed out, queue drained clean. BAR-1 in one tap. The conflict banner on a **real** race (POS-1
-offline at v2, `curl` as POS-2 to v3, back online); rebase reapplied at v4. Post-review: 3 → 4 → 5
-on two quick `+`, and every item control greying the instant Send is pressed.
+**The browser found four defects no unit test could reach**, and disproved a fifth claim outright.
+`styles.css` had `a { color: inherit }` **unlayered** — in Tailwind v4 unlayered CSS beats a layer
+whatever its specificity, so it had overridden every `text-*` utility on a link since M1; both
+anchor rules moved into `@layer base`. The claim rendered raw backticks; two steps named tables the
+cover pad does not offer; three single-asterisk spans reached the reader as asterisks. All four now
+have tests. **And §19.3's last step was wrong**: a Rebase does not resolve the conflict row — see
+the P2 below. Details in `build-log.md`.
 
-**Green:** typecheck, lint, build, **393 tests** (61 domain, 96 api, 55 worker, **181 web**) against
-a real PostgreSQL. `verify:integration` / `verify:multi` not re-run: nothing outside `apps/web`,
-`packages/contracts` and the seed changed.
+**Green:** typecheck, lint, build, **414 tests** (61 domain, 96 api, 55 worker, **202 web**), and
+§19.4, §19.7 and §19.3 walked end to end against a real stack reading only the page.
+`verify:integration` / `verify:multi` not re-run: nothing outside `apps/web` changed.
 
-**Next:** M16 — `/demo`. **Sonnet**, size **M**.
+**Next:** M17 — PWA. **Sonnet**, size **S**.
 
 ## What exists
 
 One line per unit; detail lives in the code and the ADRs.
 
-- **Docs** — what CLAUDE.md lists, plus `milestones/M01…M15.md`. **ADRs 001–016 accepted.**
-- `packages/config` — zod environment; everything defaults, so the images pass no `.env`.
-- `packages/contracts` — the §5 shapes, statuses, mutations, events, `ConflictReason`, socket names,
-  `TERMINALS` (now with `profile`), **`BAR_MENU`**, debug/simulator/flag shapes.
-- `packages/domain` — `decide()`, pricing and the transitions: **the whole of §8**.
-- `packages/db` — fifteen tables, three migrations, seed (**11 products**, four new drinks),
-  `db:check`, `@pos/db/testing`, two singleton control modules.
+- **Docs** — what CLAUDE.md lists, plus `milestones/M01…M16.md`. **ADRs 001–016 accepted.**
+- `packages/config` zod env (all defaulted); `packages/contracts` the §5 shapes plus `TERMINALS`,
+  `BAR_MENU` and the debug/simulator/flag shapes; `packages/domain` `decide()` — **the whole of §8**;
+  `packages/db` fifteen tables, three migrations, seed (11 products), `@pos/db/testing`.
 - `apps/api` — the nine-branch mutation endpoint, the two §17 kitchen adapters, the four reads,
   `modules/{realtime,printer,debug,config}/`, `/api/health/{live,ready}`. Ten test files, plus
   `multi-instance.integration.test.ts` behind its own config, **excluded** by default.
 - `apps/worker` — the §10 outbox publisher (ADR 010), the producer, the kitchen consumer and its
   transactional projection, `modules/printing/` (ADR 014). CLIs `outbox`/`printer`.
-- `apps/web` — POS and kitchen screens; seven Pinia stores; Dexie (ADR 013); the §14 sync engine;
-  `realtime/`; `DebugView.vue`; **`domain/pos-screen.ts`** (tiles, affordances, conflict headline,
-  bar filter — pure and tested). `/demo` is the M1 stub.
+- `apps/web` — POS, kitchen, `/debug` and now **`/demo`**; seven Pinia stores; Dexie (ADR 013); the
+  §14 sync engine; `realtime/`; `domain/{pos-screen,demo-script}.ts` (pure and tested).
 - **Images, Compose, scripts, CI** — a Dockerfile per app, `nginx.conf`, `docker-compose.multi.yml`
   (the base file's `app` profile is the *dev* stack), `compose-run.mjs`, two `verify-*.mjs`, `ci.yml`.
 
@@ -68,50 +67,53 @@ One line per unit; detail lives in the code and the ADRs.
 
 ADRs are canon; history in `progress-archive.md`. What is not in one:
 
-- Full scope, nothing cut (Fastify, Drizzle: ADR 001, 007). **Four left: M16–M19.**
-- Drop order if the date closes in: M16, then M17 (PWA). Never M18 first.
-- **`BAR_MENU` is in contracts, not a `products.category` column** — a column means a migration +
-  contract + API + seed change for one client-side filter. Argued beside the constant.
+- Full scope, nothing cut (ADR 001, 007). **Three left: M17–M19**; drop M17 first, never M18.
+- **`BAR_MENU` is in contracts, not a `products.category` column.** Argued beside the constant.
+- **Leaving a POS route detaches; it does not clear.** M16, above. Do not put `clear()` back.
 
 ## Known problems
 
-`docs/known-problems.md`: accepted limits, then the P2/P3 backlog — now **seventeen** entries, six
-new from M15, two of them concurrency rather than tidying. **Do not read it to start a session.**
+`docs/known-problems.md`: accepted limits, then the P2/P3 backlog — now **twenty** entries, three new
+from M16. **Overdue for its sweep pass.** Do not read it to start a session.
 
 ## First command of the next session
 
 ```
-Read CLAUDE.md and docs/PROGRESS.md, then expand M16 from docs/MILESTONES.md into
-docs/milestones/M16.md and implement M16 only. Stop when the M16 Verification block passes.
+Read CLAUDE.md and docs/PROGRESS.md, then expand M17 from docs/MILESTONES.md into
+docs/milestones/M17.md and implement M17 only. Stop when the M17 Verification block passes.
 
-M16 is /demo: a guided walkthrough of all ten §19 scenarios, step by step, saying what to watch,
-with trigger buttons calling the M12 simulator. Verification: each scenario can be performed by
-following the instructions, no improvisation. Model: Sonnet. Size: M.
+M17 is the PWA: manifest and service worker, carefully. It must not break dev mode, and it must
+never cache API mutations or the snapshot endpoint. Installability. Verification: install the app,
+reload offline, and the last local order is still on screen with the sync engine unaffected.
+Model: Sonnet. Size: S.
 
 Six things worth knowing before you plan:
 
-1. **`/demo` is still the M1 `PlaceholderView`**, wired in `router.ts`; the nav link exists.
-2. **Do not re-derive the scenarios.** §19 of `docs/spec.md` is the source — grep it, never read it
-   whole. §19.10 is already a passing test (`pnpm verify:multi`): say so, do not fake it as manual.
-3. **Respect the simulator's client/server split** (ADR 015). One-shots and latches live in
-   `api/simulator-arms.ts` — lifetime is the tab, so an SPA walk from /demo to a POS keeps them, a
-   hard reload does not; server-side ones go through `stores/simulator.ts`. `/debug` renders them
-   all already: reuse `SimulatorPanel.vue`, do not build a second set of buttons.
-4. **`Create Version Conflict` is broken two ways and will bite you.** It sends `baseVersion - 1`,
-   which on an order at v1 is 0 and is refused as *invalid*, not conflicting; and its `spend()`
-   only runs when the POST returns, so that failed tamper leaves the arm armed and wedges every
-   later mutation from the tab. Both `[M15, P1-in-M12]`. If §19 needs it, **fixing it is in scope.**
-5. **Walking away from a POS screen clears its order** — `onBeforeUnmount` calls `orders.clear()`,
-   dropping the persisted pointer, so `/demo` → `/pos/pos-1` → `/demo` loses the order on screen.
-   Pre-existing M8 behaviour; decide deliberately whether M16 changes it.
-6. **Anything that queues a mutation, or moves the order pointer, goes through `serialize()` in the
-   order store.** That is what M15's review round was about and it is easy to break by accident.
-   Do not sweep the backlog (seventeen entries, overdue, its own pass).
+1. **The offline story already exists and is not the service worker's.** Dexie holds the queue and
+   the cached snapshot (ADR 013); `stores/order.ts` `hydrate()` restores from it on mount. M17 adds
+   the *shell* — index.html, JS, CSS — so a cold reload with no network still boots. Do not let a
+   service worker start owning data; that is a second cache over ADR 013 and it will drift.
+2. **What must never be cached**, and the test must prove it: `POST /api/orders/:id/mutations`, the
+   two §17 kitchen adapters, `GET /api/orders/:id` (the canonical read — a stale snapshot silently
+   replaces the server's truth), `/api/debug/*`, `/api/config`. A stale `GET /api/menu` is the one
+   defensible cache. Prefer an allow-list over a deny-list.
+3. **Dev mode is Vite on :5173 with HMR over a WebSocket.** A service worker registered in dev
+   intercepts module requests and makes HMR lie. Register in production builds only, and say so in
+   the code — a future session will otherwise "fix" the guard.
+4. **A stale service worker is the classic demo killer.** Decide the update strategy deliberately
+   (skipWaiting + clientsClaim, or a prompt) and write it in an ADR; an interviewer reloading and
+   seeing last week's bundle is worse than no PWA.
+5. **`/demo` and `/debug` poll every 2 s.** Nothing there may be precached as an API response, and
+   §18's arms stay tab-local (ADR 015) — a claimed client must not make it look otherwise.
+6. **`onBeforeUnmount` detaches, it does not clear** (M16). The pointer on disk is what makes an
+   offline reload land back on the same cover — precisely M17's verification. Do not regress it.
+   Anything that queues a mutation, or moves the order pointer, goes through `serialize()`.
 
-Verification: `pnpm -F @pos/web test`, lint, typecheck, build, and the browser — walk three
-scenarios end to end following only the page. One review pass, P1s only.
+Verification: `pnpm -F @pos/web test`, lint, typecheck, build, and the browser — install the app,
+go offline, hard reload, and confirm the order is still there and the queue still drains on
+reconnect. One review pass, P1s only.
 
-Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, `pnpm dev` on :5173. The database
-is migrated and seeded (11 products). Postgres/Redis/Redpanda were up at the end of M15 but the
-worker was NOT — the outbox has a backlog, so start it or expect `/debug` to show one.
+Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, `pnpm dev` on :5173. Postgres,
+Redis and Redpanda were up and the worker was running at the end of M16, with an empty outbox.
+A production build is `pnpm -F @pos/web build` — M17 needs one to test the worker at all.
 ```

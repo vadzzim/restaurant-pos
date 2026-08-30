@@ -742,6 +742,34 @@ export const useOrderStore = defineStore('order', () => {
     });
   }
 
+  /**
+   * The screen is going away, but the till has not finished with the table.
+   *
+   * `clear()` is an operator saying "done with this cover"; **leaving the route is not that**. Until
+   * M16 `onBeforeUnmount` called `clear()`, so glancing at `/debug` or `/demo` and coming back lost
+   * the order — and, because §18's one-shots are armed on `/demo` and live in the tab (ADR 015),
+   * an arm could only ever be spent on the `CREATE_ORDER` that the emptied till had to start with.
+   * Three of the eleven controls were undemonstrable on an item.
+   *
+   * So this drops the **in-memory** view and leaves the pointer on disk for the next `hydrate()`.
+   * The in-memory half still has to go: the store outlives the component, and POS-1's order sitting
+   * in `order.value` while POS-2 mounts would be drawn on POS-2 until its own read answered.
+   *
+   * Serialized for `clear()`'s reason: a tap still staging must not find the pointer moved beneath
+   * it. The queue is untouched either way — it is per aggregate, not per screen (§21.8).
+   */
+  async function detach(): Promise<void> {
+    await serialize(() => {
+      order.value = undefined;
+      currentOrderId.value = undefined;
+      conflict.value = undefined;
+      lastError.value = undefined;
+      readError.value = undefined;
+      // Nothing here touches disk; the link exists for its ordering, not for its awaiting.
+      return Promise.resolve();
+    });
+  }
+
   return {
     order,
     projected,
@@ -779,5 +807,6 @@ export const useOrderStore = defineStore('order', () => {
     discardHalted,
     rebaseHalted,
     clear,
+    detach,
   };
 });

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 
 import { formatTime } from '../domain/debug-view';
+import { CONTROL_LABELS, controlAnchor, offlineControlFor } from '../domain/demo-script';
 import { useSimulatorStore } from '../stores/simulator';
 import StateBadge from './StateBadge.vue';
 
@@ -14,6 +15,10 @@ import StateBadge from './StateBadge.vue';
  * Every control names the number on this page that moves when it fires, and the log at the bottom
  * says what each press actually did — a one-shot armed here fires two screens away, and a number
  * that changed a poll later is not the same as knowing the control worked.
+ *
+ * **The names and the anchor ids come from `domain/demo-script.ts`**, which is where `/demo`'s
+ * steps read them from too. A step that says "press Pause Outbox Publisher" beside a button
+ * labelled something else is the one defect M16 cannot ship, so there is one source for both.
  */
 const simulator = useSimulatorStore();
 
@@ -56,14 +61,17 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
     </h3>
 
     <ul class="mt-2 space-y-2">
-      <li class="flex flex-wrap items-center gap-3 border-b border-stone-200 pb-2">
+      <li
+        :id="controlAnchor('outbox-pause')"
+        class="flex scroll-mt-4 flex-wrap items-center gap-3 border-b border-stone-200 pb-2"
+      >
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
           :disabled="outbox === undefined || simulator.busy === 'outbox-pause'"
           @click="simulator.pauseOutbox(!(outbox?.paused ?? false))"
         >
-          {{ outbox?.paused ? 'Resume Outbox Publisher' : 'Pause Outbox Publisher' }}
+          {{ outbox?.paused ? 'Resume Outbox Publisher' : CONTROL_LABELS['outbox-pause'] }}
         </button>
         <StateBadge
           :label="outbox?.paused ? 'paused' : 'running'"
@@ -74,7 +82,10 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         </span>
       </li>
 
-      <li class="flex flex-wrap items-center gap-3 border-b border-stone-200 pb-2">
+      <li
+        :id="controlAnchor('outbox-delay')"
+        class="flex scroll-mt-4 flex-wrap items-center gap-3 border-b border-stone-200 pb-2"
+      >
         <div class="flex w-64 items-center gap-2">
           <button
             type="button"
@@ -82,7 +93,7 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
             :disabled="simulator.busy === 'outbox-delay'"
             @click="simulator.delayOutbox(delayInput)"
           >
-            Delay Outbox Publishing
+            {{ CONTROL_LABELS['outbox-delay'] }}
           </button>
           <input
             v-model.number="delayInput"
@@ -102,14 +113,17 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         </span>
       </li>
 
-      <li class="flex flex-wrap items-center gap-3 border-b border-stone-200 pb-2">
+      <li
+        :id="controlAnchor('printer-fail')"
+        class="flex scroll-mt-4 flex-wrap items-center gap-3 border-b border-stone-200 pb-2"
+      >
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
           :disabled="printer === undefined || simulator.busy === 'printer-fail'"
           @click="simulator.failPrinter(!(printer?.failing ?? false))"
         >
-          {{ printer?.failing ? 'Fix Printer' : 'Fail Printer' }}
+          {{ printer?.failing ? 'Fix Printer' : CONTROL_LABELS['printer-fail'] }}
         </button>
         <StateBadge
           :label="printer?.failing ? 'failing' : 'healthy'"
@@ -120,14 +134,17 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         </span>
       </li>
 
-      <li class="flex flex-wrap items-center gap-3">
+      <li
+        :id="controlAnchor('replay-last-event')"
+        class="flex scroll-mt-4 flex-wrap items-center gap-3"
+      >
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
           :disabled="simulator.busy === 'replay-last-event'"
           @click="simulator.replayLastEvent()"
         >
-          Replay Last Kafka Event
+          {{ CONTROL_LABELS['replay-last-event'] }}
         </button>
         <StateBadge label="one-shot" tone="neutral" />
         <span class="text-xs text-stone-600">
@@ -150,15 +167,16 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
     <ul class="mt-2 space-y-2">
       <li
         v-for="terminal in OFFLINE_TERMINALS"
+        :id="controlAnchor(offlineControlFor(terminal))"
         :key="terminal"
-        class="flex flex-wrap items-center gap-3 border-b border-stone-200 pb-2"
+        class="flex scroll-mt-4 flex-wrap items-center gap-3 border-b border-stone-200 pb-2"
       >
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white"
           @click="simulator.toggleOffline(terminal)"
         >
-          Simulate {{ terminal.toUpperCase() }} Offline
+          {{ CONTROL_LABELS[offlineControlFor(terminal)] }}
         </button>
         <StateBadge
           :label="simulator.offlineTerminal(terminal) ? 'offline' : 'online'"
@@ -169,13 +187,21 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         </span>
       </li>
 
-      <li class="flex flex-wrap items-center gap-3 border-b border-stone-200 pb-2">
+      <li
+        :id="controlAnchor('duplicate-next-mutation')"
+        class="flex scroll-mt-4 flex-wrap items-center gap-3 border-b border-stone-200 pb-2"
+      >
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white"
-          @click="simulator.toggleArmed('duplicate-next-mutation', 'Duplicate Next Mutation')"
+          @click="
+            simulator.toggleArmed(
+              'duplicate-next-mutation',
+              CONTROL_LABELS['duplicate-next-mutation'],
+            )
+          "
         >
-          Duplicate Next Mutation
+          {{ CONTROL_LABELS['duplicate-next-mutation'] }}
         </button>
         <StateBadge
           :label="armed('duplicate-next-mutation') ? 'armed' : 'idle'"
@@ -187,13 +213,16 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         </span>
       </li>
 
-      <li class="flex flex-wrap items-center gap-3 border-b border-stone-200 pb-2">
+      <li
+        :id="controlAnchor('reuse-mutation-id')"
+        class="flex scroll-mt-4 flex-wrap items-center gap-3 border-b border-stone-200 pb-2"
+      >
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white"
-          @click="simulator.toggleArmed('reuse-mutation-id', 'Reuse Mutation Id With New Payload')"
+          @click="simulator.toggleArmed('reuse-mutation-id', CONTROL_LABELS['reuse-mutation-id'])"
         >
-          Reuse Mutation Id With New Payload
+          {{ CONTROL_LABELS['reuse-mutation-id'] }}
         </button>
         <StateBadge
           :label="armed('reuse-mutation-id') ? 'armed' : 'idle'"
@@ -205,13 +234,21 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         </span>
       </li>
 
-      <li class="flex flex-wrap items-center gap-3 border-b border-stone-200 pb-2">
+      <li
+        :id="controlAnchor('create-version-conflict')"
+        class="flex scroll-mt-4 flex-wrap items-center gap-3 border-b border-stone-200 pb-2"
+      >
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white"
-          @click="simulator.toggleArmed('create-version-conflict', 'Create Version Conflict')"
+          @click="
+            simulator.toggleArmed(
+              'create-version-conflict',
+              CONTROL_LABELS['create-version-conflict'],
+            )
+          "
         >
-          Create Version Conflict
+          {{ CONTROL_LABELS['create-version-conflict'] }}
         </button>
         <StateBadge
           :label="armed('create-version-conflict') ? 'armed' : 'idle'"
@@ -219,18 +256,22 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         />
         <span class="text-xs text-stone-600">
           the next mutation goes one version low, so the queue halts under §14.1 and a
-          <strong>conflict_log</strong> row appears above. It waits for a mutation at v1 or higher:
-          creation is defined at v0.
+          <strong>conflict_log</strong> row appears above. It waits for a mutation at v2 or higher:
+          creation is defined at v0, and a decrement below v1 is refused as invalid rather than as
+          conflicting.
         </span>
       </li>
 
-      <li class="flex flex-wrap items-center gap-3 border-b border-stone-200 pb-2">
+      <li
+        :id="controlAnchor('socket-disabled')"
+        class="flex scroll-mt-4 flex-wrap items-center gap-3 border-b border-stone-200 pb-2"
+      >
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white"
-          @click="simulator.toggleLatched('socket-disabled', 'Disconnect WebSocket')"
+          @click="simulator.toggleLatched('socket-disabled', CONTROL_LABELS['socket-disabled'])"
         >
-          Disconnect WebSocket
+          {{ CONTROL_LABELS['socket-disabled'] }}
         </button>
         <StateBadge
           :label="simulator.latches['socket-disabled'] ? 'socket off' : 'socket allowed'"
@@ -242,13 +283,16 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         </span>
       </li>
 
-      <li class="flex flex-wrap items-center gap-3">
+      <li
+        :id="controlAnchor('polling-forced')"
+        class="flex scroll-mt-4 flex-wrap items-center gap-3"
+      >
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white"
-          @click="simulator.toggleLatched('polling-forced', 'Force Polling Transport')"
+          @click="simulator.toggleLatched('polling-forced', CONTROL_LABELS['polling-forced'])"
         >
-          Force Polling Transport
+          {{ CONTROL_LABELS['polling-forced'] }}
         </button>
         <StateBadge
           :label="simulator.latches['polling-forced'] ? 'push declined' : 'push allowed'"

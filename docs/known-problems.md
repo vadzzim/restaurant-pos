@@ -15,6 +15,21 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M16, P2]** `conflict_log.resolution` is only ever written `null` — `mutation-handler.ts:391`
+  writes it and nothing anywhere updates it, because Discard and Rebase happen in the browser and
+  are never reported back. So `blockedMutations` is a monotonic counter under a note that calls it
+  "a client queue still halted", and `/debug`'s **Conflict history** never shows a resolved row.
+  `/demo`'s §19.3 step 7 now says this out loud rather than claiming otherwise. Fix: a
+  `POST /api/orders/:id/conflicts/:mutationId/resolution` the two store actions call. Proved by
+  rebasing a halted queue and re-reading `/api/debug/conflicts` — `unresolved` does not fall.
+- **[M16, P3]** No UI path puts a second terminal on an existing order. `focusOrder` exists in the
+  order store but is wired only to the "Go to it" button for a stranded halted order, so §19.3's
+  literal two-terminal form (POS-2 cancels behind POS-1's back) needs `curl`. `/demo` uses the
+  `Create Version Conflict` arm instead, which produces the same halt from one window. Fix: an
+  order-id field beside the cover pad. Proved by trying to open POS-1's order from POS-2.
+- **[M16, P3]** `/demo`'s step ticks are in-memory only: switching scenario or reloading clears
+  them. Deliberate — a second walk-through should not start half done — but it also means a
+  reload mid-demo loses the place. Proved by ticking a step and pressing F5.
 - **[M15, P2]** Rows written in the same millisecond have no deterministic order: `savePending()`
   stamps `createdAt` to the millisecond and `readQueue()` sorts by it alone, so IndexedDB falls back
   to the random `mutationId` key and a queue can send base v4 before v3 and halt. Pre-existing and

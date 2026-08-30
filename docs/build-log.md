@@ -1714,3 +1714,68 @@ storage-less `attemptOnce` fallback is outside the chain, so on a device with no
 taps still share a `baseVersion`. Both need their own change and neither is what M15 introduced.
 
 `enqueue()` fell out as dead code once `createOrder` staged inline, and was deleted. 181 web tests.
+
+## M16 — `/demo`, the guided walkthrough
+
+The ten §19 scenarios became **data** (`apps/web/src/domain/demo-script.ts`), rendered by
+`DemoView.vue`, with **one** `SimulatorPanel` at the foot rather than a second set of buttons —
+`/debug` already renders those eleven controls and they are the same module state. A step names a
+control and links to its row by anchor; the control names now come from one `CONTROL_LABELS` map
+that the panel's buttons read too, because a step saying "press X" beside a button reading "Y" is
+the single defect this milestone cannot ship.
+
+`demo-script.test.ts` reads the **real** `SimulatorPanel.vue` and `router.ts`, not a copy of what
+they are believed to contain: every control a step names must have an anchor on the panel, and every
+route a step links to must exist in the router.
+
+**Two M12 defects fixed, both in `Create Version Conflict`, both named in advance by M15's handoff.**
+The arm sent `baseVersion - 1` from v1, and `mutation-routes.ts` validates an existing order's
+version as `min(1)` — so it produced a 400 `VALIDATION_ERROR` and halted nothing. The threshold is
+now v2. And `spend()` ran only after `postMutationTo` returned, so that 400 left the arm armed and
+tampered with every later mutation from the tab; it is now spent on an `ApiRequestError` too — the
+server answered — but still not on the offline gate or a dead socket, which is what the original
+guard was for.
+
+**`onBeforeUnmount` stopped calling `clear()`.** M15's handoff left this as a deliberate decision and
+it turned out to be load-bearing: the one-shots are armed on `/demo` and live in the tab (ADR 015),
+so with the order dropped on every route change an arm could only ever be spent on the `CREATE_ORDER`
+a re-emptied till has to start with — three of the eleven controls were undemonstrable on an item.
+The new `detach()` drops the in-memory view and leaves the pointer on disk for the next `hydrate()`.
+It cannot simply skip the clear: the store outlives the component, and POS-1's order sitting in
+`order.value` while POS-2 mounts would be drawn on POS-2 until its own read answered. `clear()` is
+untouched and still what **New table** means.
+
+### What the browser found that the tests could not
+
+Four defects, all in the first walk, none reachable from a unit test:
+
+- **A route badge rendered black on black.** `styles.css` had `a { color: inherit }` _unlayered_, and
+  in Tailwind v4 unlayered CSS beats a layer whatever its specificity — so it had been overriding
+  every `text-*` utility on a link since M1. `/demo` is the first page to put one there. Both anchor
+  rules moved into `@layer base`.
+- **The scenario claim rendered raw backticks** — it was plain interpolation while every other field
+  went through `renderInline`.
+- **Two steps named Table 8 and Table 9, which are not on the cover pad** (`coversFor('dining')` is
+  1–6, 11, 12). Exactly the "improvisation" the milestone is judged on. Now tested against
+  `coversFor`.
+- **Three single-asterisk emphasis spans** reached the reader as literal asterisks; `renderInline`
+  knows `**bold**` and backticks only. Now tested.
+
+**And one the walk disproved outright.** §19.3's last step claimed the conflict row gains a
+resolution after a Rebase. It does not: `conflict_log.resolution` is written `null` by the handler
+and **nothing anywhere updates it**, because Discard and Rebase happen in the browser and are never
+reported back. So `blockedMutations` only climbs, under a note calling it "a client queue still
+halted". The step now says that, and says to read the `BLOCKED` badge for the live answer — a
+counter and a gauge are different things. Logged as `[M16, P2]`; the endpoint that would fix it is
+new API surface and not this milestone's.
+
+Three scenarios walked end to end against a real stack, reading only the page. §19.4: the arm
+survived the walk, the till kept Table 4, one tap advanced the version by exactly one,
+`duplicateMutationsPrevented` +1 while `mutationIdReuseRejected` stayed at 0. §19.7: paused, sent an
+order, backlog to 7 rows and 86 s, no ticket on the kitchen, resumed, drained to 0 and the ticket
+appeared. §19.3: armed, the create at v0 and the first item at v1 both declined, three fast taps →
+`ADD_ITEM` sent at v1 against a server at v2, two `BLOCKED` behind it, the evidence panel listing
+every `mutationId` and `baseVersion`, and a Rebase that reapplied all three to v5.
+
+§19.10 is named as the test it is (`pnpm verify:multi`); §19.9's manual retry is named as the CLI it
+is. `PlaceholderView.vue` had no remaining reference and was deleted. 202 web tests.

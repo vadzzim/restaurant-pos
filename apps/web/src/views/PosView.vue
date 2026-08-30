@@ -233,17 +233,20 @@ watch(
 onMounted(start);
 onBeforeUnmount(() => {
   connection.stop();
-  void orders.clear();
-  // `clear()` empties the screen; this gives up the claim on it. Without it a hydration still
-  // reading from disk would find `activeTerminalId` unchanged, pass its owner check and restore
-  // the order onto a screen that no longer exists.
+  // `detach()` and not `clear()`: leaving the route is not the operator saying they are done with
+  // the table. The in-memory order goes so it cannot be drawn on the next screen; the pointer stays
+  // on disk, so walking to /debug or /demo and back finds the cover still open (see the store).
+  void orders.detach();
+  // That empties the screen; this gives up the claim on it. Without it a hydration still reading
+  // from disk would find `activeTerminalId` unchanged, pass its owner check and restore the order
+  // onto a screen that no longer exists.
   orders.releaseTerminal();
 });
 
 // Switching terminals in the URL is switching restaurants: rebuild the whole connection.
 watch(terminalId, async () => {
   connection.stop();
-  void orders.clear();
+  void orders.detach();
   // `start()` claims the new terminal, but it returns early for an unknown one — so the claim on
   // the old terminal is dropped here rather than left to be overwritten.
   orders.releaseTerminal();

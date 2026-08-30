@@ -1,8 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router';
 
 import DebugView from './views/DebugView.vue';
+import DemoView from './views/DemoView.vue';
 import KitchenView from './views/KitchenView.vue';
-import PlaceholderView from './views/PlaceholderView.vue';
 import PosView from './views/PosView.vue';
 
 export const router = createRouter({
@@ -12,7 +12,6 @@ export const router = createRouter({
     { path: '/pos/:terminalId', name: 'pos', component: PosView },
     { path: '/kitchen', name: 'kitchen', component: KitchenView },
     { path: '/debug', name: 'debug', component: DebugView },
-    // /demo is M16; the M1 placeholder keeps the navigation honest until then.
-    { path: '/demo', name: 'demo', component: PlaceholderView },
+    { path: '/demo', name: 'demo', component: DemoView },
   ],
 });

@@ -20,11 +20,20 @@ body {
   min-height: 100vh;
 }
 
-a {
-  color: inherit;
-  text-decoration: none;
-}
+/*
+ * In Tailwind v4 everything `@import 'tailwindcss'` brings in is layered, and **unlayered CSS beats
+ * a layer whatever its specificity**. Left bare, this `a` rule therefore overrode every `text-*`
+ * utility ever put on a link — which is how M16's `/demo` first rendered a route badge as black on
+ * black. Inside `base` it does what it is for (a link inherits unless told otherwise) and loses to
+ * a utility that says otherwise.
+ */
+@layer base {
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
 
-a.router-link-active {
-  color: #6ee7b7;
+  a.router-link-active {
+    color: #6ee7b7;
+  }
 }
