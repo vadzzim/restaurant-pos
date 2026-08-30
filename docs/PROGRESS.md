@@ -26,15 +26,22 @@ documents **link** rather than re-derive. Anything that reopens one of these sho
   monorepo"*, *"the simulator gets its buttons in M12"*), plus the demo sequence and §23's
   *Engineering concepts demonstrated*.
 
-**Three §26 clauses do not fully pass, and that is recorded rather than papered over.** Clause 18,
+**Four §26 clauses do not fully pass, and that is recorded rather than papered over.** Clause 18,
 *CI is green on a clean checkout*, is **not met**: `ci.yml` is complete and its command list is what
 ran green locally, but **this repository has no git remote**, so the workflow has never executed.
-Clause 2 is partial — no UI path puts a second terminal on an existing order. Clause 17 carries the
-known gap: §21.1 and §21.10 assert invariants, they do not force the interleaving.
+Clause 21, *the main flow has been smoke-tested by hand*, is **not met** either — `pnpm test:e2e`
+automates §19.1, and the clause asks for a human; the infrastructure is the user's (rule 3), so the
+run is theirs. Clause 2 is partial — no UI path puts a second terminal on an existing order. Clause
+17 carries the known gap: §21.1 and §21.10 assert invariants, they do not force the interleaving.
 
-**The review pass audited my own citations and found two wrong**, both written from file names
-rather than from `describe` titles. Every citation in the four documents was then grepped back to
-its test. That is the failure mode a document made of pointers has, and it is worth knowing about.
+**Two review passes, and the second was Codex's — it found five real factual errors.** Mine caught
+two miscited tests. Codex caught claims: the realtime emit is **at-most-once**, not at-least-once,
+and a duplicate emits *nothing*; `nginx.conf` pins clients with **`ip_hash`**, so "no session
+affinity" was wrong; `restaurantId` is on six tables, not all fifteen; publish-side `reclaim_count`
+and a consumer-side poison message are different failures; and clause 21 was dressed as delegated
+rather than unmet. All five verified against the code before fixing — Codex's own list of
+tenant-less tables was itself wrong about `processed_mutations`, which does carry the column. The
+lesson is the one M18 recorded: read the argument, then check the mechanism.
 
 **Green:** lint, typecheck (three projects), `pnpm test` **463 passed**, build,
 `pnpm verify:integration` **PASS**. The hand smoke of §19.1 is the user's (CLAUDE.md rule 3).
@@ -75,17 +82,18 @@ ADRs are canon; history in `progress-archive.md`. What is not in one:
 
 ## Known problems
 
-`docs/known-problems.md`: the accepted limits, then the P2/P3 backlog — **twenty-nine** entries, one
-new in M19. **Never swept**: the sweep was due every three or four milestones and was deferred each
+`docs/known-problems.md`: the accepted limits, then the P2/P3 backlog — **thirty** entries, two new
+in M19. **Never swept**: the sweep was due every three or four milestones and was deferred each
 time in favour of scope, which is itself a fact worth stating out loud in the interview.
 
 ## If a session does follow
 
 There is no next milestone. Four things are worth doing, in this order, and none of them is large:
 
-1. **Push to a remote and read the CI run.** That is §26 clause 18, and it is the only clause that
-   is unmet rather than partial. Nothing in `ci.yml` is known to be wrong; it is unexecuted.
-2. **Sweep the backlog.** Twenty-nine entries in `known-problems.md`, each written as one line with
+1. **Walk §19.1 by hand, and push to a remote and read the CI run.** The two unmet §26 clauses,
+   21 and 18. Neither needs code: nothing in `ci.yml` is known to be wrong, it is simply
+   unexecuted, and the smoke walk is `/demo`, scenario *Normal flow*.
+2. **Sweep the backlog.** Thirty entries in `known-problems.md`, each written as one line with
    what would prove it, precisely so a single context can take ten at once. The strongest candidates
    are the two M15 P2s (same-millisecond queue ordering; the storage-less `settle()` path) and the
    M16 P2 (`conflict_log.resolution` is never written, so `/debug`'s conflict history never shows a

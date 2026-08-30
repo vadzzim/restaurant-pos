@@ -1,8 +1,8 @@
 # Definition of done, walked
 
 `docs/spec.md` §26, clause by clause, with the thing that proves each one. Written in M19 against
-the repository as it stands, and deliberately unflattering: three clauses below are **not** fully
-met, and one is met by an argument rather than by a test.
+the repository as it stands, and deliberately unflattering: **four** clauses below are not fully
+met — two of them not met at all — and one more is carried by an argument rather than by a test.
 
 Legend: **proved** — an automated check fails if the clause is false. **argued** — the reasoning is
 written down and reviewable, but no test would fail. **partial** — stated where it falls short.
@@ -171,8 +171,10 @@ a P2/P3 backlog of twenty-eight entries, and the guide chooses from it.
 Green in M19. `pnpm test` is the whole default suite; `multi-instance.integration.test.ts` is
 excluded by its own config and covered by clause 15.
 
-### 21. The main flow has been smoke-tested by hand — _the user's_
+### 21. The main flow has been smoke-tested by hand — **not met**
 
-`pnpm test:e2e` automates §19.1 end to end, but §26 asks for a human, and CLAUDE.md rule 3 makes the
-infrastructure the user's to start. The script is `/demo`, scenario **Normal flow**, and its steps
-name what to watch at each press.
+`pnpm test:e2e` automates §19.1 end to end, and that is not what this clause asks for. A human has
+not walked it in M19: CLAUDE.md rule 3 makes the infrastructure the user's to start, so the run is
+theirs and no evidence of it exists here. Recorded as unmet until it does.
+
+To close it: `/demo`, scenario **Normal flow**, whose steps name what to watch at each press.

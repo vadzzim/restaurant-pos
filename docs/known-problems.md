@@ -15,6 +15,13 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M19, P3]** The realtime consumer marks `processed_events` and _then_ emits, so a crash between
+  them loses the broadcast permanently — redelivery finds the marker and emits nothing. §12.2 chose
+  that order, and in the same breath says duplicate emits are harmless because the client filters by
+  `eventId` and version; the opposite order would therefore trade a loss window for a harmless
+  duplicate window. Not changed, because §12.2 is explicit and the cost is bounded by
+  reconnect-and-refetch either way. Raised by the Codex review of M19. Proved by killing the API
+  between the commit and the emit and watching the redelivery answer `duplicate`.
 - **[M19, P3]** `pnpm verify:integration` prints two `TimeoutNegativeWarning` lines from the worker's
   integration run — a timer scheduled from what looks like `deadline - Date.now()` against a zero
   deadline, so the wait collapses to 1 ms. Not ours: the only deadline arithmetic in

@@ -84,7 +84,7 @@ Every order change — including the two kitchen transitions — is one
 `CREATE_ORDER` at `baseVersion: 0` against a client-generated `orderId`, so there is no unprotected
 write anywhere in the system (ADR 004).
 
-[`runMutation`](../apps/api/src/modules/orders/application/mutation-handler.ts:129) is one
+[`runMutation`](../apps/api/src/modules/orders/application/mutation-handler.ts#L129) is one
 transaction, and its branches are in this order — the order is the design:
 
 1. **Tenant guard** — the order exists under another restaurant → `403 CROSS_TENANT_MUTATION`.
@@ -160,7 +160,7 @@ Three things in that diagram are load-bearing and easy to get wrong:
 - **Nothing resolves itself.** Silent auto-rebase is last-write-wins wearing a disguise (§14.1).
 - **The send gate is derived, not read.** A group is sendable only if _every_ row in it is `PENDING`
   or `SYNCING`, so a crash mid-halt still refuses it. The labels are what the operator reads; the
-  derivation is what the engine obeys — [`isSendable`](../apps/web/src/sync/engine.ts:118).
+  derivation is what the engine obeys — [`isSendable`](../apps/web/src/sync/engine.ts#L118).
 
 ## The outbox
 
@@ -223,12 +223,13 @@ because a worker dying says nothing about the event.
 
 ## The two consumers, with honestly different guarantees
 
-|                   | kitchen consumer                                                           | realtime consumer                                                 |
-| ----------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Runs in           | `apps/worker`                                                              | **`apps/api`**, every replica, one shared group                   |
-| Side effect       | a row in `kitchen_tickets`                                                 | `io.to(rooms).emit`                                               |
-| Guarantee         | genuinely idempotent — the dedup marker and the projection commit together | at-least-once, with a **stated** crash window                     |
-| A duplicate event | `processed_events` catches it, the projection is unchanged                 | may re-emit a hint; the client refetches and gets the same answer |
+|                   | kitchen consumer                                                           | realtime consumer                                     |
+| ----------------- | -------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Runs in           | `apps/worker`                                                              | **`apps/api`**, every replica, one shared group       |
+| Side effect       | a row in `kitchen_tickets`                                                 | `io.to(rooms).emit`                                   |
+| Delivery          | at-least-once, from Kafka                                                  | at-least-once, from Kafka                             |
+| The side effect   | genuinely idempotent — the dedup marker and the projection commit together | **at-most-once**, with a stated loss window           |
+| A duplicate event | `processed_events` catches it, the projection is unchanged                 | caught by the same marker, and **nothing is emitted** |
 
 The kitchen consumer writes a **real read model** on purpose (ADR 009): a consumer that only logged
 or only emitted could claim idempotency, but nothing observable would distinguish "handled once"
@@ -241,8 +242,15 @@ replica joins the same group, so each event is handled once, by whichever instan
 partition; that instance emits, and the **Redis adapter** fans the broadcast out to sockets held by
 the others. `pnpm verify:multi` proves exactly that, against two real replicas behind nginx. The
 emit is not transactional and does not pretend to be: the consumer commits `processed_events` and
-_then_ emits, so a crash in between loses a hint — which the next reconnect-and-refetch repairs
-(§12.2).
+_then_ emits, so a crash in between loses that hint **permanently** — redelivery finds the marker,
+answers `duplicate` and emits nothing. Kafka delivers the event at least once; the WebSocket frame
+is therefore **at-most-once**, and the next reconnect-and-refetch is what repairs it (§12.2).
+
+The ordering is §12.2's, chosen and documented rather than stumbled into. It is worth knowing that
+the opposite order — emit, then mark — would convert this loss window into a _duplicate-emit_
+window, and §12.2 states in the same breath that duplicate emits are harmless, because the client
+filters by `eventId` and by version. The spec picked the losing side of its own argument; the cost
+is bounded by reconnect-and-refetch either way, which is why it has never mattered in practice.
 
 **The kitchen commands from that lagging projection** (ADR 012). A ticket's only version is
 `source_event_version`, so a kitchen display sends a `baseVersion` that may be stale, and a `409` is
@@ -265,10 +273,14 @@ would have to be built**.
 
 ### Already true here
 
-- **The API is stateless and replicated.** No session affinity, no in-process order state; two
-  replicas run in `docker-compose.multi.yml` and `pnpm verify:multi` asserts a cross-replica
-  broadcast. The only in-process state is the §20 counters, and `/debug` says out loud that they
-  are one instance's.
+- **The API is stateless and replicated.** No in-process order state; two replicas run in
+  `docker-compose.multi.yml` and `pnpm verify:multi` asserts a cross-replica broadcast. The only
+  in-process state is the §20 counters, and `/debug` says out loud that they are one instance's.
+- **Routing is sticky, and has to be.** `apps/web/nginx.conf` uses `ip_hash`, not round robin: the
+  client asks for `websocket` but keeps Socket.IO's `polling` fallback, and a polling handshake
+  spans several requests that must reach the same instance or it answers `Session ID unknown`. The
+  application is stateless; the _transport_ is not. Dropping affinity means forcing
+  WebSocket-only transport, which trades one failure mode for another.
 - **WebSocket fan-out is already adapter-based.** The Socket.IO Redis adapter, with rooms keyed by
   restaurant, order and kitchen. Adding a replica adds capacity without changing the code.
 - **The event topic is partitioned by `orderId`**, which is the correct key: ordering is needed per
@@ -285,15 +297,34 @@ would have to be built**.
   parallelism. With `orderId` as the key, load spreads evenly — there is no natural hot key, unlike
   `restaurantId`, which would put a chain's flagship store on one partition and pin it to one
   consumer. The cost is that cross-order ordering does not exist, which nothing here needs.
-- **A hot partition is still possible** on a poison order retried indefinitely — `reclaim_count` on
-  the publish side is the visible symptom, and a consumer-side dead-letter topic is the real answer.
-  It is not built (`known-problems.md`).
+- **Two different poison-message failures, and neither is solved.** On the **publish** side a row
+  that crashes the publisher every time it is picked up climbs `reclaim_count` and loops for ever;
+  a row the broker keeps rejecting climbs `attempt_count` and eventually dead-letters, which is the
+  designed outcome. On the **consume** side a message that throws stalls its whole partition, and
+  nothing about that touches `reclaim_count` — the outbox row was published successfully. Only the
+  second is a hot partition, and only the second is fixed by a consumer-side dead-letter topic,
+  which is not built. The two consumers even differ on it: the realtime one validates the envelope
+  and **skips** what it cannot parse, losing that broadcast permanently rather than stalling, while
+  the kitchen one `JSON.parse`s without a guard, so a malformed message throws and its partition
+  stops. The publish-side loop is fixed by a human reading `/debug`; a reclaim ceiling was rejected
+  on purpose, because a rolling restart would then dead-letter healthy events (ADR 010). All of it
+  is in `known-problems.md`.
 - **PostgreSQL read/write scaling.** Reads first: the canonical order read and the kitchen
   projection read are the hot paths, both are single-row-plus-children, and both can go to replicas
   with the write path staying on the primary — the version guard makes a stale read harmless, since
-  a mutation built on one simply conflicts. Writes scale by **tenant partitioning**: `restaurantId`
-  is on every table already, so declarative partitioning by a hash of it is a schema change and not
-  an application change. Beyond one machine, the same key shards.
+  a mutation built on one simply conflicts. Writes scale by **tenant partitioning** on
+  `restaurantId`, and the honest version of that is not a one-line schema change. **Six** tables
+  carry the column today — `terminals`, `orders`, `processed_mutations`, `outbox_events`,
+  `kitchen_tickets`, `print_jobs` — and four on the write path do not: `order_items`, `payments`,
+  `processed_events` and `conflict_log` reach a tenant only through their order. Each would need the
+  key denormalised onto it, with foreign keys and unique constraints rewritten to include it, since
+  a partitioned table's unique index must contain the partition key — and
+  `processed_events(event_id, consumer_name)` is exactly the constraint the duplicate-event
+  guarantee rests on. Reference and control tables (`products`, `feature_flags`, `outbox_controls`,
+  `printer_controls`) stay global and would be replicated rather than partitioned. It is a migration
+  with a correctness argument attached, not a configuration change. What makes it tractable is that
+  no query joins across tenants, because the mutation handler rejects a cross-tenant mutation
+  outright.
 - **Connection pooling** stops being optional at that replica count — PgBouncer in transaction mode,
   which is compatible with everything here, because there is no session-level state.
   `FOR UPDATE SKIP LOCKED` and explicit transactions work unchanged.

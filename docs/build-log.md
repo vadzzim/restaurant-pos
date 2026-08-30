@@ -2109,3 +2109,43 @@ arithmetic — `sendWithinLease` clamps, `settleWithin`'s callers pass constants
 
 Green: lint, typecheck (three projects), `pnpm test` **463 passed**, build, and
 `pnpm verify:integration` **PASS**. The hand smoke of §19.1 is the user's, per CLAUDE.md rule 3.
+
+**Codex reviewed the commit and found five factual errors the local pass had not.** They were P2 by
+its ranking and P1 by this project's, because in a documentation milestone a false claim _is_ the
+correctness defect. Each was verified against the code before being fixed:
+
+1. **The realtime emit is at-most-once, not at-least-once.** `handleRealtimeEvent` inserts the
+   marker, and on a duplicate returns `'duplicate'` **without emitting**. So a crash between the
+   commit and the emit loses that broadcast permanently, and the architecture table's claim that a
+   duplicate "may re-emit a hint" was simply wrong. Kafka delivery is at-least-once; the frame is
+   at-most-once. Fixed in the table, the prose, the pitch and the §19.6 answer.
+2. **`apps/web/nginx.conf` uses `ip_hash`.** The scale section claimed "no session affinity" —
+   contradicted by line 10 and its own comment: Socket.IO keeps a `polling` fallback whose handshake
+   spans several requests, and round robin answers `Session ID unknown`. The application is
+   stateless; the transport is not, and the document now says so.
+3. **`restaurantId` is not on every table.** Six of fifteen carry it; `order_items`, `payments`,
+   `processed_events` and `conflict_log` reach a tenant only through their order, so tenant
+   partitioning is a migration with a correctness argument — every unique index must contain the
+   partition key, including `processed_events(event_id, consumer_name)`, which is the constraint the
+   duplicate-event guarantee rests on. **Codex's own list was wrong here**: it named
+   `processed_mutations` as lacking the column, and that table has it. Counted by script, not by eye.
+4. **`reclaim_count` and a consumer poison message are different failures.** The scale section
+   offered a consumer-side dead-letter topic as the remedy for a publish-side reclaim loop. Split,
+   with the asymmetry the split exposed: the realtime consumer validates its envelope and skips what
+   it cannot parse, while the kitchen consumer `JSON.parse`s unguarded, so a malformed message stalls
+   its partition.
+5. **Clause 21 was dressed as delegated rather than unmet.** "The hand smoke is the user's" is not
+   evidence that a human walked §19.1. Now **not met**, which moves the count in
+   `definition-of-done.md` and `PROGRESS.md` from three clauses to four.
+
+Also its P3: `path.ts:129` inside a Markdown link is a filename to GitHub, not a line — 404. Both
+links now use `#L129` / `#L118`.
+
+One design note came out of finding 1 and went to `known-problems.md` rather than into the code:
+§12.2 chose mark-then-emit and in the same breath says duplicate emits are harmless, so the opposite
+order would trade a loss window for a harmless duplicate window. The spec is explicit, the cost is
+bounded by reconnect-and-refetch either way, and this is the last milestone — recorded, not changed.
+
+The lesson is M18's, arriving from the other direction. There, two of Codex's three findings were
+right and the third collapsed under one command. Here all five were right and one carried a wrong
+detail inside a correct point. Read the argument, then check the mechanism — in both directions.
