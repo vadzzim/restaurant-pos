@@ -1510,3 +1510,23 @@ demo itself: two browser windows, `/pos/pos-1` reading `PUSH` and `/pos/pos-3` r
 with the percentage at 10, and both staying correct through a mutation. The store tests drive the
 same code paths with fake timers, but "side by side on screen" is a claim only a browser can make,
 and this session did not open one.
+
+### The Codex review of M13
+
+Two findings, one of them in the P1 fix above — which is the useful kind of second opinion.
+
+**[P1, fixed]** The 15-second poll had stopped rebuilding on `UNKNOWN`, but the rebuild itself still
+went through `start()`, and `start()` tore the connection down and then fetched `/api/config` again.
+So the guard covered the poll's own request and left the _second_ one uncovered: one failure there
+and a working client dropped to `UNKNOWN` for an interval — exactly the outage the guard was added
+to prevent, one call further down. Installing a transport is now `open(options, resolved)`, which
+takes an answer already in hand and does not await anything, so the old connection is closed and the
+new one built in the same turn. `start()` is `resolve` then `open`, and it no longer tears anything
+down before its await: a superseded `start` now leaves a working connection alone instead of having
+already closed it. Two tests: one counts the config requests a switch makes, one lets every request
+after the poll's own fail and still expects a running polling transport.
+
+**[P2, backlog]** A cache fill that missed can land _after_ a concurrent flag write deleted the key,
+restoring the pre-toggle rows for one `FLAG_CACHE_TTL_MS`. Real, and the window is narrow enough
+that the cost is one extra poll interval on one demo toggle; written up in `known-problems.md` as
+`[M13, P2]` with a versioned fill named as the fix.

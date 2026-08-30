@@ -67,6 +67,9 @@ const options = (): RealtimeStartOptions => ({
   }),
 });
 
+const configCalls = (fetchMock: ReturnType<typeof vi.fn>): number =>
+  fetchMock.mock.calls.filter((call) => String(call[0]).startsWith('/api/config')).length;
+
 const presencePosts = (fetchMock: ReturnType<typeof vi.fn>): number =>
   fetchMock.mock.calls.filter((call) => call[0] === '/api/presence').length;
 
@@ -167,6 +170,67 @@ describe('the 15-second config poll', () => {
 
     expect(connection.transport).toBe('POLLING');
     expect(socketMock.closes).toBe(1);
+
+    connection.stop();
+  });
+
+  /**
+   * The switch runs on the answer the poll already has. Asking a second time would mean a request
+   * made *after* the working connection was closed — and losing that one would drop the client to
+   * `UNKNOWN` for an interval, which is the outage this path exists to avoid. Found by the Codex
+   * review of M13.
+   */
+  it('switches on the answer it already has, without a second request', async () => {
+    const fetchMock = stubFetch();
+    const connection = useConnectionStore();
+
+    await connection.start(options());
+    const before = configCalls(fetchMock);
+
+    pushEnabled = false;
+    await vi.advanceTimersByTimeAsync(CONFIG_POLL_MS);
+
+    expect(connection.transport).toBe('POLLING');
+    expect(configCalls(fetchMock) - before).toBe(1);
+  });
+
+  it('completes the switch even when every later request fails', async () => {
+    stubFetch();
+    const connection = useConnectionStore();
+
+    await connection.start(options());
+    refresh.mockClear();
+
+    // The poll's own request is the last one that works.
+    pushEnabled = false;
+    let answered = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (!String(url).startsWith('/api/config')) {
+          return Promise.resolve(new Response(null, { status: 202 }));
+        }
+        if (answered) {
+          return Promise.reject(new Error('the API went away'));
+        }
+        answered = true;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              restaurantId: 'demo-restaurant',
+              flags: { 'realtime.websocket_push': false },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        );
+      }),
+    );
+
+    await vi.advanceTimersByTimeAsync(CONFIG_POLL_MS);
+
+    expect(connection.transport).toBe('POLLING');
+    // Polling is actually running, not merely labelled: the transport refetched on arrival.
+    expect(refresh).toHaveBeenCalled();
 
     connection.stop();
   });

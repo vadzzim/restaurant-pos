@@ -15,6 +15,13 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M13, P2]** A cache-aside fill can overwrite an invalidation: a request that missed reads the
+  flag rows, and if a `POST /api/debug/flags/:key` commits and deletes the Redis key while it is in
+  flight, the late `write` puts the pre-toggle rows back for one `FLAG_CACHE_TTL_MS`. So "the
+  toggle is fleet-wide and immediate" is true except in that window, where a client polling
+  `/api/config` keeps its old transport for one more interval.
+  `apps/api/src/modules/config/application/resolve-flags.ts`. A versioned or conditional fill is
+  the fix. Found by the Codex review of M13; a fill paused across a concurrent write would prove it.
 - **[M12, P3]** `replayLastEvent` does not reset `attempt_count`, so a row that needed retries to
   publish the first time starts its replay part-way to `OUTBOX_MAX_ATTEMPTS` and can dead-letter
   sooner than a fresh event would. `apps/api/src/modules/debug/application/replay-last-event.ts`.

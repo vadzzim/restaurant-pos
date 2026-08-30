@@ -168,16 +168,19 @@ export const useConnectionStore = defineStore('connection', () => {
     });
   }
 
-  async function start(options: RealtimeStartOptions): Promise<void> {
-    lastOptions = options;
+  /**
+   * Install the transport for an answer that is already in hand. Nothing here awaits, so the old
+   * connection is closed and the new one built in one turn: there is no window in which the screen
+   * holds neither.
+   *
+   * **Whoever resolved the transport passes it in.** Resolving again here would mean a second
+   * `GET /api/config` after the connection was already torn down, and a failure of *that* request
+   * would drop a working client to `UNKNOWN` — the outage this whole path exists to avoid.
+   */
+  function open(options: RealtimeStartOptions, resolved: Transport): void {
     generation += 1;
     const mine = generation;
     teardown();
-
-    const resolved = await resolveTransport(options.restaurantId);
-    if (mine !== generation) {
-      return;
-    }
 
     transport.value = resolved;
     startFlagPoll();
@@ -189,17 +192,26 @@ export const useConnectionStore = defineStore('connection', () => {
           ? openPolling(options, mine)
           : undefined;
 
-    if (opened === undefined) {
-      return;
+    if (opened !== undefined) {
+      connection = opened;
     }
+  }
 
-    // `stop()` may have run while the transport was wiring itself up.
+  async function start(options: RealtimeStartOptions): Promise<void> {
+    lastOptions = options;
+    // Claimed before the await, not after: a `stop()` or a second `start()` during the fetch must
+    // win, and the latch watcher must be able to supersede an answer resolved under the old latch.
+    generation += 1;
+    const mine = generation;
+
+    const resolved = await resolveTransport(options.restaurantId);
+    // Nothing has been torn down yet, so a superseded `start` leaves the screen exactly as it found
+    // it — including a connection that is still working.
     if (mine !== generation) {
-      opened.close();
       return;
     }
 
-    connection = opened;
+    open(options, resolved);
   }
 
   /**
@@ -231,8 +243,11 @@ export const useConnectionStore = defineStore('connection', () => {
         }
         // `lastOptions === options` is the same generation guard the rest of the store uses, in the
         // one place it cannot be a number: this answer may arrive after the screen moved on.
+        //
+        // `open`, not `start`: this poll has just resolved the transport, and asking again would be
+        // a second request the client does not need and could lose.
         if (lastOptions === options) {
-          void start(options);
+          open(options, resolved);
         }
       });
     }, CONFIG_POLL_MS);

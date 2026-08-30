@@ -19,19 +19,19 @@ The presence heartbeat moved out of `connectRealtime` into `realtime/presence-be
 both transports — an `emit` on one, `POST /api/presence` on the other — and `PresenceEntry` gained
 `source`, so `/debug` names the transport each report arrived on. That closes `[M11, P2]`.
 
-One review pass, one P1, in this milestone's own code: the 15 s config re-poll rebuilt the connection
-whenever the answer changed, and `UNKNOWN` is a change — so one failed `GET /api/config` would have
-closed a working socket. The re-poll now ignores `UNKNOWN` and the client keeps what it has.
+One review pass, one P1: the 15 s re-poll rebuilt the connection whenever the answer changed, and
+`UNKNOWN` is a change, so one failed `GET /api/config` would have closed a working socket. The Codex
+review found the rest of it — the rebuild asked *again*, after the teardown. Installing a transport
+is now `open(options, resolved)`, on the answer already in hand.
 
 **The demo percentage is a fact:** the seeded buckets are `demo-restaurant` **1** and
 `second-restaurant` **24**, so `rolloutPercent: 10` puts POS-1 on push and POS-3 on polling at the
 same time. A test pins both numbers.
 
 **Demoable end to end:** the order lifecycle, a broker outage, reloading the tab mid-order, §19.2,
-§19.3, §19.9, `/debug` populating live, every §18 control, and now the rollout with both transports
-side by side.
+§19.3, §19.9, `/debug` live, every §18 control, and the rollout with both transports side by side.
 
-**Green:** typecheck, lint, build, **363 tests** (61 domain, 96 api, 55 worker, 151 web) against a
+**Green:** typecheck, lint, build, **365 tests** (61 domain, 96 api, 55 worker, 153 web) against a
 real PostgreSQL, plus **three** under `pnpm verify:integration`. All sixteen mandatory §21 tests
 exist, named by their spec number. The rollout was not driven in a browser this session.
 
@@ -48,17 +48,17 @@ One line per unit. The detail is in the code and in the ADRs — do not restate 
 - `packages/contracts` — statuses, mutations, events, the §5 shapes, `ConflictReason`, socket names,
   `TERMINALS`, the debug and simulator shapes, and M13's `flagBucket` / `flagAppliesTo` /
   `FlagState` / `PresenceSource` / `POLLING_INTERVAL_MS` / `CONFIG_POLL_MS`.
-- `packages/domain` — `decide()` and the pricing and transition rules: **the whole of §8**.
-- `packages/db` — fifteen tables, three migrations, seed, `db:check`, `@pos/db/testing`, and the two
-  singleton control modules both ends write.
+- `packages/domain` — `decide()`, pricing and the transitions: **the whole of §8**.
+- `packages/db` — fifteen tables, three migrations, seed, `db:check`, `@pos/db/testing`, and the
+  two singleton control modules.
 - `apps/api` — the nine-branch mutation endpoint, the two §17 kitchen adapters, the four reads,
   `modules/realtime/` (now with `api/presence-routes.ts` and the shared `presence-report.ts`
   schema), `modules/printer/`, `/api/health/{live,ready}`, `modules/debug/` (counters, queries,
   metrics, lag, Redis presence, the four reads, the simulator pair), and **`modules/config/`** —
   `flag-store.ts`, `resolve-flags.ts` (the `FlagCache` port, rollout and fallback),
   `infrastructure/redis-flag-cache.ts`, `api/flag-routes.ts`.
-- `apps/worker` — the §10 outbox publisher (ADR 010), the Kafka producer, the kitchen consumer and
-  its transactional projection, `modules/printing/` (ADR 014). Two CLIs: `outbox` and `printer`.
+- `apps/worker` — the §10 outbox publisher (ADR 010), the producer, the kitchen consumer and its
+  transactional projection, `modules/printing/` (ADR 014). Two CLIs: `outbox` and `printer`.
 - `apps/web` — the POS and kitchen screens; Pinia stores for menu, order, kitchen, connection,
   debug, simulator and **flags**; Dexie persistence (ADR 013); the §14 sync engine; `api/offline.ts`,
   `api/simulator-arms.ts`; `realtime/` with `socket.ts`, **`polling.ts`** and
@@ -111,8 +111,9 @@ Six things worth knowing before you plan:
    readiness, runs, tears down, and writes to a file — `scripts/verify-integration.mjs`. The smoke
    test wants the same treatment rather than a live log stream, and CLAUDE.md forbids pulling
    container logs into the session.
-6. **Do not sweep the review backlog.** Six entries: two M11 P2, two M11 P3, two M12 P3. The sweep
-   is its own pass and M14 is not it.
+6. **Do not sweep the review backlog.** Seven entries: two M11 P2, two M11 P3, two M12 P3, and
+   M13's P2 — a flag-cache fill that can land after an invalidation. The sweep is its own pass and
+   M14 is not it.
 
 Verification: `pnpm -F @pos/api test`, lint, typecheck, build, `pnpm verify:integration`, and the
 new two-replica smoke run. Run tests narrowly. One review pass at the end, P1s only.
