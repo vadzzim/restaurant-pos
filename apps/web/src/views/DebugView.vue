@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 
+import FlagPanel from '../components/FlagPanel.vue';
 import SimulatorPanel from '../components/SimulatorPanel.vue';
 import StateBadge from '../components/StateBadge.vue';
 import {
@@ -120,7 +121,9 @@ const backlog = computed(() => debug.dependencies?.outbox);
       <p class="mb-3 text-sm text-stone-600">
         Presence lives in Redis with a TTL and is refreshed by a heartbeat from each browser, so an
         entry disappears on its own when a terminal stops reporting. Pending counts and the offline
-        switch are reported by the client — nothing else can know them.
+        switch are reported by the client — nothing else can know them. The <strong>source</strong>
+        badge is the transport the report arrived on: a terminal on polling has no socket and beats
+        over HTTP instead (§15).
       </p>
       <p v-if="debug.metrics?.presenceError" class="mb-3 text-sm text-amber-700">
         {{ debug.metrics.presenceError }}
@@ -138,7 +141,9 @@ const backlog = computed(() => debug.dependencies?.outbox);
             :label="badge.label"
             :tone="badge.tone"
           />
-          <span class="text-sm text-stone-600">{{ entry.restaurantId }} · {{ entry.role }}</span>
+          <span class="text-sm text-stone-600">
+            {{ entry.restaurantId }} · {{ entry.role }} · {{ entry.source }}
+          </span>
           <span class="text-sm text-stone-600">last seen {{ formatTime(entry.lastSeenAt) }}</span>
         </li>
         <li v-if="terminals.length === 0" class="text-sm text-stone-600">
@@ -376,12 +381,9 @@ const backlog = computed(() => debug.dependencies?.outbox);
     </article>
 
     <!-- §18 ------------------------------------------------------------------------------------>
-    <SimulatorPanel />
+    <FlagPanel />
 
-    <!-- The one §16 section this milestone does not own ------------------------------------------>
-    <article class="rounded border border-dashed border-stone-300 p-4 text-sm text-stone-600">
-      <h2 class="mb-2 text-lg font-semibold text-stone-800">Not on this page yet</h2>
-      <p><strong>Feature flag toggles</strong> — M13, together with the polling transport.</p>
-    </article>
+    <!-- Simulator ----------------------------------------------------------------------------->
+    <SimulatorPanel />
   </section>
 </template>

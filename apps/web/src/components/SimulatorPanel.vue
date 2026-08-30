@@ -255,9 +255,9 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
           :tone="simulator.latches['polling-forced'] ? 'warn' : 'ok'"
         />
         <span class="text-xs text-stone-600">
-          this terminal declines push without touching the fleet-wide flag, so the POS badge reads
-          <strong>PUSH DISABLED</strong>. That branch has no live updates today; M13 turns it into a
-          working second transport.
+          this terminal takes the rollout's other branch without touching the fleet-wide flag, so
+          the POS badge reads <strong>POLLING</strong> and updates keep arriving — a few seconds
+          later. It is how both transports can be watched side by side before a percentage exists.
         </span>
       </li>
     </ul>

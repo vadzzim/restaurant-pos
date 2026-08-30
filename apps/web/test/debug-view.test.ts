@@ -26,6 +26,7 @@ function presence(overrides: Partial<PresenceEntry> = {}): PresenceEntry {
     terminalId: 'pos-1',
     restaurantId: 'demo-restaurant',
     role: 'pos',
+    source: 'socket',
     socketId: 'socket-1',
     pendingCount: 0,
     offline: false,

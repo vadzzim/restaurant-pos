@@ -23,13 +23,6 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   overlapping presses leave the first button enabled while its request is still out. Harmless — the
   endpoint is idempotent per switch — but the disabled state is not telling the truth. Pressing two
   server controls within the same tick and watching both stay enabled proves it.
-- **[M11, P2]** Presence is only reported over the WebSocket: `connectRealtime` installs the
-  heartbeat, and `start()` in `apps/web/src/stores/connection.ts` returns before it when
-  `realtime.websocket_push` is off, so such a client never appears on `/debug`'s active-terminal
-  panel (§16). Harmless while `PUSH DISABLED` means no live updates at all — **this becomes a real
-  defect in M13**, which makes polling a complete second transport, and is flagged there in
-  `MILESTONES.md`. Found by the Codex review of M11. Two terminals on different transports side by
-  side, with only one of them listed, would prove it.
 - **[M11, P2]** The kitchen heartbeat reports `pendingCount: 0` unconditionally
   (`apps/web/src/views/KitchenView.vue`), but `useKitchenStore` deliberately keeps a command in
   `pendingByOrder` and in IndexedDB when its response is lost, for Retry / Discard. So the one
@@ -146,10 +139,19 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   seconds rather than an exit, which is easier to miss than a crash. The heartbeat carries
   `brokerConnected` for exactly that reason. Two supervision loops now exist, one per process,
   deliberately not shared (ADR 011).
-- **`GET /api/config` is the M4 stub of an M13 feature.** It reads `feature_flags` directly: no
-  Redis cache, no percentage rollout, and the client fetches it once at bootstrap instead of every
-  15 s. With the flag off the screens are correct but receive no live updates, because the polling
-  transport — the flag's other, complete branch — is M13's.
+- **A client that cannot read `GET /api/config` keeps the transport it has**, and a client that
+  never read it at all opens nothing and shows `UNKNOWN` until the 15 s poll answers. Deliberate
+  (ADR 008): a failed GET must not close a working socket, and a transport chosen by guessing is a
+  rollout nobody can trace.
+- **`POST /api/presence` is not in §17's endpoint list**, like `GET /api/kitchen/tickets`. It is the
+  second presence path a terminal with no socket needs (§15); riding the beat on `GET /api/config`
+  was rejected because that poll is three times slower than `PRESENCE_TTL_MS` and a GET that writes
+  is a GET that lies.
+- **The polling transport calls the screen's whole `refresh`, sync included**, so a POS on polling
+  drains its queue every `POLLING_INTERVAL_MS` instead of only on an explicit trigger (ADR 002).
+  Deliberate: both transports must differ in latency and in nothing else, and the push path already
+  syncs on every event. It does mean a §19.3-style demo on a _polling_ terminal needs the offline
+  switch, not merely a quiet screen.
 - **`GET /api/kitchen/tickets` is not in §17's endpoint list**; it was added because the kitchen
   screen must read the projection. `GET /api/restaurants/:restaurantId/orders` is still unbuilt.
 - **The socket has no authentication.** Any browser can subscribe to any restaurant's rooms.
@@ -196,11 +198,12 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   a route change; a POS open in a _second_ tab sees nothing. Consistent with one screen per terminal,
   and stated on the panel rather than left to be discovered mid-demo.
 - **`/debug` is a write surface now, and there is no authentication on it.** Anything that can reach
-  the API can pause the fleet's publisher or fail its printer. Deliberate in a demo with no auth
-  anywhere, and worth saying out loud beside the socket having none.
-- **`Force Polling Transport` reaches the `PUSH DISABLED` branch, not a polling transport.** M13
-  owns the second transport; until then the latch means "this terminal declines push", which is a
-  real and useful thing to demonstrate but is not what the label finally promises. The panel says so.
+  the API can pause the fleet's publisher, fail its printer, or move the rollout percentage — and
+  since M13 anything can `POST /api/presence` under any terminal name. Deliberate in a demo with no
+  auth anywhere, and worth saying out loud beside the socket having none.
+- **`Force Polling Transport` is per tab, and the flag is per restaurant.** Both reach the same
+  working transport since M13; the latch is the one that can put two terminals of the _same_
+  restaurant on different transports, which no percentage can do.
 - **`Replay Last Kafka Event` moves the published count down by one** while the row is back in
   flight, and the replayed row is _earlier_ than any still-unpublished event for the same aggregate,
   so the claim query holds those behind it until it lands. Both are the cost of expressing a replay

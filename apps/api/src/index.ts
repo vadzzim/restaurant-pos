@@ -4,6 +4,7 @@ import { Redis } from 'ioredis';
 import { Kafka } from 'kafkajs';
 
 import { buildApp } from './app.js';
+import { createRedisFlagCache } from './modules/config/infrastructure/redis-flag-cache.js';
 import { createConsumerLagProbe } from './modules/debug/application/consumer-lag.js';
 import {
   createRedisPresenceStore,
@@ -43,6 +44,12 @@ debugRedis.on('error', () => undefined);
 
 const presence = createRedisPresenceStore(debugRedis, config.PRESENCE_TTL_MS);
 const sharedCounters = createRedisSharedCounters(debugRedis);
+/**
+ * §15's flag cache shares the bounded `/debug` connection rather than opening a fifth. It wants
+ * exactly the same properties — short timeout, no offline queue — because both are reads that must
+ * fail fast and fall back rather than wait out an outage.
+ */
+const flagCache = createRedisFlagCache(debugRedis, config.FLAG_CACHE_TTL_MS);
 
 /**
  * Consumer lag for both groups (§17, and ADR 012 for why the kitchen group's lag is a write
@@ -73,6 +80,7 @@ const app = buildApp({
   consumerLag: consumerLag.probe,
   debugRowLimit: config.DEBUG_ROW_LIMIT,
   outboxLeaseMs: config.OUTBOX_LEASE_MS,
+  flagCache,
 });
 
 const realtime = createRealtimeServer(app.server, config, app.log, presence);

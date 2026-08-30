@@ -1,4 +1,9 @@
-import type { PresenceEntry, PresenceReport, SharedCounterName } from '@pos/contracts';
+import type {
+  PresenceEntry,
+  PresenceReport,
+  PresenceSource,
+  SharedCounterName,
+} from '@pos/contracts';
 
 /**
  * The two things `/debug` needs from Redis, as ports rather than clients.
@@ -8,9 +13,17 @@ import type { PresenceEntry, PresenceReport, SharedCounterName } from '@pos/cont
  * the Redis-backed implementations.
  */
 
+/**
+ * Where a report came from. A socket names itself; a terminal on the polling transport has no
+ * socket to name, which is exactly the distinction `/debug` renders (§15).
+ */
+export type PresenceOrigin =
+  | { source: Extract<PresenceSource, 'socket'>; socketId: string }
+  | { source: Extract<PresenceSource, 'polling'> };
+
 export interface PresenceStore {
   /** Write or refresh one terminal's entry, with a TTL. Called on subscribe and on each heartbeat. */
-  touch: (report: PresenceReport, socketId: string) => Promise<void>;
+  touch: (report: PresenceReport, origin: PresenceOrigin) => Promise<void>;
   /** Eager cleanup on disconnect. The TTL is what covers everything that never gets here. */
   forget: (terminalId: string) => Promise<void>;
   list: () => Promise<PresenceEntry[]>;

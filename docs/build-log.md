@@ -1459,3 +1459,54 @@ replay that came back naming `OrderSentToKitchen v3` — which is a stronger che
 because it proves the routes are reachable in the assembled process. The seven client ones are
 covered by unit tests that send real bodies through `fetch`, but "the badge changes and the presence
 row goes stale" is a claim only a browser can settle, and this session did not open one.
+
+## M13 — Feature flags and the polling fallback
+
+The milestone is two halves of one sentence from §15: _turning the flag off degrades latency, it
+does not cause an outage._ The flag machinery was the small half — a cache port, a hash, one
+endpoint pair — and the transport was the large one, because that sentence is only true if the other
+branch is a real implementation.
+
+**The polling transport reuses the screen's own `refresh`.** The POS never treated a socket event as
+data — it treated it as a reason to refetch — so the second transport had nothing new to invent: it
+calls the same canonical read on a timer. That is why the two branches differ in latency and in
+nothing else, and it is what `connectPolling` is: a timer, a guard against overlapping refetches, and
+a presence beat.
+
+**Presence had to leave the socket.** `[M11, P2]` was written as harmless because `PUSH DISABLED`
+meant no live updates at all; the moment polling worked, a working terminal would have been invisible
+on the one panel the rollout demo depends on. The beat moved into `realtime/presence-beat.ts`, which
+both transports drive — an `emit` on one side, `POST /api/presence` on the other — and
+`PresenceEntry` gained `source`, so `/debug` now names the transport each report arrived on. Riding
+the beat on the 15 s config poll was the alternative: three times too slow for `PRESENCE_TTL_MS`, and
+a GET that writes.
+
+**The rollout is a fact, not a hope.** `flagBucket` is FNV-1a over `${key}:${restaurantId}`, and the
+two seeded restaurants land on 1 and 24, so any percentage between 2 and 24 puts POS-1 on push and
+POS-3 on polling at the same time. A test pins both numbers: if the hash changes, the demo
+percentage changes with it, and that is the kind of thing that is discovered in front of an audience
+otherwise. Recorded with the rest of the reasoning in **ADR 008**, the last unwritten one.
+
+The flag routes are M12's simulator pair again, deliberately: a zod enum on the path segment, a
+patch body, the new state in the response (ADR 015). Two debug write surfaces built two ways would
+be two things to reason about for nothing.
+
+### The review pass
+
+One P1, and in this milestone's own new code. The 15-second config re-poll rebuilt the connection
+whenever the answer _changed_ — and `UNKNOWN` is a change. A single failed `GET /api/config` would
+therefore have closed a working socket and left the screen with no transport until the next poll:
+a blip turned into the outage the flag exists to avoid. `UNKNOWN` is now ignored by the re-poll; a
+client keeps what it has until the endpoint answers with a transport again. A test covers it.
+
+Nothing went to the backlog this time. Three entries left it instead: the `[M11, P2]` presence
+defect is fixed, and the two apologies — for `GET /api/config` being an M4 stub and for
+`Force Polling Transport` reaching a dead branch — describe features that now exist.
+
+### What the automated verification cannot cover
+
+333 → 363 tests, all green, plus the three integration checks. What no test here settles is the
+demo itself: two browser windows, `/pos/pos-1` reading `PUSH` and `/pos/pos-3` reading `POLLING`
+with the percentage at 10, and both staying correct through a mutation. The store tests drive the
+same code paths with fake timers, but "side by side on screen" is a claim only a browser can make,
+and this session did not open one.

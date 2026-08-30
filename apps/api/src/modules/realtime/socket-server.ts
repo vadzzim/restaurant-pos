@@ -16,31 +16,12 @@ import { z } from 'zod';
 
 import type { PresenceStore } from '../debug/application/ports.js';
 import { kitchenRoom, orderRoom, restaurantRoom, type RealtimeEmitter } from './broadcast.js';
+import { presenceReportSchema } from './presence-report.js';
 
 const subscribeSchema = z.object({
   restaurantId: z.string().min(1),
   role: z.enum(['pos', 'kitchen']),
   orderId: z.uuid().optional(),
-});
-
-/**
- * The presence heartbeat (§16: active terminals with their pending counts).
- *
- * The client is the only thing that knows two of these fields — its own pending-mutation queue
- * depth and whether its §18 offline switch is on — so presence is *reported*, not inferred from
- * the socket. The server supplies what the client cannot forge usefully: the socket id and the
- * timestamp.
- *
- * `pendingCount` is bounded rather than merely non-negative: this value is written straight into a
- * Redis entry that a debug page renders, and an unbounded number from a client is an unbounded
- * number on a screen.
- */
-const presenceSchema = z.object({
-  terminalId: z.string().min(1).max(64),
-  restaurantId: z.string().min(1).max(64),
-  role: z.enum(['pos', 'kitchen']),
-  pendingCount: z.number().int().min(0).max(100_000),
-  offline: z.boolean(),
 });
 
 export interface RealtimeServer {
@@ -124,7 +105,7 @@ export function createRealtimeServer(
    * The `redis` dependency row and the `null` shared counters are what say Redis is down.
    */
   function recordPresence(report: PresenceReport, socketId: string): void {
-    void presence?.touch(report, socketId).catch((error: unknown) => {
+    void presence?.touch(report, { source: 'socket', socketId }).catch((error: unknown) => {
       logger.debug({ err: error, terminalId: report.terminalId }, 'could not record presence');
     });
   }
@@ -141,7 +122,7 @@ export function createRealtimeServer(
     let claimed: string | undefined;
 
     socket.on(PRESENCE_EVENT_NAME, (payload: unknown) => {
-      const parsed = presenceSchema.safeParse(payload);
+      const parsed = presenceReportSchema.safeParse(payload);
       if (!parsed.success) {
         logger.debug({ socketId: socket.id }, 'rejected an invalid presence report');
         return;

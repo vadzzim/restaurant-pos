@@ -1,24 +1,31 @@
-import type { DomainEvent, PresenceReport } from '@pos/contracts';
+import { CONFIG_POLL_MS, type DomainEvent, type PresenceReport } from '@pos/contracts';
 import { defineStore } from 'pinia';
 import { computed, ref, watch } from 'vue';
 
 import { fetchConfig } from '../api/client';
 import { isLatched, latchStates } from '../api/simulator-arms';
 import { createEventGate, type GateVerdict } from '../realtime/event-gate';
-import { connectRealtime, type RealtimeConnection } from '../realtime/socket';
+import { connectPolling } from '../realtime/polling';
+import { connectRealtime } from '../realtime/socket';
 
 export type SocketState = 'DISCONNECTED' | 'CONNECTED';
 
 /**
- * `PUSH` is the WebSocket transport of §13. `PUSH DISABLED` is what M4 shows when the
- * `realtime.websocket_push` flag is off: the screens stay correct after every mutation, but there
- * are no live updates until M13 lands the polling transport as the flag's other, complete branch.
+ * The two transports of §13, and the gap between them.
  *
- * §18's `Force Polling Transport` puts this terminal on that same `PUSH DISABLED` branch without
- * touching the flag. Today the two are indistinguishable on the badge because the branch is one
- * branch; M13 is what makes it a working second transport.
+ * `PUSH` is the WebSocket. `POLLING` is the complete second implementation §15 requires: when
+ * `realtime.websocket_push` is off for this restaurant the client polls the snapshot instead, and
+ * the screens stay correct — the difference is latency, not capability. That is what makes the flag
+ * a rollout rather than a kill switch, and it is why turning it off is safe to do in front of an
+ * audience.
+ *
+ * `UNKNOWN` is neither: `/api/config` could not be reached, so no transport has been chosen yet.
+ * The 15-second re-poll below is what gets a client out of it without a reload.
+ *
+ * §18's `Force Polling Transport` puts one terminal on `POLLING` without touching the fleet-wide
+ * flag, which is how both transports can be shown side by side before a percentage exists.
  */
-export type Transport = 'PUSH' | 'PUSH DISABLED' | 'UNKNOWN';
+export type Transport = 'PUSH' | 'POLLING' | 'UNKNOWN';
 
 export interface RealtimeStartOptions {
   restaurantId: string;
@@ -27,9 +34,9 @@ export interface RealtimeStartOptions {
   /** What the screen holds for the aggregate this event is about; 0 when it holds nothing. */
   heldVersion: (aggregateId: string) => number;
   /**
-   * The canonical refetch — the only way this client learns anything from a socket message. The
-   * event is passed so a screen reading an eventually-consistent projection can wait for it;
-   * `undefined` means this is a reconnect refresh with nothing specific to wait for.
+   * The canonical refetch — on either transport, the only way this client learns anything from the
+   * server. The event is passed so a screen reading an eventually-consistent projection can wait
+   * for it; `undefined` means a reconnect refresh, or a poll, with nothing specific to wait for.
    */
   refresh: (event: DomainEvent | undefined) => Promise<void>;
   /**
@@ -39,6 +46,12 @@ export interface RealtimeStartOptions {
   presence?: () => PresenceReport | undefined;
 }
 
+/** What both transports look like to this store. Neither one is special-cased after `start`. */
+interface Connection {
+  resubscribe: () => void;
+  close: () => void;
+}
+
 export const useConnectionStore = defineStore('connection', () => {
   const online = ref(navigator.onLine);
   const socketState = ref<SocketState>('DISCONNECTED');
@@ -46,16 +59,17 @@ export const useConnectionStore = defineStore('connection', () => {
   const lastVerdict = ref<GateVerdict | undefined>();
 
   const gate = createEventGate();
-  let connection: RealtimeConnection | undefined;
+  let connection: Connection | undefined;
   /**
-   * `start` awaits `GET /api/config` before it opens a socket, and in that gap the component can
+   * `start` awaits `GET /api/config` before it opens anything, and in that gap the component can
    * unmount or the terminal in the URL can change. Every `start` and `stop` claims a generation;
    * a `start` that finds its claim superseded drops what it built instead of installing it, so a
    * stale connection can neither replace a newer one nor outlive a `stop`.
    */
   let generation = 0;
-  /** What the mounted screen last asked for, so a §18 latch can rebuild the same connection. */
+  /** What the mounted screen last asked for, so a flag change or a §18 latch can rebuild it. */
   let lastOptions: RealtimeStartOptions | undefined;
+  let flagPoll: ReturnType<typeof setInterval> | undefined;
 
   const pushEnabled = computed(() => transport.value === 'PUSH');
 
@@ -67,24 +81,27 @@ export const useConnectionStore = defineStore('connection', () => {
   });
 
   /**
-   * Fetched once at bootstrap. M13 re-polls this every 15 s so an open client picks up a rollout
-   * change; a WebSocket control event would be circular when the flag turns WebSocket off (§15).
+   * Which transport this restaurant is on right now.
    *
    * Deliberately free of side effects: it resolves a value and writes nothing. The caller writes
    * `transport` only after checking that its generation is still current, so the late answer of a
    * cancelled `start` cannot relabel the transport of the restaurant that replaced it.
    */
   async function resolveTransport(restaurantId: string): Promise<Transport> {
-    // §18's `Force Polling Transport`, per terminal and ahead of the flag: this screen declines
-    // push without touching a fleet-wide row that would take every other terminal with it.
+    // §18's `Force Polling Transport`, per terminal and ahead of the flag: this screen takes the
+    // rollout's other branch without touching a fleet-wide row that would take every other
+    // terminal with it.
     if (isLatched('polling-forced')) {
-      return 'PUSH DISABLED';
+      return 'POLLING';
     }
 
     try {
       const config = await fetchConfig(restaurantId);
-      return config.flags['realtime.websocket_push'] ? 'PUSH' : 'PUSH DISABLED';
+      return config.flags['realtime.websocket_push'] ? 'PUSH' : 'POLLING';
     } catch {
+      // Not `POLLING`: a client that cannot read its configuration has not been *told* to poll, and
+      // starting a transport on a guess is how a rollout stops being traceable. The re-poll below
+      // is what gets this client out of `UNKNOWN` without a reload.
       return 'UNKNOWN';
     }
   }
@@ -95,30 +112,16 @@ export const useConnectionStore = defineStore('connection', () => {
     socketState.value = 'DISCONNECTED';
   }
 
-  async function start(options: RealtimeStartOptions): Promise<void> {
-    lastOptions = options;
-    generation += 1;
-    const mine = generation;
-    teardown();
-
-    const resolved = await resolveTransport(options.restaurantId);
-    if (mine !== generation) {
-      return;
-    }
-
-    transport.value = resolved;
-    if (resolved !== 'PUSH') {
-      return;
-    }
-
+  /** The socket branch. Returns `undefined` when §18 says this terminal may not open one. */
+  function openPush(options: RealtimeStartOptions, mine: number): Connection | undefined {
     // §18's `Disconnect WebSocket`. It is checked here rather than by closing an open socket
     // because the operator throws it on `/debug`, where no screen holds one — a latch the next
     // `start` obeys is what makes the control work from the page it is drawn on.
     if (isLatched('socket-disabled')) {
-      return;
+      return undefined;
     }
 
-    const opened = connectRealtime({
+    return connectRealtime({
       subscription: () => ({
         restaurantId: options.restaurantId,
         role: options.role,
@@ -152,14 +155,87 @@ export const useConnectionStore = defineStore('connection', () => {
         }
       },
     });
+  }
 
-    // `stop()` may have run while `connectRealtime` was wiring itself up.
+  /**
+   * The polling branch. No event gate and no version comparison: there is no event to judge, only
+   * the snapshot itself, which is canonical by definition (§13).
+   */
+  function openPolling(options: RealtimeStartOptions, mine: number): Connection {
+    return connectPolling({
+      refresh: () => (mine === generation ? options.refresh(undefined) : Promise.resolve()),
+      presence: () => (mine === generation ? options.presence?.() : undefined),
+    });
+  }
+
+  async function start(options: RealtimeStartOptions): Promise<void> {
+    lastOptions = options;
+    generation += 1;
+    const mine = generation;
+    teardown();
+
+    const resolved = await resolveTransport(options.restaurantId);
+    if (mine !== generation) {
+      return;
+    }
+
+    transport.value = resolved;
+    startFlagPoll();
+
+    const opened =
+      resolved === 'PUSH'
+        ? openPush(options, mine)
+        : resolved === 'POLLING'
+          ? openPolling(options, mine)
+          : undefined;
+
+    if (opened === undefined) {
+      return;
+    }
+
+    // `stop()` may have run while the transport was wiring itself up.
     if (mine !== generation) {
       opened.close();
       return;
     }
 
     connection = opened;
+  }
+
+  /**
+   * §15's 15-second re-poll. An already-open client learns about a rollout change here and nowhere
+   * else: a socket control event would be circular — it cannot tell a client that the socket is off
+   * — and forcing a reload would cost more than fifteen seconds of delay.
+   *
+   * It rebuilds only when the answer *changed*, so the steady state is one cheap GET every 15 s and
+   * not a connection that tears itself down on a timer.
+   */
+  function startFlagPoll(): void {
+    if (flagPoll !== undefined) {
+      return;
+    }
+
+    flagPoll = setInterval(() => {
+      const options = lastOptions;
+      if (options === undefined) {
+        return;
+      }
+
+      void resolveTransport(options.restaurantId).then((resolved) => {
+        // **`UNKNOWN` is not a change.** A blip on this poll is not news about the rollout, and
+        // acting on it would close a working socket and leave the screen with no transport for
+        // fifteen seconds — turning a failed GET into the outage the flag exists to avoid. The
+        // client keeps what it has until the endpoint answers with a transport again.
+        if (resolved === 'UNKNOWN' || resolved === transport.value) {
+          return;
+        }
+        // `lastOptions === options` is the same generation guard the rest of the store uses, in the
+        // one place it cannot be a number: this answer may arrive after the screen moved on.
+        if (lastOptions === options) {
+          void start(options);
+        }
+      });
+    }, CONFIG_POLL_MS);
   }
 
   function resubscribe(): void {
@@ -170,6 +246,11 @@ export const useConnectionStore = defineStore('connection', () => {
     lastOptions = undefined;
     generation += 1;
     teardown();
+
+    if (flagPoll !== undefined) {
+      clearInterval(flagPoll);
+      flagPoll = undefined;
+    }
   }
 
   /**

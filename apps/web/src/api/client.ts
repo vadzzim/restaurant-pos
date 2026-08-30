@@ -4,6 +4,8 @@ import type {
   ConfigResponse,
   DependenciesResponse,
   EventsDebugResponse,
+  FeatureFlagKey,
+  FlagsResponse,
   KitchenTicket,
   MenuItem,
   MetricsResponse,
@@ -11,6 +13,7 @@ import type {
   MutationResponse,
   OrderSnapshot,
   OutboxDebugResponse,
+  PresenceReport,
   SimulatorControl,
   SimulatorResponse,
 } from '@pos/contracts';
@@ -89,6 +92,33 @@ export const fetchDebugOutbox = (): Promise<OutboxDebugResponse> =>
 
 export const fetchSimulator = (): Promise<SimulatorResponse> =>
   get<SimulatorResponse>('/api/debug/simulator');
+
+export const fetchFlags = (): Promise<FlagsResponse> => get<FlagsResponse>('/api/debug/flags');
+
+/**
+ * §17's one listed debug write, through the same pair-shaped surface as the M12 controls: the
+ * response is the new state of every flag, so the panel never has to re-read to show what it did.
+ */
+export const postFlag = (
+  key: FeatureFlagKey,
+  patch: { enabled?: boolean | undefined; rolloutPercent?: number | undefined },
+): Promise<FlagsResponse> => postJson<FlagsResponse>(`/api/debug/flags/${key}`, patch);
+
+/**
+ * The presence heartbeat on the polling transport (§15). It does **not** go through `assertOnline`
+ * even though it carries a terminal id: a terminal pretending to be offline still reports, and it
+ * reports `offline: true` — that flag on `/debug`'s panel is the whole point of §19.3, and a
+ * terminal that vanished instead would be indistinguishable from one that was closed.
+ */
+export async function postPresence(report: PresenceReport): Promise<void> {
+  // Not through `postJson`: the endpoint answers `202` with no body, and `unwrap` would try to
+  // parse one. Nothing reads the answer anyway — the beat is fire-and-forget on both transports.
+  await fetch('/api/presence', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(report),
+  });
+}
 
 /**
  * §18's four server-side controls, through the one endpoint pair M12 added (ADR 015). The response

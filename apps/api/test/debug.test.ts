@@ -334,6 +334,7 @@ describe('GET /api/debug/metrics', () => {
       terminalId: 'pos-1',
       restaurantId: DEMO_RESTAURANT,
       role: 'pos',
+      source: 'socket',
       socketId: 'socket-1',
       pendingCount: 3,
       offline: true,

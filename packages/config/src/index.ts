@@ -84,6 +84,13 @@ const environmentSchema = z.object({
   PRESENCE_TTL_MS: z.coerce.number().int().positive().default(15_000),
   /** How many rows each /debug listing returns. A page, not a table dump. */
   DEBUG_ROW_LIMIT: z.coerce.number().int().positive().max(500).default(50),
+  /**
+   * How long §15's feature flags stay cached in Redis. Short, because a toggle from `/debug` is
+   * expected to be visible on the next 15 s client poll — and because the write invalidates the key
+   * anyway, this TTL only bounds the staleness of a write that happened outside the API (a psql
+   * `UPDATE`) or whose invalidation failed.
+   */
+  FLAG_CACHE_TTL_MS: z.coerce.number().int().positive().default(5_000),
 });
 
 export type AppConfig = z.infer<typeof environmentSchema>;

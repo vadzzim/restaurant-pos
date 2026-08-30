@@ -1,6 +1,5 @@
 import {
   PRESENCE_EVENT_NAME,
-  PRESENCE_HEARTBEAT_MS,
   REALTIME_EVENT_NAME,
   SUBSCRIBE_EVENT_NAME,
   type DomainEvent,
@@ -8,6 +7,8 @@ import {
   type SubscribeRequest,
 } from '@pos/contracts';
 import { io, type Socket } from 'socket.io-client';
+
+import { startPresenceBeat } from './presence-beat';
 
 export interface RealtimeConnectionOptions {
   subscription: () => SubscribeRequest;
@@ -43,29 +44,28 @@ export function connectRealtime(options: RealtimeConnectionOptions): RealtimeCon
   };
 
   /**
-   * The presence beat. It is emitted rather than merely observed from the connection because two
-   * of its fields — the pending count and the offline switch — exist only in this browser, and
-   * because a periodic beat is what makes the server's TTL meaningful: an entry that is not
-   * refreshed expires, so a terminal that dies without a disconnect leaves the list on its own.
+   * The presence beat, on this transport's terms. The timer itself lives in `presence-beat.ts`,
+   * because since M13 the polling transport keeps the same beat over HTTP — a terminal is on
+   * `/debug` because it is working, not because it happens to hold a socket.
    *
    * `socket.emit` on a disconnected socket buffers, which is exactly wrong here: a burst of stale
    * beats would land at once on reconnect and each would overwrite `lastSeenAt` with the moment it
    * arrived. So it only reports while connected.
    */
-  const report = (): void => {
-    const presence = options.presence?.();
-    if (presence !== undefined && socket.connected) {
-      socket.emit(PRESENCE_EVENT_NAME, presence);
-    }
-  };
-
-  const beat = setInterval(report, PRESENCE_HEARTBEAT_MS);
+  const beat = startPresenceBeat(
+    () => options.presence?.(),
+    (presence) => {
+      if (socket.connected) {
+        socket.emit(PRESENCE_EVENT_NAME, presence);
+      }
+    },
+  );
 
   socket.on('connect', () => {
     subscribe();
     // Immediately, not on the next tick: a terminal that had to wait five seconds to appear on
     // /debug would look like a terminal that failed to connect.
-    report();
+    beat.report();
     options.onConnected();
   });
 
@@ -83,11 +83,11 @@ export function connectRealtime(options: RealtimeConnectionOptions): RealtimeCon
         subscribe();
         // The queue depth is the commonest reason a screen resubscribes, so the panel follows a
         // mutation without waiting out the interval.
-        report();
+        beat.report();
       }
     },
     close: () => {
-      clearInterval(beat);
+      beat.stop();
       socket.close();
     },
   };

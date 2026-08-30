@@ -9,7 +9,7 @@ import {
 } from '@pos/contracts';
 import type { Redis } from 'ioredis';
 
-import type { PresenceStore, SharedCounterStore } from '../application/ports.js';
+import type { PresenceOrigin, PresenceStore, SharedCounterStore } from '../application/ports.js';
 
 /**
  * Presence and the shared counters, on Redis.
@@ -22,12 +22,13 @@ import type { PresenceStore, SharedCounterStore } from '../application/ports.js'
  */
 export function createRedisPresenceStore(redis: Redis, ttlMs: number): PresenceStore {
   return {
-    touch: async (report: PresenceReport, socketId: string) => {
+    touch: async (report: PresenceReport, origin: PresenceOrigin) => {
       const entry: PresenceEntry = {
         terminalId: report.terminalId,
         restaurantId: report.restaurantId,
         role: report.role,
-        socketId,
+        source: origin.source,
+        ...(origin.source === 'socket' ? { socketId: origin.socketId } : {}),
         pendingCount: report.pendingCount,
         offline: report.offline,
         // Server time, deliberately. The staleness marking on screen compares this against the

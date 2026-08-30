@@ -3,6 +3,8 @@ import type { Db } from '@pos/db';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { registerConfigRoutes } from './modules/config/api/config-routes.js';
+import { registerFlagRoutes } from './modules/config/api/flag-routes.js';
+import type { FlagCache } from './modules/config/application/resolve-flags.js';
 import { registerDebugRoutes } from './modules/debug/api/debug-routes.js';
 import { registerSimulatorRoutes } from './modules/debug/api/simulator-routes.js';
 import type { ConsumerLagProbe } from './modules/debug/application/consumer-lag.js';
@@ -20,6 +22,7 @@ import { registerMenuRoutes } from './modules/menu/api/menu-routes.js';
 import { registerMutationRoutes } from './modules/orders/api/mutation-routes.js';
 import { registerOrderReadRoutes } from './modules/orders/api/order-read-routes.js';
 import { registerPrinterRoutes } from './modules/printer/api/printer-routes.js';
+import { registerPresenceRoutes } from './modules/realtime/api/presence-routes.js';
 import { createFakePrinter, type FakePrinter } from './modules/printer/application/fake-printer.js';
 import { ApiError, asClientError } from './shared/errors.js';
 import {
@@ -62,6 +65,11 @@ export interface BuildAppOptions {
    * not honour. Defaulted to `OUTBOX_LEASE_MS`'s own default so a test app needs no config.
    */
   outboxLeaseMs?: number;
+  /**
+   * §15's cache in front of `feature_flags`. Absent means every `/api/config` reads the table,
+   * which is what the tests do and what a single-instance run can afford.
+   */
+  flagCache?: FlagCache | undefined;
 }
 
 /**
@@ -81,6 +89,7 @@ export function buildApp({
   consumerLag,
   debugRowLimit = 50,
   outboxLeaseMs = 30_000,
+  flagCache,
 }: BuildAppOptions): FastifyInstance {
   const app = Fastify({
     logger: {
@@ -154,13 +163,14 @@ export function buildApp({
   });
 
   registerHealthRoutes(app, { db, probes, timeoutMs: healthTimeoutMs, consumerLag });
-  registerConfigRoutes(app, db);
+  registerConfigRoutes(app, { db, cache: flagCache });
   registerMenuRoutes(app, db);
   registerOrderReadRoutes(app, db);
   registerKitchenReadRoutes(app, db);
   registerMutationRoutes(app, db);
   registerKitchenCommandRoutes(app, db);
   registerPrinterRoutes(app, db, printer);
+  registerPresenceRoutes(app, { presence });
   registerDebugRoutes(app, {
     db,
     rowLimit: debugRowLimit,
@@ -169,6 +179,7 @@ export function buildApp({
     sharedCounters,
   });
   registerSimulatorRoutes(app, { db, outboxLeaseMs });
+  registerFlagRoutes(app, { db, cache: flagCache });
 
   return app;
 }

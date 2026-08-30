@@ -377,6 +377,52 @@ export interface ConfigResponse {
   flags: Record<FeatureFlagKey, boolean>;
 }
 
+/** One row of `feature_flags`, as `/debug` renders and writes it. */
+export interface FlagState {
+  key: FeatureFlagKey;
+  /** The master switch. Off means off for everyone, whatever the percentage says. */
+  enabled: boolean;
+  /** Who gets it when `enabled`, as a percentage of restaurants — never of requests (§15). */
+  rolloutPercent: number;
+  updatedAt: string;
+  /** How the rule below resolves for each seeded restaurant, so the page shows the split. */
+  resolved: { restaurantId: string; enabled: boolean; bucket: number }[];
+}
+
+/** `GET /api/debug/flags` and `POST /api/debug/flags/:key`, which both answer with every flag. */
+export interface FlagsResponse {
+  flags: FlagState[];
+}
+
+/**
+ * A restaurant's stable position in a flag's rollout, 0–99.
+ *
+ * **Stable across requests and across instances** (§15): it is a pure function of the two strings,
+ * so a restaurant does not flip transport between two polls at an unchanged percentage — which is
+ * the whole difference between a rollout and a coin toss.
+ *
+ * The key is inside the hash so a second flag at 10 % does not land on the same restaurants as the
+ * first. FNV-1a, because it needs to be stable and identical on both sides, not cryptographic.
+ */
+export function flagBucket(key: string, restaurantId: string): number {
+  const input = `${key}:${restaurantId}`;
+  let hash = 0x811c9dc5;
+
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+
+  return hash % 100;
+}
+
+/** `bucket < rolloutPercent`, so 0 reaches nobody and 100 reaches every bucket 0–99. */
+export const flagAppliesTo = (
+  key: string,
+  restaurantId: string,
+  state: { enabled: boolean; rolloutPercent: number },
+): boolean => state.enabled && flagBucket(key, restaurantId) < state.rolloutPercent;
+
 /**
  * One event name carrying one envelope, so the client writes its dedup and version gate once
  * instead of per event type (§12.2).
@@ -460,7 +506,10 @@ export interface PresenceEntry {
   terminalId: string;
   restaurantId: string;
   role: 'pos' | 'kitchen';
-  socketId: string;
+  /** Which transport reported it (§15). The one field on this panel that names the flag's effect. */
+  source: PresenceSource;
+  /** Absent on the polling transport, which has no socket to name. */
+  socketId?: string;
   /** The client's own pending-mutation queue depth (§14). */
   pendingCount: number;
   /** The §18 per-terminal offline switch, as the browser has it. */
@@ -615,12 +664,33 @@ export interface PresenceReport {
 export const PRESENCE_EVENT_NAME = 'presence';
 
 /**
+ * How a report reached the server. A terminal on the polling transport has no socket, so presence
+ * had to gain a second path in M13 — `POST /api/presence` — and the two are worth telling apart on
+ * `/debug`: it is where "these two terminals are on different transports" becomes visible.
+ */
+export type PresenceSource = 'socket' | 'polling';
+
+/**
  * How often a connected browser reports its presence, and therefore how old an entry may be before
  * `/debug` marks it stale. It lives here rather than in the server's environment because the
  * browser is what sends the beat; the server's `PRESENCE_TTL_MS` is three of these, so an entry
  * survives two lost heartbeats and no more.
  */
 export const PRESENCE_HEARTBEAT_MS = 5_000;
+
+/**
+ * How often a client on the polling transport refetches its snapshot (§13). Both transports keep
+ * the UI correct; this number is the entire difference between them, so it is deliberately visible
+ * rather than tuned — a few seconds of latency is what a rollout costs, and the demo has to show it.
+ */
+export const POLLING_INTERVAL_MS = 3_000;
+
+/**
+ * How often an already-open client re-reads `GET /api/config` (§15). A WebSocket control event
+ * cannot carry this — it is circular when the flag turns the socket off — and a forced reload would
+ * be worse than fifteen seconds of delay on a rollout change.
+ */
+export const CONFIG_POLL_MS = 15_000;
 
 /**
  * §18's four **server-side** controls. The other seven are switches inside one browser and never
