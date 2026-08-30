@@ -179,6 +179,13 @@ WebSocket off.
 Verification: flipping `realtime.websocket_push` off keeps the UI correct at higher latency, and a
 rollout percentage puts `POS-1` and `POS-3` on different transports at the same time, side by side.
 
+**Carried over from M11's review (`known-problems.md`, `[M11, P2]`):** the presence heartbeat is
+installed by `connectRealtime`, so a client on the polling transport sends none and vanishes from
+`/debug`'s active-terminal panel. Today that only affects the dead `PUSH DISABLED` branch; this
+milestone makes polling a fully working transport, at which point a working terminal would be
+invisible. Presence has to move out of the socket — or gain a second path — as part of M13, not
+after it.
+
 ### M14 — Production images and multi-instance smoke
 A multi-stage Dockerfile per app, non-root, built output only. A Compose overlay running two `api`
 replicas behind the Redis adapter. A smoke test asserting that a mutation applied via replica A

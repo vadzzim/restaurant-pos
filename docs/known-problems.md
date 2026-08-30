@@ -15,6 +15,20 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M11, P2]** Presence is only reported over the WebSocket: `connectRealtime` installs the
+  heartbeat, and `start()` in `apps/web/src/stores/connection.ts` returns before it when
+  `realtime.websocket_push` is off, so such a client never appears on `/debug`'s active-terminal
+  panel (§16). Harmless while `PUSH DISABLED` means no live updates at all — **this becomes a real
+  defect in M13**, which makes polling a complete second transport, and is flagged there in
+  `MILESTONES.md`. Found by the Codex review of M11. Two terminals on different transports side by
+  side, with only one of them listed, would prove it.
+- **[M11, P2]** The kitchen heartbeat reports `pendingCount: 0` unconditionally
+  (`apps/web/src/views/KitchenView.vue`), but `useKitchenStore` deliberately keeps a command in
+  `pendingByOrder` and in IndexedDB when its response is lost, for Retry / Discard. So the one
+  situation where the kitchen's pending count matters is the one where `/debug` says it is zero.
+  Found by the Codex review of M11; the comment claiming the kitchen has no queue "by
+  construction" is wrong and goes with the fix. Losing a kitchen response and reading the panel
+  would prove it.
 - **[M11, P2]** `readDatabaseCounters` runs three times per `/debug` poll cycle — once each for
   `conflicts`, `outbox` and `metrics` — so eleven `count(*)` scans every two seconds against tables
   that grow without bound. `apps/api/src/modules/debug/api/debug-routes.ts`. A request-scoped
