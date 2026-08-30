@@ -95,7 +95,7 @@ sw.addEventListener('fetch', (event) => {
     return;
   }
 
-  event.respondWith(staleWhileRevalidate(event.request));
+  event.respondWith(staleWhileRevalidate(event));
 });
 
 /**
@@ -165,7 +165,8 @@ async function cacheFirst(request: Request): Promise<Response> {
 }
 
 /** `GET /api/menu` only. Draws immediately from the cache, and refreshes it for the next load. */
-async function staleWhileRevalidate(request: Request): Promise<Response> {
+async function staleWhileRevalidate(event: FetchEvent): Promise<Response> {
+  const { request } = event;
   const cache = await openCache();
   const cached = await cache.match(request, MATCH);
 
@@ -175,8 +176,16 @@ async function staleWhileRevalidate(request: Request): Promise<Response> {
   });
 
   if (!cached) return fromNetwork;
-  // Offline, the revalidation rejects; without this the unhandled rejection is reported as a
-  // worker error even though the cached response is the correct answer.
-  fromNetwork.catch(() => undefined);
+
+  // The event takes the whole `respondWith` promise as its lifetime, so answering from the cache
+  // ends it — and a worker with no pending work may be killed at any moment, taking the refresh
+  // with it and leaving the menu stale for good. `waitUntil` holds the worker open until the
+  // refresh lands. Legal here because the event is still active: `respondWith` was handed a
+  // promise that has not settled yet.
+  //
+  // The `catch` is not decoration. Offline this rejects, and a rejected promise handed to
+  // `waitUntil` fails the event — reported as a worker error, when the cached response was in fact
+  // the right answer. Swallowing it is both the lifetime and the rejection handled by one clause.
+  event.waitUntil(fromNetwork.catch(() => undefined));
   return cached;
 }

@@ -1939,3 +1939,18 @@ cannot leave the worker stuck `installing` — that case is a test.
 Confirmed in Chrome with the server killed: the cache holds `/api/menu`, the offline reload serves
 it `fromServiceWorker`, and the reloaded page draws all eleven products beside the surviving order.
 250 web tests.
+
+**And the last of Codex's three: the menu revalidation is now held by `event.waitUntil`.**
+Answering from the cache settles the `respondWith` promise, which ends the event's lifetime, and a
+worker with no pending work may be killed at any moment — taking the refresh with it and leaving
+the menu stale for good. `staleWhileRevalidate` takes the `FetchEvent` rather than the `Request`
+and registers the refresh on it. Legal at that point because the event is still active: the promise
+handed to `respondWith` has not settled. The `catch` stays and now does two jobs — offline the
+refresh rejects, and a rejected promise given to `waitUntil` fails the event.
+
+**Writing the test exposed a hole in the harness.** `dispatch` awaited `Promise.all(pending)`, which
+snapshots the array — but a handler registers `waitUntil` only after its first `await`, so the
+menu's refresh was pushed _after_ the snapshot and never awaited. The first version of the
+rejection test therefore passed with the `catch` removed. `dispatch` now drains in waves until no
+new promise appears, and both halves of the fix were verified by flipping them: without `waitUntil`
+one test fails, with `waitUntil` but no `catch` two do. 251 web tests.

@@ -79,6 +79,9 @@ const listeners = new Map<string, Listener>();
 const skipWaiting = vi.fn();
 const claim = vi.fn();
 
+/** How many times the handler extended the event's lifetime, reset per test. */
+let extended = 0;
+
 /** What the network returns, per pathname. `null` means "the network is not there". */
 let network: Map<string, Response | null>;
 
@@ -111,10 +114,22 @@ async function dispatch(type: string, request?: Request): Promise<Response | 'pa
       answered = response;
       pending.push(response);
     },
-    waitUntil: (work) => pending.push(work),
+    waitUntil: (work) => {
+      extended += 1;
+      pending.push(work);
+    },
   });
 
-  await Promise.all(pending);
+  // Drained in waves, not with one `Promise.all`: a handler registers `waitUntil` only after its
+  // first `await`, so the array grows while we are waiting on it. Snapshotting it once would let a
+  // late registration — which is exactly what the menu's revalidation is — go unawaited, and a
+  // rejection in it would pass silently instead of failing the event as it would in a worker.
+  for (let drained = 0; drained < pending.length;) {
+    const wave = pending.slice(drained);
+    drained = pending.length;
+    await Promise.all(wave);
+  }
+
   return answered ? await answered : 'passthrough';
 }
 
@@ -132,6 +147,7 @@ beforeEach(async () => {
   listeners.clear();
   skipWaiting.mockClear();
   claim.mockClear();
+  extended = 0;
   network = new Map([
     [
       '/index.html',
@@ -309,19 +325,36 @@ describe('the service worker', () => {
     expect(await (second as Response).text()).toBe('console.log(1)');
   });
 
-  it('serves the menu stale and revalidates behind it', async () => {
+  /**
+   * The refresh must be held by `waitUntil`. Answering from the cache settles the `respondWith`
+   * promise, which ends the event's lifetime; a worker with no pending work may be killed at any
+   * moment, and the menu would then stay stale for good.
+   */
+  it('serves the menu stale and holds the revalidation open with waitUntil', async () => {
     await dispatch('fetch', get('/api/menu'));
     network.set('/api/menu', new Response('[{"id":"p-2"}]'));
+    extended = 0;
 
     // The cached copy answers this call...
     const stale = await dispatch('fetch', get('/api/menu'));
     expect(await (stale as Response).text()).toBe('[{"id":"p-1"}]');
+    expect(extended).toBe(1);
 
-    // ...and the revalidation it kicked off is what the next one gets. `respondWith` never saw
-    // that promise, so nothing but a turn of the loop says when it has landed.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // ...and because the refresh was registered on the event, `dispatch` awaited it: no sleep, and
+    // the next call gets what it wrote.
     const fresh = await dispatch('fetch', get('/api/menu'));
     expect(await (fresh as Response).text()).toBe('[{"id":"p-2"}]');
+  });
+
+  it('does not fail the event when the revalidation rejects offline', async () => {
+    await dispatch('fetch', get('/api/menu'));
+    network.set('/api/menu', null);
+
+    // `dispatch` awaits everything the handler registered, so a rejection that was not swallowed
+    // would surface right here — which is what it would do to the event in a real worker.
+    const stale = await dispatch('fetch', get('/api/menu'));
+
+    expect(await (stale as Response).text()).toBe('[{"id":"p-1"}]');
   });
 
   it('leaves a mutation entirely alone', async () => {

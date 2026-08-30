@@ -6,9 +6,9 @@
 
 ## Current state
 
-**Last completed:** M17 — PWA. Manifest, three generated icons, a service worker caching **the
-shell and nothing else**: offline worked since M8, but *reloading* offline never reached the code
-that knows how to be offline. **ADR 017.**
+**Last completed:** M17 — PWA. Manifest, generated icons, a service worker caching **the shell and
+nothing else**: offline worked since M8, but *reloading* offline never reached the code that knows
+how to be offline. **ADR 017.**
 
 **The policy is an allow-list in a pure module.** `src/sw/cache-policy.ts` imports nothing, touches
 no `fetch`/`caches`/DOM, and maps a request to `shell` / `asset` / `menu` / `passthrough`.
@@ -29,7 +29,7 @@ a down API cannot fail the install.
 
 **Registration is `import.meta.env.PROD`-only** — a worker in dev makes HMR lie — and updates are
 `skipWaiting` + `clientsClaim` + one guarded reload. Safe only while `router.ts` imports its views
-statically; ADR 017 names that as the condition to revisit.
+statically; ADR 017 calls that the condition to revisit.
 
 **Built by a nested Vite build into one classic `iife` at `/sw.js`, compiled by its own
 `tsconfig.sw.json`** — `WebWorker` and `DOM` cannot share a `lib`. Why: ADR 017, Consequences.
@@ -43,14 +43,14 @@ models `Vary` now, so it is a test. Confirmed after: shell, CSS, JS, menu, manif
 `fromServiceWorker`, the order and all eleven products on screen through an ordinary reload, a fresh
 navigation and a hard reload alike, and the queue draining on restart.
 
-**Green:** typecheck (two projects for web), lint, build, **450 tests** (61 domain, 96 api,
-55 worker, **250 web**). `verify:*` not re-run: nothing outside `apps/web` changed.
+**Green:** typecheck (two web projects), lint, build, **451 tests** (61 domain, 96 api, 55 worker,
+**251 web**). `verify:*` not re-run: nothing outside `apps/web` changed.
 
-**Three P1s, none from my own pass:** Codex found the precache (plus a navigate-ordering bug), the
-browser found `Vary` and an uncaught `update()` rejection. All fixed. Codex's third (the menu
-revalidation is not held by `event.waitUntil`) is in the backlog.
+**Three P1s, none from my own pass:** Codex found the precache and a navigate-ordering bug, the
+browser found `Vary` and an uncaught `update()` rejection. Codex's third — the menu refresh not
+held by `event.waitUntil` — is fixed too. **Nothing from M17's review is left open.**
 
-**Next:** M18 — Playwright E2E. **Sonnet**, size **M**.
+**Next:** M18 — Playwright E2E. Sonnet, size M.
 
 
 ## What exists
@@ -83,7 +83,7 @@ ADRs are canon; history in `progress-archive.md`. What is not in one:
 
 ## Known problems
 
-`docs/known-problems.md`: limits, then the P2/P3 backlog — **twenty-four** entries, four from M17.
+`docs/known-problems.md`: limits, then the P2/P3 backlog — **twenty-three** entries, three from M17.
 **Badly overdue for its sweep**; if M18 lands early, sweep it. Not a session opener.
 
 ## First command of the next session
