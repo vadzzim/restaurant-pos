@@ -548,11 +548,22 @@ export const DEMO_SCENARIOS: readonly DemoScenario[] = [
           'needs, and it is the normal state of two displays in one kitchen.',
       },
       {
-        tab: 'B',
-        do: 'Press **Start preparing** in both windows, as close to simultaneously as you can.',
+        tab: 'A',
+        do: 'In **one** window press **Start preparing**, and let the card reach **Preparing** in both.',
         watch:
-          'One card moves to **Preparing**. The other shows **Refused:** with the reason, and the ' +
-          'card under it is what the projection now says — not a rolled-back optimistic guess.',
+          'This is setup, not the race. A card in **New** offers **Start preparing** and nothing ' +
+          'else, and §19.8 is about two displays pressing **Ready** — so the ticket has to be in ' +
+          '**Preparing** before there is a Ready to race for. Both windows follow the projection, ' +
+          'so both come to rest holding the same version again.',
+      },
+      {
+        tab: 'B',
+        do: 'Now press **Mark ready** in both windows, as close to simultaneously as you can.',
+        watch:
+          'One card moves to **Ready**. The other shows **Refused:** with the reason, and the ' +
+          'card under it is what the projection now says — not a rolled-back optimistic guess. ' +
+          'Both commands carried the same `baseVersion`; the second met an order the first had ' +
+          'already moved.',
       },
       {
         tab: 'A',

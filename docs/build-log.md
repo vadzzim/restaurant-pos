@@ -1779,3 +1779,32 @@ every `mutationId` and `baseVersion`, and a Rebase that reapplied all three to v
 
 §19.10 is named as the test it is (`pnpm verify:multi`); §19.9's manual retry is named as the CLI it
 is. `PlaceholderView.vue` had no remaining reference and was deleted. 202 web tests.
+
+### M16 review round — Codex, two P1s
+
+**[P1, fixed] The guided page forgot which scenario you were on.** `selectedId` was a `ref` in
+`DemoView.vue`, and six of the ten scenarios route to a till or to `/debug` and back — every one of
+those round trips unmounts the view, so the reader came back to §19.1 and had to hunt for the
+scenario they were three steps into. Precisely the improvisation M16 exists to remove, and I had
+seen it during the browser walk and misattributed it to HMR reloading the module.
+
+The selection moved into the query (`/demo?scenario=duplicate-mutation`) as a writable `computed`
+over `route.query`, so there is no ref to fall out of sync with the URL and no watcher loop. A query
+parameter rather than the hash, because the hash is already how a step jumps to a control's row.
+Unrecognised values fall back to §19.1 rather than blanking the page. And `linkTo()` makes a step's
+own "come back here" link carry the selection, which the browser's Back button gives for free but a
+`RouterLink` to a bare path does not. Verified: select §19.4, follow `/pos/pos-1`, come back by
+either route, still §19.4 — and `/demo?scenario=kitchen-race` is now a link you can hand to someone.
+
+**[P1, fixed] §19.8 raced the wrong button.** The scenario set up a ticket in **New** and then had
+both displays press **Start preparing**. That is a real race on the same version guard, but §19.8 is
+_"both press Ready"_, and from `New` the card offers `Start preparing` and nothing else —
+`COMMAND_LABELS` maps `SENT_TO_KITCHEN → preparing` and `PREPARING → ready`. So the scenario as
+written could not perform the clause it was named after. A setup step now moves the ticket to
+**Preparing** in one window, says out loud that it is setup and why, and the race is on **Mark
+ready** from a version both displays hold.
+
+Guarded where guarding is possible: `demo-script.test.ts` now asserts `DemoView.vue` reads
+`route.query.scenario` and that the step link goes through `linkTo`. The suite has no component
+harness, so this is a source assertion in the same family as the existing panel-anchor checks — a
+rule this easy to undo by accident should not be unguarded. 203 web tests.

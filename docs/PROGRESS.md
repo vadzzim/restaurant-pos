@@ -6,40 +6,41 @@
 
 ## Current state
 
-**Last completed:** M16 — `/demo`. All ten §19 scenarios as a guided walkthrough: what to press, in
-which window, and what to watch. The script is **data** in `domain/demo-script.ts`; `DemoView.vue`
-only renders it, so "does every scenario name a control that exists" is a test, not a walk-through.
+**Last completed:** M16 — `/demo`. All ten §19 scenarios guided: what to press, in which window,
+what to watch. The script is **data** in `domain/demo-script.ts`; `DemoView.vue` only renders it, so
+"does every scenario name a control that exists" is a test, not a walk-through.
 
 **One `SimulatorPanel`, not two.** `/debug` already renders §18's eleven controls and they are the
-same module state, so `/demo` embeds that component; each step links to a control's row by anchor,
-and control names come from one `CONTROL_LABELS` map the panel's buttons read too — a step saying
-"press X" beside a button reading "Y" is the defect this milestone is judged on.
-`demo-script.test.ts` reads the **real** `SimulatorPanel.vue` and `router.ts`, not a copy.
+same module state, so `/demo` embeds it; steps link to a control's row by anchor, and names come
+from one `CONTROL_LABELS` map the panel's buttons read too. `demo-script.test.ts` reads the **real**
+`SimulatorPanel.vue`, `router.ts` and `DemoView.vue`, not a copy of them.
 
-**Two M12 P1s fixed in `Create Version Conflict`, both flagged in advance by M15's handoff.** It
-sent `baseVersion - 1` from v1, which `mutation-routes.ts` refuses as `min(1)` — a 400, not a
-conflict; the threshold is now **v2**. And `spend()` ran only on a returned response, so that 400
-left the arm armed and tampered with every later mutation from the tab; it is now spent on an
-`ApiRequestError` too — the server answered — but still **not** on the offline gate or a dead
-socket, which is what the original guard is for.
+**Two M12 P1s fixed in `Create Version Conflict`, both flagged by M15's handoff.** It sent
+`baseVersion - 1` from v1, which `mutation-routes.ts` refuses as `min(1)` — a 400, not a conflict;
+the threshold is now **v2**. And `spend()` ran only on a returned response, so that 400 left the arm
+armed and tampered with every later mutation from the tab; it is now spent on an `ApiRequestError`
+too — the server answered — but still **not** on the offline gate or a dead socket.
 
-**`onBeforeUnmount` no longer calls `clear()`.** M15 left this decision open and it was
-load-bearing: one-shots are armed on `/demo` and live in the tab (ADR 015), so a till emptied on
-every route change could only ever spend an arm on its own `CREATE_ORDER` — three of eleven controls
-were undemonstrable on an item. New **`detach()`** drops the in-memory view and leaves the pointer on
-disk for `hydrate()`. It cannot simply skip the clear: the store outlives the component, and POS-1's
+**`onBeforeUnmount` no longer calls `clear()`.** M15 left this open and it was load-bearing:
+one-shots are armed on `/demo` and live in the tab (ADR 015), so a till emptied on every route
+change could only spend an arm on its own `CREATE_ORDER` — three of eleven controls were
+undemonstrable on an item. New **`detach()`** drops the in-memory view and keeps the pointer on disk
+for `hydrate()`. It cannot simply skip the clear: the store outlives the component, and POS-1's
 order left in `order.value` would be drawn on POS-2 until its own read answered. `clear()` is
 untouched and is still what **New table** means.
 
-**The browser found four defects no unit test could reach**, and disproved a fifth claim outright.
-`styles.css` had `a { color: inherit }` **unlayered** — in Tailwind v4 unlayered CSS beats a layer
-whatever its specificity, so it had overridden every `text-*` utility on a link since M1; both
-anchor rules moved into `@layer base`. The claim rendered raw backticks; two steps named tables the
-cover pad does not offer; three single-asterisk spans reached the reader as asterisks. All four now
-have tests. **And §19.3's last step was wrong**: a Rebase does not resolve the conflict row — see
-the P2 below. Details in `build-log.md`.
+**The browser found four defects no unit test could reach.** Chief among them: `styles.css` had
+`a { color: inherit }` **unlayered**, and in Tailwind v4 unlayered CSS beats a layer whatever its
+specificity — it had overridden every `text-*` utility on a link since M1. Both anchor rules moved
+into `@layer base`. **And §19.3's last step was wrong**: a Rebase does not resolve the conflict row,
+because nothing ever writes `conflict_log.resolution` — the P2 below.
 
-**Green:** typecheck, lint, build, **414 tests** (61 domain, 96 api, 55 worker, **202 web**), and
+**Codex then found two P1s, both breaking M16's own bar.** The page forgot which scenario you were
+on — six of them route away and back, which unmounts the view; the selection now lives in the query
+(`/demo?scenario=…`). And §19.8 raced **Start preparing**, not §19.8's **Mark ready**, which a card
+in `New` does not offer — a setup step now moves the ticket to `PREPARING` first.
+
+**Green:** typecheck, lint, build, **415 tests** (61 domain, 96 api, 55 worker, **203 web**), and
 §19.4, §19.7 and §19.3 walked end to end against a real stack reading only the page.
 `verify:integration` / `verify:multi` not re-run: nothing outside `apps/web` changed.
 
@@ -50,14 +51,14 @@ the P2 below. Details in `build-log.md`.
 One line per unit; detail lives in the code and the ADRs.
 
 - **Docs** — what CLAUDE.md lists, plus `milestones/M01…M16.md`. **ADRs 001–016 accepted.**
-- `packages/config` zod env (all defaulted); `packages/contracts` the §5 shapes plus `TERMINALS`,
-  `BAR_MENU` and the debug/simulator/flag shapes; `packages/domain` `decide()` — **the whole of §8**;
-  `packages/db` fifteen tables, three migrations, seed (11 products), `@pos/db/testing`.
+- `packages/config` zod env (all defaulted); `packages/contracts` the §5 shapes plus `TERMINALS` and
+  `BAR_MENU`; `packages/domain` `decide()` — **the whole of §8**; `packages/db` fifteen tables,
+  three migrations, seed (11 products), `@pos/db/testing`.
 - `apps/api` — the nine-branch mutation endpoint, the two §17 kitchen adapters, the four reads,
   `modules/{realtime,printer,debug,config}/`, `/api/health/{live,ready}`. Ten test files, plus
   `multi-instance.integration.test.ts` behind its own config, **excluded** by default.
 - `apps/worker` — the §10 outbox publisher (ADR 010), the producer, the kitchen consumer and its
-  transactional projection, `modules/printing/` (ADR 014). CLIs `outbox`/`printer`.
+  projection, `modules/printing/` (ADR 014). CLIs `outbox`/`printer`.
 - `apps/web` — POS, kitchen, `/debug` and now **`/demo`**; seven Pinia stores; Dexie (ADR 013); the
   §14 sync engine; `realtime/`; `domain/{pos-screen,demo-script}.ts` (pure and tested).
 - **Images, Compose, scripts, CI** — a Dockerfile per app, `nginx.conf`, `docker-compose.multi.yml`
@@ -98,8 +99,8 @@ Six things worth knowing before you plan:
    replaces the server's truth), `/api/debug/*`, `/api/config`. A stale `GET /api/menu` is the one
    defensible cache. Prefer an allow-list over a deny-list.
 3. **Dev mode is Vite on :5173 with HMR over a WebSocket.** A service worker registered in dev
-   intercepts module requests and makes HMR lie. Register in production builds only, and say so in
-   the code — a future session will otherwise "fix" the guard.
+   intercepts module requests and makes HMR lie. Register in production builds only, and say why in
+   the code — a future session will otherwise "fix" the guard away.
 4. **A stale service worker is the classic demo killer.** Decide the update strategy deliberately
    (skipWaiting + clientsClaim, or a prompt) and write it in an ADR; an interviewer reloading and
    seeing last week's bundle is worse than no PWA.

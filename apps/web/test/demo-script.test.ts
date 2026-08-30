@@ -36,6 +36,7 @@ const read = (relative: string): string =>
 
 const PANEL = read('../src/components/SimulatorPanel.vue');
 const ROUTER = read('../src/router.ts');
+const VIEW = read('../src/views/DemoView.vue');
 
 /** `/pos/:terminalId` matches `/pos/pos-1`; everything else is a literal. */
 const routePatterns = (): RegExp[] =>
@@ -172,6 +173,17 @@ describe('what a step points at', () => {
         }
       }
     }
+  });
+
+  it('keeps the selected scenario in the URL, so a walk to a till and back returns to it', () => {
+    // Six of the ten scenarios route to a POS or to /debug and back, and every one of those round
+    // trips unmounts the view. Held in a local `ref` the selection came back as §19.1 and the
+    // reader had to hunt for the scenario they were three steps into — the exact improvisation
+    // this page exists to remove. Asserted against the source because the suite has no component
+    // harness, and a rule this easy to undo by accident should not be unguarded.
+    expect(VIEW).toContain('route.query.scenario');
+    // ...and a step that says "come back here" has to carry the selection with it.
+    expect(VIEW).toContain('linkTo(step.route)');
   });
 
   it('anchors a control at the id the panel stamps on it', () => {

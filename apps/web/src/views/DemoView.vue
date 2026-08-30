@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 
 import SimulatorPanel from '../components/SimulatorPanel.vue';
 import StateBadge from '../components/StateBadge.vue';
@@ -25,8 +26,47 @@ import {
  * the same module-level state, so this page embeds that component rather than growing a second set
  * of buttons that could drift from it. A step names a control and links to its row below.
  */
-const selectedId = ref(DEMO_SCENARIOS[0]!.id);
+
+/** This page's own route. Named once: `linkTo` and the query writer both need it. */
+const DEMO_PATH = '/demo';
+
+const route = useRoute();
+const router = useRouter();
+
+/**
+ * **The selection lives in the URL, not in a `ref`.**
+ *
+ * Half the scenarios send the operator to a till and back, and every one of those round trips
+ * unmounts this component — so a local `ref` came back as §19.1 and the reader had to hunt for the
+ * scenario they were three steps into. That is exactly the improvisation this page exists to
+ * remove. In the query it survives the walk, the browser's Back button and a reload, and a link to
+ * one scenario is something that can be handed to somebody.
+ *
+ * A query parameter rather than the hash, because the hash is already how a step jumps to a
+ * control's row in the panel below.
+ */
+const selectedId = computed<string>({
+  get: () => {
+    const asked = route.query.scenario;
+    // Anything unrecognised falls back rather than blanking the page: a hand-edited or stale URL
+    // should open the demo, not an error.
+    return typeof asked === 'string' && scenarioById(asked) !== undefined
+      ? asked
+      : DEMO_SCENARIOS[0]!.id;
+  },
+  set: (id: string) => {
+    void router.replace({ path: DEMO_PATH, query: { ...route.query, scenario: id } });
+  },
+});
+
 const scenario = computed<DemoScenario>(() => scenarioById(selectedId.value) ?? DEMO_SCENARIOS[0]!);
+
+/**
+ * Where a step's route link points. A step that says "come back here" has to carry the selection
+ * with it, or it lands on §19.1 and undoes the whole point of the paragraph above.
+ */
+const linkTo = (path: string): string | { path: string; query: Record<string, string> } =>
+  path === DEMO_PATH ? { path, query: { scenario: selectedId.value } } : path;
 
 /** Ticked steps, in memory. A second walk-through should start empty, so this resets on switch. */
 const done = ref(new Set<number>());
@@ -151,7 +191,7 @@ const progress = computed(() => progressLabel(done.value, scenario.value.steps.l
                 <StateBadge v-if="step.tab" :label="`window ${step.tab}`" tone="neutral" />
                 <RouterLink
                   v-if="step.route"
-                  :to="step.route"
+                  :to="linkTo(step.route)"
                   class="rounded bg-stone-800 px-2 py-0.5 text-xs font-semibold text-white"
                 >
                   {{ step.route }}
