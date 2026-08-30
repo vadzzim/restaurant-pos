@@ -6,9 +6,9 @@
 
 ## Current state
 
-**Last completed:** M17 — PWA. Manifest, three generated icons, and a service worker caching **the
-shell and nothing else**: offline has worked since M8, but *reloading* offline never reached the
-code that knows how to be offline. **ADR 017.**
+**Last completed:** M17 — PWA. Manifest, three generated icons, a service worker caching **the
+shell and nothing else**: offline worked since M8, but *reloading* offline never reached the code
+that knows how to be offline. **ADR 017.**
 
 **The policy is an allow-list in a pure module.** `src/sw/cache-policy.ts` imports nothing, touches
 no `fetch`/`caches`/DOM, and maps a request to `shell` / `asset` / `menu` / `passthrough`.
@@ -22,30 +22,33 @@ walks every endpoint in `src/api/client.ts`.
 **`install` precaches the bundle, and this is the trap.** Runtime caching cannot cover it: the load
 that registers the worker fetched the script **before** the worker existed, and `clients.claim()`
 does not replay it — so a first visit plus an offline reload got a cached `index.html` whose script
-missed. Codex found it; the brief argued the opposite. `install` now reads the asset list **out of
-the document it just fetched** (`shellAssetUrls`, every hit re-checked through `classifyRequest`):
-no build-time manifest to go stale, and the list can never be wider than the policy.
+missed. `install` now reads the asset list **out of the document it just fetched**
+(`shellAssetUrls`, every hit re-checked through `classifyRequest`): no build-time manifest to go
+stale, and the list can never be wider than the policy. **The same shape still bites `/api/menu`** —
+first in the backlog.
 
 **Registration is `import.meta.env.PROD`-only** — a worker in dev makes HMR lie — and updates are
-`skipWaiting` + `clientsClaim` + one guarded reload. Safe only because `router.ts` imports all four
-views statically, so there are no lazy chunks; ADR 017 names that as the condition to revisit.
+`skipWaiting` + `clientsClaim` + one guarded reload. Safe only while `router.ts` imports its views
+statically; ADR 017 names that as the condition to revisit.
 
 **Built by a nested Vite build into one classic `iife` at `/sw.js`, and compiled by its own
 `tsconfig.sw.json`** — `WebWorker` and `DOM` cannot share a `lib`. Why, in ADR 017's Consequences.
 
-**The hands-on browser check was not run.** This session's browser pane refuses to register **any**
-service worker — a one-line probe failed identically while `fetch('/sw.js')` returned 200 — and no
-Chrome was connected. Verified there instead: the manifest, all three icons at their declared sizes,
-and the production bundle serving `/pos/pos-1` through the new `pnpm -F @pos/web preview` (dev
-cannot exercise a worker). **The rest is the first M17 entry in `known-problems.md`, with exact
-steps — do it before the interview.**
+**The hands-on check was done, in a real Chrome driven over CDP, offline by killing the server
+rather than by DevTools throttling** — and it found a P1 no unit test could: `Vary: Origin` made
+the precached bundle invisible. `Cache.match` compares the *stored* request's headers, the precache
+fetch has no `Origin`, and `<script crossorigin>` sends one — so the shell loaded and its script
+did not. **Every cache read now passes `{ ignoreVary: true }`; do not remove it.** The fake
+`CacheStorage` models `Vary` now, so it is a test. Confirmed after: shell, CSS, JS, manifest and
+icons all `fromServiceWorker`, the order on screen through an ordinary reload, a fresh navigation
+and a hard reload, and the queue draining on restart.
 
-**Green:** typecheck (two projects for web now), lint, build, **446 tests** (61 domain, 96 api,
-55 worker, **246 web**). `verify:*` not re-run: nothing outside `apps/web` changed.
+**Green:** typecheck (two projects for web now), lint, build, **447 tests** (61 domain, 96 api,
+55 worker, **247 web**). `verify:*` not re-run: nothing outside `apps/web` changed.
 
-**Review passes: mine found no P1; Codex found one and it was real** — the precache above, plus the
-navigate-ordering bug, both fixed. Its third (the menu revalidation is not held by `event.waitUntil`)
-is correct and is in the backlog.
+**Three P1s, none from my own pass:** Codex found the precache (plus a navigate-ordering bug), and
+the browser found `Vary` and an uncaught `update()` rejection. All fixed. Codex's third finding (the
+menu revalidation is not held by `event.waitUntil`) is in the backlog.
 
 **Next:** M18 — Playwright E2E. **Sonnet**, size **M**.
 
@@ -76,12 +79,12 @@ ADRs are canon; history in `progress-archive.md`. What is not in one:
 - Full scope, nothing cut (ADR 001, 007). **Two left: M18, M19.** Neither may be dropped.
 - **`BAR_MENU` is in contracts, not a `products.category` column.** Argued beside the constant.
 - **Leaving a POS route detaches; it does not clear.** M16. Do not put `clear()` back.
-- **The icons are generated** — `apps/web/scripts/make-icons.mjs`, run by hand, not by the build.
+- **The icons are generated** — `apps/web/scripts/make-icons.mjs`, by hand, not by the build.
 
 ## Known problems
 
-`docs/known-problems.md`: accepted limits, then the P2/P3 backlog — **twenty-five** entries, five
-new from M17. **Badly overdue for its sweep**; if M18 lands early, sweep it. Not a session opener.
+`docs/known-problems.md`: limits, then the P2/P3 backlog — **twenty-five** entries, five from M17.
+**Badly overdue for its sweep**; if M18 lands early, sweep it. Not a session opener.
 
 ## First command of the next session
 
@@ -114,9 +117,6 @@ Six things worth knowing before you plan:
 
 Verification: `pnpm test:e2e` locally and the same job in `ci.yml`. Then lint, typecheck, build and
 `pnpm -F @pos/web test`. One review pass, P1s only.
-
-Also, if there is room: the M17 backlog's first entry is a **manual browser check of the service
-worker** — ten minutes in a real Chrome, and the only unverified claim in the repository.
 
 Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, and either `pnpm dev` (:5173) or
 `pnpm -F @pos/web build && pnpm -F @pos/web preview` (:4173). Postgres, Redis and Redpanda were up

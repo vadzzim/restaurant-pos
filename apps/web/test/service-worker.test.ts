@@ -22,22 +22,52 @@ interface FakeEvent {
   waitUntil(work: Promise<unknown>): void;
 }
 
+interface Entry {
+  readonly response: Response;
+  /** The headers of the request this entry was stored against, which is what `Vary` compares. */
+  readonly requestHeaders: Headers;
+}
+
+/**
+ * Models `Vary`, because not modelling it is how a real defect reached a real browser: the
+ * precache stores the bundle from inside the worker, where there is no `Origin` header, and the
+ * page then asks for it with `crossorigin` set, which sends one. Under `Vary: Origin` those do
+ * not match, and offline the fallback `fetch` fails.
+ */
 class FakeCache {
-  readonly entries = new Map<string, Response>();
+  readonly entries = new Map<string, Entry>();
 
   put(request: Request | string, response: Response): Promise<void> {
-    this.entries.set(keyOf(request), response);
+    this.entries.set(keyOf(request), { response, requestHeaders: headersOf(request) });
     return Promise.resolve();
   }
 
-  match(request: Request | string): Promise<Response | undefined> {
-    return Promise.resolve(this.entries.get(keyOf(request)));
+  match(request: Request | string, options?: CacheQueryOptions): Promise<Response | undefined> {
+    const entry = this.entries.get(keyOf(request));
+    if (!entry) return Promise.resolve(undefined);
+
+    if (!options?.ignoreVary) {
+      const vary = entry.response.headers.get('vary');
+      const incoming = headersOf(request);
+      const mismatched = (vary ?? '')
+        .split(',')
+        .map((name) => name.trim().toLowerCase())
+        .filter(Boolean)
+        .some((name) => entry.requestHeaders.get(name) !== incoming.get(name));
+      if (mismatched) return Promise.resolve(undefined);
+    }
+
+    return Promise.resolve(entry.response);
   }
 
   async add(request: Request | string): Promise<void> {
+    // As in a worker: the precache fetch carries no `Origin`.
     await this.put(request, await fetch(keyOf(request)));
   }
 }
+
+const headersOf = (request: Request | string): Headers =>
+  typeof request === 'string' ? new Headers() : request.headers;
 
 // The real Cache API keys on the full URL whether it was handed a string or a `Request`.
 const keyOf = (request: Request | string): string =>
@@ -124,9 +154,9 @@ beforeEach(async () => {
     },
     keys: () => Promise.resolve([...cacheStore.keys()]),
     delete: (name: string) => Promise.resolve(cacheStore.delete(name)),
-    match: async (request: Request | string) => {
+    match: async (request: Request | string, options?: CacheQueryOptions) => {
       for (const cache of cacheStore.values()) {
-        const hit = await cache.match(request);
+        const hit = await cache.match(request, options);
         if (hit) return hit;
       }
       return undefined;
@@ -223,6 +253,27 @@ describe('the service worker', () => {
     network.set('/index.html', null);
 
     await expect(dispatch('fetch', navigation('/pos/pos-1'))).rejects.toThrow(/offline/);
+  });
+
+  /**
+   * The browser-only failure this fake now models. Vite's preview server answers `Vary: Origin`;
+   * the precache fetch has no `Origin`, the page's `<script crossorigin>` request has one. Without
+   * `ignoreVary` the cached bundle is invisible to the very request that needs it, and an offline
+   * reload renders the shell with no app in it.
+   */
+  it('serves the bundle to a request carrying Origin though the response varies on it', async () => {
+    network.set(
+      '/assets/index-abc123.js',
+      new Response('console.log(1)', { headers: { vary: 'Origin' } }),
+    );
+    await dispatch('install');
+    network.set('/assets/index-abc123.js', null);
+
+    const fromPage = get('/assets/index-abc123.js', {
+      headers: { origin: 'https://pos.test' },
+    });
+
+    expect(await ((await dispatch('fetch', fromPage)) as Response).text()).toBe('console.log(1)');
   });
 
   it('serves a hashed asset from the cache once it has seen it, network gone or not', async () => {

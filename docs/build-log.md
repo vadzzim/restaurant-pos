@@ -1885,3 +1885,44 @@ same pass because it corrupts the one cache entry the P1 fix depends on.
 Codex's third finding — the menu revalidation not held by `event.waitUntil`, so the browser may kill
 the worker mid-refresh — is correct and is in the backlog. Eleven seeded products that change with
 the seed do not justify reopening the round. 246 web tests.
+
+### M17, browser round — the hands-on check, and the P1 only a real browser could show
+
+The check the milestone could not run was run, by driving a real Chrome over CDP from a throwaway
+script: launch on a fresh profile with `--remote-debugging-port`, attach to the page target,
+and — crucially — **make it offline by killing the preview server**, not by DevTools throttling,
+which does not reliably reach the worker's own fetches.
+
+**[P1, fixed] `Vary: Origin` made the precached bundle invisible to the page.** The first offline
+reload served `index.html` from the cache and then failed both `/assets/*.js` and `/assets/*.css`
+with `ERR_FAILED`: title correct, `#app` empty, nothing rendered. `Cache.match` honours the cached
+response's `Vary` by comparing the _stored request's_ headers with the incoming one's. `precacheShell`
+fetches from inside the worker, where there is no `Origin`; the page then asks for the same bundle
+through `<script crossorigin>`, which sends one. Vite's preview server answers `Vary: Origin`, so
+the two did not match and the fallback `fetch` hit a dead server. Every cache read now passes
+`{ ignoreVary: true }`, which is correct and not merely convenient here — one representation per
+URL, and for `/assets/` the content hash is the name.
+
+The first attempt to diagnose it lied: `cache.match(new Request(url, { mode: 'cors' }))` from the
+page _hit_, because a Request constructed in JS carries no `Origin` until it is actually sent. What
+settled it was `Network.responseReceived` / `Network.loadingFailed` with `fromServiceWorker`, which
+showed the document served by the worker and the script not served at all.
+
+**The fake `CacheStorage` now models `Vary`**, so this class of defect is a test rather than a
+browser session: the new case fails without `ignoreVary` and passes with it — verified by flipping
+the constant.
+
+**[P1, fixed] `registration.update()` threw an uncaught rejection offline** — "Failed to update a
+ServiceWorker … unknown error occurred when fetching the script" — because it was `void`ed instead
+of chained, so the `catch` below never saw it. A red error in the console of exactly the scenario
+the worker exists for. Returned into the chain.
+
+**Verified end to end, server killed:** document, stylesheet, script, manifest and icons all served
+by the worker; the app mounts; **Table 5, Burger ×2, $24.00, V3** still on screen after an ordinary
+reload, a fresh navigation, and a hard reload alike; the header degrades to `WS DISCONNECTED` with
+the designed `READ FAILED` banner. On restart: `WS CONNECTED`, `PUSH`, order intact. Chrome parsed
+the manifest with **no errors** and the cache held exactly `/index.html`, both `/assets/` files,
+the manifest and the icon.
+
+One gap stays and is in the backlog: `/api/menu` is fetched by the uncontrolled first load, so the
+product grid is empty after an offline reload until the app has been loaded once more. 247 web tests.

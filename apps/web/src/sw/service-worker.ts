@@ -36,6 +36,24 @@ const SHELL_KEY = '/index.html';
 
 const openCache = (): Promise<Cache> => caches.open(CACHE_NAME);
 
+/**
+ * **Every cache read passes this, and removing it breaks the offline reload.**
+ *
+ * `Cache.match` honours the cached response's `Vary` by comparing the stored request's headers
+ * with the incoming one's. Vite's preview server — and any server behind a proxy — answers with
+ * `Vary: Origin`. The precache fetches these URLs from inside the worker, where there is no
+ * `Origin` header; the page then asks for the very same bundle with `crossorigin="anonymous"` on
+ * the tag, which *does* send `Origin`. The headers differ, `Vary` says no match, and offline the
+ * fallback `fetch` fails: the document loads from cache and its script and stylesheet do not.
+ *
+ * That is a browser-only failure — a fake `CacheStorage` ignores `Vary`, so no unit test can see
+ * it — and it was found by driving a real Chrome with the server killed.
+ *
+ * Ignoring `Vary` is correct rather than merely convenient here: the shell and the bundle are one
+ * representation per URL, and for `/assets/` the content hash *is* in the name.
+ */
+const MATCH: CacheQueryOptions = { ignoreVary: true };
+
 sw.addEventListener('install', (event) => {
   event.waitUntil(precacheShell());
 
@@ -121,7 +139,7 @@ async function networkFirstShell(request: Request): Promise<Response> {
     }
     return response;
   } catch (error) {
-    const cached = await caches.match(SHELL_KEY);
+    const cached = await caches.match(SHELL_KEY, MATCH);
     if (cached) return cached;
     throw error;
   }
@@ -130,7 +148,7 @@ async function networkFirstShell(request: Request): Promise<Response> {
 /** Content-hashed build output: the name pins the bytes, so a hit needs no revalidation. */
 async function cacheFirst(request: Request): Promise<Response> {
   const cache = await openCache();
-  const cached = await cache.match(request);
+  const cached = await cache.match(request, MATCH);
   if (cached) return cached;
 
   const response = await fetch(request);
@@ -141,7 +159,7 @@ async function cacheFirst(request: Request): Promise<Response> {
 /** `GET /api/menu` only. Draws immediately from the cache, and refreshes it for the next load. */
 async function staleWhileRevalidate(request: Request): Promise<Response> {
   const cache = await openCache();
-  const cached = await cache.match(request);
+  const cached = await cache.match(request, MATCH);
 
   const fromNetwork = fetch(request).then(async (response) => {
     if (response.ok) await cache.put(request, response.clone());

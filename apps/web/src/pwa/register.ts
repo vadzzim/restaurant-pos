@@ -27,14 +27,18 @@ export function registerServiceWorker(): void {
   window.addEventListener('load', () => {
     void navigator.serviceWorker
       .register('/sw.js')
-      .then((registration) => {
+      // Returned, not `void`ed: offline this rejects ("unknown error occurred when fetching the
+      // script"), and a discarded rejection is an uncaught error in the console of exactly the
+      // scenario the worker exists for. Chaining it puts it into the `catch` below.
+      .then((registration) =>
         // The browser only checks for a new worker on its own schedule. A demo machine left open
         // all day would otherwise keep serving the build it woke up with.
-        void registration.update();
-      })
+        registration.update(),
+      )
       .catch(() => {
-        // A failed registration is not a failed app: everything works, the shell is just not
-        // available offline. Swallowed rather than thrown so it cannot take the page down.
+        // Neither a failed registration nor a failed update check is a failed app: everything
+        // works, the shell is just not refreshed. Swallowed rather than thrown so it cannot take
+        // the page down.
       });
   });
 }
