@@ -1,4 +1,4 @@
-import type { MutationResponse, OrderSnapshot } from '@pos/contracts';
+import type { MutationResponse, OrderItemSnapshot, OrderSnapshot } from '@pos/contracts';
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -13,15 +13,15 @@ vi.mock('../src/api/client', () => ({
 const postMutationMock = vi.mocked(postMutation);
 const fetchOrderMock = vi.mocked(fetchOrder);
 
-function snapshot(version: number): OrderSnapshot {
+function snapshot(version: number, items: OrderItemSnapshot[] = []): OrderSnapshot {
   return {
     id: 'order-a',
     restaurantId: 'demo-restaurant',
     tableNumber: '12',
     status: 'OPEN',
     version,
-    totalCents: 0,
-    items: [],
+    totalCents: items.reduce((sum, item) => sum + item.quantity * item.unitPriceCents, 0),
+    items,
     createdAt: '2026-08-28T00:00:00.000Z',
     updatedAt: '2026-08-28T00:00:00.000Z',
   };
@@ -42,7 +42,9 @@ beforeEach(() => {
 async function settleLocal(depth: number): Promise<void> {
   for (let tick = 0; tick < 50; tick += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
-    if (useOrderStore().pendingCount >= depth) {
+    // `depth === 0` means "nothing should have been queued", which no count can confirm early —
+    // it has to spend the whole budget, or it would pass before the chain had a chance to write.
+    if (depth > 0 && useOrderStore().pendingCount >= depth) {
       return;
     }
   }
@@ -133,5 +135,127 @@ describe('taps issued faster than the server answers', () => {
 
     expect(orders.queue.map((row) => row.baseVersion)).toEqual([3, 4]);
     expect(orders.lastError).toMatch(/pos-2/);
+  });
+});
+
+/**
+ * The three defects the Codex review of M15 found in the fire-and-forget path. Each is a race that
+ * only exists *because* taps no longer wait for the server, so each is pinned here rather than in
+ * a screen test — the screen has no way to reproduce them deterministically.
+ */
+describe('what the fire-and-forget path opened up', () => {
+  it('steps the quantity from the projection, not from the rendered row', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot(3));
+    postMutationMock.mockReturnValue(new Promise<MutationResponse>(() => undefined));
+
+    // Three taps on the tile. The row on screen may still be showing 1 while these stage.
+    orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    // ...and the operator presses `+` before any of them is answered.
+    orders.stepQuantity('pos-1', 'demo-restaurant', 'burger', 1);
+    await settleLocal(4);
+
+    const step = orders.queue.find((row) => row.type === 'CHANGE_QUANTITY');
+    // 4, not 2: the absolute value is computed inside the serialized link, where the three adds
+    // are already visible. A template computing `item.quantity + 1` off a stale render sent 2 and
+    // silently overwrote two of them.
+    expect(step?.payload).toEqual({ productId: 'burger', quantity: 4 });
+    expect(orders.projected?.items).toEqual([
+      expect.objectContaining({ productId: 'burger', quantity: 4 }),
+    ]);
+  });
+
+  it('does not collapse two quick steps onto the same absolute quantity', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(
+      snapshot(3, [{ productId: 'burger', name: 'Burger', quantity: 1, unitPriceCents: 1200 }]),
+    );
+    postMutationMock.mockReturnValue(new Promise<MutationResponse>(() => undefined));
+
+    orders.stepQuantity('pos-1', 'demo-restaurant', 'burger', 1);
+    orders.stepQuantity('pos-1', 'demo-restaurant', 'burger', 1);
+    await settleLocal(2);
+
+    // 1 → 2 → 3. Two `+` off the same stale render both sent 2, so the second was a no-op.
+    expect(orders.queue.map((row) => row.payload)).toEqual([
+      { productId: 'burger', quantity: 2 },
+      { productId: 'burger', quantity: 3 },
+    ]);
+    expect(orders.projected?.items).toEqual([
+      expect.objectContaining({ productId: 'burger', quantity: 3 }),
+    ]);
+  });
+
+  it('turns a step below one into a removal, at the version the steps before it produce', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(
+      snapshot(3, [{ productId: 'burger', name: 'Burger', quantity: 2, unitPriceCents: 1200 }]),
+    );
+    postMutationMock.mockReturnValue(new Promise<MutationResponse>(() => undefined));
+
+    orders.stepQuantity('pos-1', 'demo-restaurant', 'burger', -1);
+    orders.stepQuantity('pos-1', 'demo-restaurant', 'burger', -1);
+    await settleLocal(2);
+
+    expect(orders.queue.map((row) => row.type)).toEqual(['CHANGE_QUANTITY', 'REMOVE_ITEM']);
+    expect(orders.queue.map((row) => row.baseVersion)).toEqual([3, 4]);
+    expect(orders.projected?.items).toEqual([]);
+  });
+
+  it('plans nothing for a line the order no longer has', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot(3));
+    postMutationMock.mockReturnValue(new Promise<MutationResponse>(() => undefined));
+
+    // §8 answers CHANGE_QUANTITY for a missing line with ITEM_NOT_IN_ORDER, which halts the queue.
+    // A stepper firing off a stale render must not be what causes that.
+    orders.stepQuantity('pos-1', 'demo-restaurant', 'burger', 1);
+    await settleLocal(0);
+
+    expect(orders.queue).toEqual([]);
+    expect(orders.halted).toBe(false);
+  });
+
+  it('keeps a tap on the order it was meant for when the next cover is opened over it', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot(3));
+    postMutationMock.mockReturnValue(new Promise<MutationResponse>(() => undefined));
+
+    // The last tap on this cover, and the next cover opened before it has been answered.
+    orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    orders.createOrder('pos-1', 'demo-restaurant', '7');
+    await settleLocal(2);
+
+    const [item, created] = orders.queue;
+    expect(item?.type).toBe('ADD_ITEM');
+    expect(created?.type).toBe('CREATE_ORDER');
+    // The pointer moves inside the chain, so the add belongs to the order it was rung up on and
+    // the new order's CREATE_ORDER is behind it — not in front of an ADD_ITEM that would then
+    // reach the server first and halt on a missing aggregate.
+    expect(item?.orderId).toBe('order-a');
+    expect(created?.orderId).not.toBe('order-a');
+    expect(orders.currentOrderId).toBe(created?.orderId);
+    expect(orders.halted).toBe(false);
+  });
+
+  it('refuses a tap staged after the screen has left the order', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot(3));
+    postMutationMock.mockReturnValue(new Promise<MutationResponse>(() => undefined));
+
+    orders.clear();
+    orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    await settleLocal(0);
+
+    expect(orders.queue).toEqual([]);
+    expect(orders.currentOrderId).toBeUndefined();
   });
 });

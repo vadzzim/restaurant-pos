@@ -28,10 +28,12 @@ const terminal = computed(() => findTerminal(terminalId.value));
 const profile = computed(() => terminal.value?.profile ?? 'dining');
 
 /**
- * The *commit* flag, and the only thing on this screen that disables anything.
+ * The *commit* flag: create, send, pay, cancel, discard and rebase — one-tap-then-look-up actions
+ * where a double fire is worse than a wait.
  *
- * It covers create, send, pay, cancel, discard and rebase — one-tap-then-look-up actions where a
- * double fire is worse than a wait. It deliberately does **not** cover the item path: see `tap`.
+ * An item tap never sets it, so taps never disable each other; but a commit in flight *does* close
+ * the item controls, because it is about to change the status that makes them legal. See
+ * `canTouchItems`.
  */
 const committing = ref(false);
 const showEvidence = ref(false);
@@ -48,6 +50,16 @@ const shown = computed(() => orders.projected);
 
 /** §16's affordances, and the conflict headline, as pure functions of that projection. */
 const can = computed(() => affordances(shown.value, orders.halted));
+
+/**
+ * Whether the item controls accept a tap.
+ *
+ * `committing` is in here and not only on the commit buttons. Send, Pay and Cancel set the flag the
+ * moment they are pressed but are *staged* a link later, so between those two instants `can.order`
+ * still says OPEN — and an item tap landing in that gap is queued behind the status change, where
+ * §8 refuses it and halts the order over something the operator could not have known.
+ */
+const canTouchItems = computed(() => can.value.order && !committing.value);
 const headline = computed(() => conflictHeadline(orders.currentConflict, orders.currentQueue));
 const tiles = computed(() => menuTiles(menu.items, profile.value, shown.value));
 const covers = computed(() => coversFor(profile.value));
@@ -171,11 +183,16 @@ const removeItem = (productId: string): void =>
     }
   });
 
-const changeQuantity = (productId: string, quantity: number): void =>
+/**
+ * A ± step, sent as a **delta**, which the store resolves to an absolute quantity inside its
+ * serialized link. The template must not compute `item.quantity + 1` itself: with taps no longer
+ * waiting for the server, the rendered row can be several taps behind what is already queued.
+ */
+const stepQuantity = (productId: string, delta: number): void =>
   tap(async () => {
     const restaurantId = terminal.value?.restaurantId;
     if (restaurantId !== undefined) {
-      await orders.changeQuantity(terminalId.value, restaurantId, productId, quantity);
+      await orders.stepQuantity(terminalId.value, restaurantId, productId, delta);
     }
   });
 
@@ -515,7 +532,7 @@ watch(terminalId, async () => {
                     : 'border-emerald-600 bg-emerald-50'
                   : 'border-stone-300 bg-white hover:bg-stone-50 active:bg-stone-100'
               "
-              :disabled="!can.order"
+              :disabled="!canTouchItems"
               :aria-label="`Add ${tile.name}, ${tile.count} on the order`"
               @click="addItem(tile.id)"
             >
@@ -589,9 +606,9 @@ watch(terminalId, async () => {
                 <button
                   type="button"
                   class="h-14 w-14 rounded-lg border-2 border-stone-300 text-2xl leading-none font-bold hover:bg-stone-50 disabled:opacity-30"
-                  :disabled="!can.order"
+                  :disabled="!canTouchItems"
                   :aria-label="`One fewer ${item.name}`"
-                  @click="changeQuantity(item.productId, item.quantity - 1)"
+                  @click="stepQuantity(item.productId, -1)"
                 >
                   −
                 </button>
@@ -601,16 +618,16 @@ watch(terminalId, async () => {
                 <button
                   type="button"
                   class="h-14 w-14 rounded-lg border-2 border-stone-300 text-2xl leading-none font-bold hover:bg-stone-50 disabled:opacity-30"
-                  :disabled="!can.order"
+                  :disabled="!canTouchItems"
                   :aria-label="`One more ${item.name}`"
-                  @click="changeQuantity(item.productId, item.quantity + 1)"
+                  @click="stepQuantity(item.productId, 1)"
                 >
                   +
                 </button>
                 <button
                   type="button"
                   class="ml-auto min-h-12 rounded-lg border border-stone-300 px-4 disabled:opacity-30"
-                  :disabled="!can.order"
+                  :disabled="!canTouchItems"
                   @click="removeItem(item.productId)"
                 >
                   Remove

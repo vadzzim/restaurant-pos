@@ -15,6 +15,17 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M15, P2]** Rows written in the same millisecond have no deterministic order: `savePending()`
+  stamps `createdAt` to the millisecond and `readQueue()` sorts by it alone, so IndexedDB falls back
+  to the random `mutationId` key and a queue can send base v4 before v3 and halt. Pre-existing and
+  already noted at `apps/web/test/sync-engine.test.ts:53-55`, but M15 made same-millisecond taps far
+  likelier. Fix: a monotonic per-terminal sequence in the row, sorted on. Proved by stubbing
+  `Date.now()` to a constant across two taps and asserting send order.
+- **[M15, P2]** The storage-less fallback in `settle()` is outside the serialized chain, so on a
+  device whose IndexedDB refuses the queue (private browsing, quota) rapid taps call `attemptOnce()`
+  concurrently with no queue row to advance the projected version — every one carries the same
+  `baseVersion`, so one applies and the rest conflict. Fix: keep that path sequential, or give it an
+  in-memory projection. Proved by forcing `savePending()` to return false and issuing two taps.
 - **[M15, P1-in-M12]** `applyVersionConflictArm` tampers `baseVersion - 1`, so on an order at v1 it
   sends 0 — which zod refuses with `VALIDATION_FAILED` instead of producing the version conflict the
   switch promises. Guard on `baseVersion < 2`. Seen in the browser this session; proved by the 400

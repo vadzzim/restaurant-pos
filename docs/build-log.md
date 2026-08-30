@@ -1673,3 +1673,44 @@ The `Create Version Conflict` switch tampers `baseVersion - 1`, which on an orde
 is refused by zod as invalid rather than conflicting; and `spend()` only runs if the POST _returns_,
 so that failed tamper leaves the arm armed and wedges every later mutation from the tab. Both are in
 `known-problems.md` — they are M12's code, not this milestone's, and they are one pass together.
+
+### The Codex review of M15
+
+Five P1s, all one family: the serialization moved into the store, but **not everything that reads
+the projection moved with it**. My own review pass checked that `identityFor` was inside a link and
+stopped there. Three fixed here, two logged.
+
+**[P1, fixed] The steppers computed their absolute quantity in the template.**
+`changeQuantity(item.productId, item.quantity + 1)` read the _rendered_ row. `CHANGE_QUANTITY`
+carries an absolute value on purpose (M8: a delta sent twice after a lost response applies twice),
+so with taps no longer waiting, one `+` could overwrite every add still queued behind it, and two
+quick `+` both sent the same number — 1 → 2 instead of 1 → 3. The wire format has not changed; what
+changed is _where_ the absolute value is computed. `command()` now takes a **plan** — a function
+evaluated inside the serialized link — and `stepQuantity(productId, delta)` resolves the line from
+the projection there, including the below-one case that becomes `REMOVE_ITEM`. The template passes
+a delta and knows nothing else. Confirmed the tests pin it: capturing the line before the link
+turns 1 → 2 → 3 back into 2, 2, and three tests fail.
+
+**[P1, fixed] The order pointer moved outside the chain.** `createOrder` set `currentOrderId` and
+called `setCurrentOrder` before enqueueing, so opening the next cover while the last taps were still
+staging re-pointed them mid-flight — stamped for an order whose `CREATE_ORDER` was queued _behind_
+them, halting on a missing aggregate. Both `createOrder` and `clear()` now do their pointer work
+inside a `serialize` link, so earlier taps finish against the order they were rung up on. `command()`
+also captures the intended order at invocation and refuses if it no longer matches — a guard, not
+the mechanism: on its own it would _drop_ the tap, which is why the pointer move had to be
+serialized too. Confirmed: moving the pointer back outside leaves only `CREATE_ORDER` in the queue.
+
+**[P1, fixed] `committing` did not close the item controls.** Send, Pay and Cancel set the flag on
+the press but are staged a link later, and `can.order` still said OPEN in that gap — an item tap
+landing there is queued behind the status change, where §8 refuses it and halts the order over
+something the operator could not have known. `canTouchItems = can.order && !committing` now gates
+every tile, stepper and Remove. Item taps still never set the flag, so they still never disable each
+other. Verified in the browser: on the Send press every item control greys out at once, while the
+mutation is still in flight.
+
+**Not fixed, logged as `[M15, P2]`:** same-millisecond rows have no deterministic sort key
+(pre-existing, already noted in `sync-engine.test.ts`, but M15 makes collisions likelier); and the
+storage-less `attemptOnce` fallback is outside the chain, so on a device with no IndexedDB rapid
+taps still share a `baseVersion`. Both need their own change and neither is what M15 introduced.
+
+`enqueue()` fell out as dead code once `createOrder` staged inline, and was deleted. 181 web tests.

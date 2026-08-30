@@ -294,8 +294,8 @@ export const useOrderStore = defineStore('order', () => {
   }
 
   /**
-   * Record an intent. **This is the only way a mutation is created**, and it runs inside
-   * `serialize` in both of its callers.
+   * Record an intent. **This is the only way a mutation is created**, and both callers —
+   * `command` and `createOrder` — run it inside a `serialize` link.
    *
    * The row is written **before** anything is attempted (§14) and the screen updates from the
    * mirror, not from a prediction written anywhere — the projection is a pure function of the
@@ -341,14 +341,6 @@ export const useOrderStore = defineStore('order', () => {
     } finally {
       inFlight.value -= 1;
     }
-  }
-
-  async function enqueue(identity: MutationIdentity): Promise<void> {
-    const stored = await serialize(() => stage(identity));
-    if (stored === undefined) {
-      return;
-    }
-    await settle(identity, stored);
   }
 
   /** The identity of a new mutation for the order on screen, stamped at the projected version. */
@@ -470,44 +462,89 @@ export const useOrderStore = defineStore('order', () => {
     const payload: CreateOrderPayload = { tableNumber };
     const orderId = crypto.randomUUID();
 
-    order.value = undefined;
-    conflict.value = undefined;
-    currentOrderId.value = orderId;
+    // **The pointer moves inside the chain, not before it.** Item taps no longer wait for the
+    // server, so an operator can open the next cover while the last taps for this one are still
+    // staging. Moving `currentOrderId` here would re-point those taps mid-flight: they would be
+    // stamped for an order whose `CREATE_ORDER` is queued *behind* them, and the first one to
+    // reach the server would halt on `ORDER_NOT_FOUND`. Queued behind them instead, they finish
+    // against the order they were meant for and this one starts clean.
+    const staged = await serialize(async () => {
+      order.value = undefined;
+      conflict.value = undefined;
+      currentOrderId.value = orderId;
 
-    // The pointer moves now, not when an answer arrives. An order created offline never gets an
-    // answer, and without the pointer the next reload would find its `CREATE_ORDER` in the queue
-    // with nothing saying this device is on it — §14's "a reload must not lose unsynced data".
-    await localStore.setCurrentOrder(terminalId, orderId);
+      // The pointer is durable now, not when an answer arrives. An order created offline never
+      // gets an answer, and without the pointer the next reload would find its `CREATE_ORDER` in
+      // the queue with nothing saying this device is on it — §14's "a reload must not lose
+      // unsynced data".
+      await localStore.setCurrentOrder(terminalId, orderId);
 
-    await enqueue({
-      orderId,
-      mutationId: crypto.randomUUID(),
-      terminalId,
-      restaurantId,
-      type: 'CREATE_ORDER',
-      baseVersion: 0,
-      payload,
+      const identity: MutationIdentity = {
+        orderId,
+        mutationId: crypto.randomUUID(),
+        terminalId,
+        restaurantId,
+        type: 'CREATE_ORDER',
+        baseVersion: 0,
+        payload,
+      };
+
+      const stored = await stage(identity);
+      return stored === undefined ? undefined : { identity, stored };
     });
+
+    if (staged !== undefined) {
+      await settle(staged.identity, staged.stored);
+    }
   }
 
-  /** Every command below refuses while the aggregate is halted: §14.1 waits for a human. */
+  /**
+   * What a command turns out to be, decided **inside** the serialized link.
+   *
+   * A caller that already knows both passes a constant; one whose mutation depends on the order —
+   * the ± steppers — passes a function, and it is evaluated against the projection at the moment
+   * the command is staged rather than at the moment the finger landed.
+   */
+  interface CommandPlan {
+    type: MutationType;
+    payload: MutationRequest['payload'];
+  }
+
+  /**
+   * Every command refuses while the aggregate is halted: §14.1 waits for a human.
+   *
+   * The halt check, the plan, the identity and the queue write are **one indivisible step**. All
+   * four read the projection, and a command that read it between another command's write and its
+   * own would stamp a stale `baseVersion` — or, for a stepper, a stale quantity.
+   */
   async function command(
-    type: MutationType,
     terminalId: string,
     restaurantId: string,
-    payload: MutationRequest['payload'],
+    plan: () => CommandPlan | undefined,
   ): Promise<void> {
-    // The halt check, the identity and the queue write are one indivisible step: all three read
-    // the projection, and a command that read it between another command's write and its own
-    // would stamp a stale `baseVersion`. `createOrder` goes through `enqueue`, which serializes
-    // the same way.
+    // The order the operator was looking at when they touched the screen. `createOrder` and
+    // `clear` move the pointer inside this same chain, so by the time the link runs the pointer is
+    // either still this order or has deliberately moved on — and a tap meant for an order the
+    // screen has left must not be re-stamped onto the one that replaced it.
+    const intended = currentOrderId.value;
+
     const staged = await serialize(async () => {
       if (halted.value) {
         lastError.value = 'This order is halted on a conflict. Discard or rebase first.';
         return undefined;
       }
 
-      const identity = identityFor(type, terminalId, restaurantId, payload);
+      if (currentOrderId.value !== intended) {
+        lastError.value = 'That action was for an order this screen has left; it was not sent.';
+        return undefined;
+      }
+
+      const planned = plan();
+      if (planned === undefined) {
+        return undefined;
+      }
+
+      const identity = identityFor(planned.type, terminalId, restaurantId, planned.payload);
       if (identity === undefined) {
         return undefined;
       }
@@ -521,16 +558,24 @@ export const useOrderStore = defineStore('order', () => {
     }
   }
 
+  /** The common case: the caller knows the whole mutation before the chain runs. */
+  const fixedCommand = (
+    type: MutationType,
+    terminalId: string,
+    restaurantId: string,
+    payload: MutationRequest['payload'],
+  ): Promise<void> => command(terminalId, restaurantId, () => ({ type, payload }));
+
   const addItem = (
     terminalId: string,
     restaurantId: string,
     productId: string,
     quantity = 1,
   ): Promise<void> =>
-    command('ADD_ITEM', terminalId, restaurantId, { productId, quantity } as AddItemPayload);
+    fixedCommand('ADD_ITEM', terminalId, restaurantId, { productId, quantity } as AddItemPayload);
 
   const removeItem = (terminalId: string, restaurantId: string, productId: string): Promise<void> =>
-    command('REMOVE_ITEM', terminalId, restaurantId, { productId } as RemoveItemPayload);
+    fixedCommand('REMOVE_ITEM', terminalId, restaurantId, { productId } as RemoveItemPayload);
 
   /**
    * The absolute quantity, not a delta. A delta sent twice after a lost response would apply
@@ -549,21 +594,58 @@ export const useOrderStore = defineStore('order', () => {
       return;
     }
 
-    await command('CHANGE_QUANTITY', terminalId, restaurantId, {
+    await fixedCommand('CHANGE_QUANTITY', terminalId, restaurantId, {
       productId,
       quantity,
     } as ChangeQuantityPayload);
   }
 
+  /**
+   * One step of the ± stepper, and **the only thing the screen's buttons call**.
+   *
+   * The wire format is still an absolute quantity — a delta sent twice after a lost response would
+   * apply twice, and §8 has not moved. What moved is *where the absolute value is computed*. The
+   * template used to pass `item.quantity + 1`, read off the rendered row: with taps no longer
+   * waiting for the server, several of them can be queued while that row still shows the old
+   * number, so one `+` would overwrite every add behind it, and two quick `+` would both send the
+   * same value — 1 → 2 instead of 1 → 3.
+   *
+   * Here the line is read from the projection *inside* the serialized link, which by then includes
+   * every earlier tap. A stepper on a line the order no longer has plans nothing rather than
+   * inventing one: another terminal removing it is canonical state disagreeing with a stale
+   * render, and §8 answers a `CHANGE_QUANTITY` for a missing line with `ITEM_NOT_IN_ORDER`.
+   */
+  const stepQuantity = (
+    terminalId: string,
+    restaurantId: string,
+    productId: string,
+    delta: number,
+  ): Promise<void> =>
+    command(terminalId, restaurantId, () => {
+      const held = projected.value?.items.find((item) => item.productId === productId);
+      if (held === undefined) {
+        return undefined;
+      }
+
+      const next = held.quantity + delta;
+      // Zero is a removal and has its own mutation type; the API refuses it on the other one.
+      return next < 1
+        ? { type: 'REMOVE_ITEM', payload: { productId } as RemoveItemPayload }
+        : {
+            type: 'CHANGE_QUANTITY',
+            payload: { productId, quantity: next } as ChangeQuantityPayload,
+          };
+    });
+
   const sendToKitchen = (terminalId: string, restaurantId: string): Promise<void> =>
-    command('SEND_TO_KITCHEN', terminalId, restaurantId, {});
+    fixedCommand('SEND_TO_KITCHEN', terminalId, restaurantId, {});
 
   /** No amount is sent: the server pays the order's own canonical total (§8). */
   const pay = (terminalId: string, restaurantId: string, method: PaymentMethod): Promise<void> =>
-    command('PAY', terminalId, restaurantId, { method } as PayPayload);
+    fixedCommand('PAY', terminalId, restaurantId, { method } as PayPayload);
 
   const cancel = (terminalId: string, restaurantId: string, reason?: string): Promise<void> =>
-    command(
+    fixedCommand(
       'CANCEL',
       terminalId,
       restaurantId,
@@ -643,16 +725,21 @@ export const useOrderStore = defineStore('order', () => {
    * has left — the halt and the queue are per aggregate, not per screen (§21.8).
    */
   async function clear(): Promise<void> {
-    order.value = undefined;
-    currentOrderId.value = undefined;
-    conflict.value = undefined;
-    lastError.value = undefined;
-    readError.value = undefined;
+    // Serialized for the same reason `createOrder` is: this drops the pointer, and a tap still
+    // staging behind it must be stamped for the order it was meant for, not find the pointer gone
+    // underneath it. Every earlier tap is already in front of this link.
+    await serialize(async () => {
+      order.value = undefined;
+      currentOrderId.value = undefined;
+      conflict.value = undefined;
+      lastError.value = undefined;
+      readError.value = undefined;
 
-    const terminalId = activeTerminalId.value;
-    if (terminalId !== undefined) {
-      await localStore.clearCurrentOrder(terminalId);
-    }
+      const terminalId = activeTerminalId.value;
+      if (terminalId !== undefined) {
+        await localStore.clearCurrentOrder(terminalId);
+      }
+    });
   }
 
   return {
@@ -685,6 +772,7 @@ export const useOrderStore = defineStore('order', () => {
     addItem,
     removeItem,
     changeQuantity,
+    stepQuantity,
     sendToKitchen,
     pay,
     cancel,
