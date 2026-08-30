@@ -2015,5 +2015,30 @@ satisfy on its own.
 `runner.finish`, which stops the children — except a throw. An orphaned worker holds a place in the
 `kitchen` group, so this run's crash would be paid for by the next run's rebalance. Wrapped.
 
+**A Codex round, at the user's request, and it found two P1s my own pass had not.**
+
+The first is a reproducibility hole: `pnpm install` brings in `@playwright/test` but not the
+Chromium it drives, and the only `playwright install` in the repository was in `ci.yml`. So the one
+command this milestone is verified by fails on a fresh checkout with a missing executable — and my
+runs were green only because I had installed the browser by hand an hour earlier. Now a step in the
+runner, idempotent and near-free once the binary is cached. It cannot replace CI's `--with-deps`,
+which also installs the shared libraries a bare runner lacks; this is the half that works on a
+developer's machine.
+
+The second is the better finding, because the test was passing and proving less than it claimed.
+`openPos` waited for a menu tile — but `menu.load()` resolves before `connection.start()` does, so
+the tiles are on screen while the POS socket is still opening. `onConnected` calls
+`refresh(undefined)` (§13: a reconnect refetches the snapshot and repairs the §12.2 crash window),
+so a socket that connected _after_ the kitchen marked PREPARING would satisfy the final assertion
+with a plain re-read — the last segment of the pipeline, realtime consumer → broadcast → POS, could
+have been dead and the test still green. Both pages now wait for `WS CONNECTED` before anything is
+commanded. That also turns a second assumption into an assertion: on §15's polling fallback
+`socketState` never leaves `DISCONNECTED`, so the badge appearing is proof this ran on the
+WebSocket and not on the fallback.
+
+Worth naming the pattern, because it is the one an E2E suite rots by: an assertion that _can_ be
+satisfied by a cheaper path than the one under test is not a test of that path. Neither of these
+was visible in a green run; both were visible in the code.
+
 Green: `pnpm test:e2e` PASS, lint, typecheck (three projects now — `tsconfig.e2e.json` exists
 because Playwright resolves like a bundler), build, 251 web tests.

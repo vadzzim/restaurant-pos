@@ -36,6 +36,16 @@ async function openPos(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: TILE_LABEL }).first()).toBeVisible({
     timeout: LOCAL_TIMEOUT_MS,
   });
+  // And the socket, which is **not** cosmetic and is the difference between this test proving the
+  // last segment of the pipeline and only appearing to. `menu.load()` resolves before
+  // `connection.start()` does, so the tiles above are visible while the socket is still opening —
+  // and `onConnected` refreshes the snapshot (§13: a reconnect repairs the §12.2 crash window).
+  // A socket that connected *after* the kitchen marked PREPARING would therefore satisfy the final
+  // assertion with a plain re-read, with no broadcast from the realtime consumer involved at all.
+  //
+  // Waiting here also makes the transport an assertion rather than an assumption: on §15's polling
+  // fallback `socketState` stays DISCONNECTED and this badge never appears.
+  await expect(page.getByText('WS CONNECTED')).toBeVisible({ timeout: LOCAL_TIMEOUT_MS });
 }
 
 test.beforeEach(async ({ request }) => {
@@ -89,6 +99,9 @@ test('POS-1 sends an order, the kitchen ticket appears, and PREPARING comes back
   // --- The kitchen display, on the far side of Kafka --------------------------------------------
   await kitchen.goto(`/kitchen?restaurantId=${RESTAURANT_ID}`);
   await expect(kitchen.getByRole('heading', { name: 'Kitchen' })).toBeVisible();
+  // Its own socket, before it is asked to command anything — same argument as the POS's, from the
+  // other end: a display whose socket is still opening reads the rail from `load()` alone.
+  await expect(kitchen.getByText('WS CONNECTED')).toBeVisible({ timeout: LOCAL_TIMEOUT_MS });
 
   // The rail accumulates across runs, so the card is found by this run's cover and every
   // assertion below is scoped to it. The item rows inside a card carry no table number, so this

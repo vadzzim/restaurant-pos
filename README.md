@@ -44,9 +44,14 @@ PREPARING, and the POS follows without asking for anything. The script owns the 
 (Compose, migrate, seed, build, an API and a worker as child processes) and Playwright serves the
 **production** bundle on `:4173` — since M17 that is a different build from `pnpm dev`, and it is the
 one the image ships. Output in `.verify-output/e2e.log`. An API already listening on `:3000` is
-reused rather than duplicated, so this is safe to run against a demo you have up. `pnpm test:e2e:run`
-runs the spec alone against a stack you are already running, and takes Playwright's own flags —
-`--headed`, `--debug`, `--ui`. ADR 018 records the rest.
+reused rather than duplicated, so this is safe to run against a demo you have up. It also installs
+the Chromium Playwright drives — `pnpm install` does not, and that binary is the one prerequisite
+this repository cannot express in `package.json`.
+
+`pnpm test:e2e:run` runs the spec alone against a stack you are already running, and takes
+Playwright's own flags — `--headed`, `--debug`, `--ui`. It expects `apps/web/dist` and the browser
+to be there already: `pnpm exec playwright install chromium` once, then
+`pnpm -F @pos/web build && pnpm -F @pos/web preview`. ADR 018 records the rest.
 
 `pnpm verify:multi` is the §22 one. It builds the three production images
 (`apps/{api,worker,web}/Dockerfile`, multi-stage and non-root — ADR 016), brings up

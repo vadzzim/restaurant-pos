@@ -45,7 +45,14 @@ async function main() {
 
   // The migration and the seed are both idempotent, so this is safe against the demo database the
   // user keeps between sessions — and necessary against a CI checkout, where the volume is new.
+  //
+  // So is the browser install: `pnpm install` brings in `@playwright/test` but not the Chromium it
+  // drives, so without this a fresh checkout fails the one command the milestone is verified by,
+  // with an error about a missing executable. Idempotent and near-free once the binary is cached.
+  // It cannot replace CI's `--with-deps`, which also installs the shared libraries a bare runner
+  // lacks and needs the privileges to do it; this is the half that works on a developer's machine.
   const prepared = await runner.runSteps([
+    ['Chromium', 'pnpm', ['exec', 'playwright', 'install', 'chromium']],
     ['Build', 'pnpm', ['run', 'build']],
     ['Migrate', 'pnpm', ['run', 'db:migrate']],
     ['Seed', 'pnpm', ['run', 'db:seed']],
