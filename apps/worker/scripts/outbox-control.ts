@@ -1,13 +1,11 @@
 import { loadConfig } from '@pos/config';
-import { closeDb, getDb } from '@pos/db';
-
-import { readOutboxControls, setOutboxControls } from '../src/modules/events/outbox-controls.js';
-import { maxPublishDelayMs } from '../src/modules/events/outbox-publisher.js';
+import { maxPublishDelayMs } from '@pos/contracts';
+import { closeDb, getDb, readOutboxControls, setOutboxControls } from '@pos/db';
 
 /**
- * The §18 switches `Pause Outbox Publisher` and `Delay Outbox Publishing`, until M12 gives them
- * buttons in `/debug`. It writes the same singleton row a running worker polls, so a pause takes
- * effect within one `OUTBOX_POLL_MS` and no process is restarted.
+ * The §18 switches `Pause Outbox Publisher` and `Delay Outbox Publishing`, from a terminal. M12 gave
+ * them buttons in `/debug` too; both write the same singleton row a running worker polls, so a pause
+ * takes effect within one `OUTBOX_POLL_MS` and no process is restarted.
  *
  *   pnpm -F @pos/worker outbox status
  *   pnpm -F @pos/worker outbox pause

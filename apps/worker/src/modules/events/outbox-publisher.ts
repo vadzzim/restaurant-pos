@@ -1,8 +1,6 @@
-import type { DomainEvent } from '@pos/contracts';
-import type { Db } from '@pos/db';
+import { OUTBOX_LEASE_SAFETY_FRACTION, type DomainEvent } from '@pos/contracts';
+import { DEFAULT_OUTBOX_CONTROLS, type Db, type OutboxControls } from '@pos/db';
 import { sql } from 'drizzle-orm';
-
-import { DEFAULT_OUTBOX_CONTROLS, type OutboxControls } from './outbox-controls.js';
 
 /**
  * Publishing happens outside every transaction (§7, §10), so the transport is an interface: the
@@ -10,25 +8,6 @@ import { DEFAULT_OUTBOX_CONTROLS, type OutboxControls } from './outbox-controls.
  */
 export interface EventTransport {
   publish(event: DomainEvent, key: string): Promise<void>;
-}
-
-/**
- * How much of the lease a pass refuses to spend. A batch that publishes right up to `claim_until`
- * is publishing under a lease another worker may already have taken, and the local clock is not the
- * database's — so the last tenth of the lease is left unused rather than gambled.
- */
-const LEASE_SAFETY_FRACTION = 0.1;
-
-/**
- * The largest `publish_delay_ms` a publisher can honour and still publish anything.
- *
- * A delay that eats the whole lease budget before the first send turns every pass into claim,
- * wait, release, publish nothing — a pause wearing a delay's clothes, and an undocumented one.
- * Half the budget is the ceiling: the other half has to cover the claim's round trip and the send
- * itself, which is the thing the delay exists to make visible. Review round 1 found this.
- */
-export function maxPublishDelayMs(leaseMs: number): number {
-  return Math.floor((leaseMs * (1 - LEASE_SAFETY_FRACTION)) / 2);
 }
 
 export interface PublisherOptions {
@@ -147,7 +126,7 @@ export async function publishOnce(
 
   // Measured from before the claim, never from after it: the claim's own round trip is spent out
   // of the same lease, and a slow one is exactly when this guard matters.
-  const leaseDeadline = claimedAt + options.leaseMs * (1 - LEASE_SAFETY_FRACTION);
+  const leaseDeadline = claimedAt + options.leaseMs * (1 - OUTBOX_LEASE_SAFETY_FRACTION);
 
   /** Hands back everything from `index` on, and records why. The caller breaks out of the loop. */
   const giveUpFrom = async (index: number, reason: PublishStopReason): Promise<void> => {

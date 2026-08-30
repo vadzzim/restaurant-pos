@@ -72,6 +72,7 @@ const app = buildApp({
   sharedCounters,
   consumerLag: consumerLag.probe,
   debugRowLimit: config.DEBUG_ROW_LIMIT,
+  outboxLeaseMs: config.OUTBOX_LEASE_MS,
 });
 
 const realtime = createRealtimeServer(app.server, config, app.log, presence);

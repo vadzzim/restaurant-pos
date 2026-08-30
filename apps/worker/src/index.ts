@@ -1,12 +1,12 @@
 import { hostname } from 'node:os';
 
 import { loadConfig } from '@pos/config';
-import { sharedCounterKey } from '@pos/contracts';
-import { closeDb, getDb } from '@pos/db';
+import { maxPublishDelayMs, sharedCounterKey } from '@pos/contracts';
+import { closeDb, getDb, readOutboxControls } from '@pos/db';
 import pino from 'pino';
 
-import { readOutboxControls, watchOutboxControls } from './modules/events/outbox-controls.js';
-import { maxPublishDelayMs, publishOnce } from './modules/events/outbox-publisher.js';
+import { watchOutboxControls } from './modules/events/outbox-controls.js';
+import { publishOnce } from './modules/events/outbox-publisher.js';
 import { createPrintQueue } from './modules/printing/print-queue.js';
 import { startPrintWorker } from './modules/printing/print-worker.js';
 import { httpPrinter } from './modules/printing/printer-client.js';

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 
+import SimulatorPanel from '../components/SimulatorPanel.vue';
 import StateBadge from '../components/StateBadge.vue';
 import {
   dependencyBadges,
@@ -19,9 +20,11 @@ import { useDebugStore } from '../stores/debug';
  * stream, conflict history, outbox state including dead-lettered rows, print job state, and the
  * §20 counters with their provenance.
  *
- * **Read-only by design.** §18's failure simulator is M12 and the feature-flag toggles are M13;
- * both sections are named below rather than omitted, so the page does not quietly claim §16 is
- * finished.
+ * §18's failure simulator is the one section that writes, and it is a component of its own
+ * (`SimulatorPanel`) rather than more markup here: everything above polls and renders, and mixing
+ * the eleven buttons into that would have made the read path harder to read. The feature-flag
+ * toggles are M13's and are named below rather than omitted, so the page does not quietly claim
+ * §16 is finished.
  */
 const debug = useDebugStore();
 
@@ -57,8 +60,8 @@ const backlog = computed(() => debug.dependencies?.outbox);
       <div>
         <h1 class="text-3xl font-semibold">Debug</h1>
         <p class="text-sm text-stone-600">
-          Every number below says where it comes from. Polling every 2 s; read-only — the failure
-          simulator is M12 and the flag toggles are M13.
+          Every number below says where it comes from, and every control at the bottom says where
+          its switch lives. Polling every 2 s; the flag toggles are M13.
         </p>
       </div>
       <p class="text-sm text-stone-600">
@@ -372,16 +375,13 @@ const backlog = computed(() => debug.dependencies?.outbox);
       </div>
     </article>
 
-    <!-- The two §16 sections this milestone does not own --------------------------------------->
+    <!-- §18 ------------------------------------------------------------------------------------>
+    <SimulatorPanel />
+
+    <!-- The one §16 section this milestone does not own ------------------------------------------>
     <article class="rounded border border-dashed border-stone-300 p-4 text-sm text-stone-600">
       <h2 class="mb-2 text-lg font-semibold text-stone-800">Not on this page yet</h2>
-      <p>
-        <strong>Feature flag toggles</strong> — M13, together with the polling transport.
-        <strong>The failure simulator</strong> — M12, which also moves <em>Simulate Offline</em>,
-        <em>Pause Outbox Publisher</em>, <em>Delay Outbox Publishing</em> and
-        <em>Fail Printer</em> onto this page from the terminal and the POS header where they live
-        today.
-      </p>
+      <p><strong>Feature flag toggles</strong> — M13, together with the polling transport.</p>
     </article>
   </section>
 </template>

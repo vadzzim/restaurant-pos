@@ -621,3 +621,67 @@ export const PRESENCE_EVENT_NAME = 'presence';
  * survives two lost heartbeats and no more.
  */
 export const PRESENCE_HEARTBEAT_MS = 5_000;
+
+/**
+ * §18's four **server-side** controls. The other seven are switches inside one browser and never
+ * reach the API — see `apps/web/src/api/simulator-arms.ts` and ADR 015.
+ */
+export const SIMULATOR_CONTROLS = [
+  'outbox-pause',
+  'outbox-delay',
+  'printer-fail',
+  'replay-last-event',
+] as const;
+
+export type SimulatorControl = (typeof SIMULATOR_CONTROLS)[number];
+
+/**
+ * What `GET /api/debug/simulator` returns and what every `POST` returns after flipping one switch,
+ * so a button never needs a second round trip to learn what it did.
+ *
+ * All of it is a row in PostgreSQL: fleet-wide, and it survives a worker restart. That lifetime is
+ * the interesting part and `/debug` states it next to the controls.
+ */
+export interface SimulatorState {
+  outbox: {
+    paused: boolean;
+    publishDelayMs: number;
+  };
+  printer: {
+    failing: boolean;
+  };
+}
+
+/** The one event a replay put back in flight, or `null` when nothing has been published yet. */
+export interface ReplayedEventView {
+  eventId: string;
+  eventType: string;
+  aggregateId: string;
+  eventVersion: number;
+  /** When it was published the first time. It is unpublished again as of this response. */
+  previouslyPublishedAt: string;
+}
+
+/**
+ * The largest `publish_delay_ms` a publisher can honour and still publish anything.
+ *
+ * A delay that eats the whole lease budget before the first send turns every pass into claim,
+ * wait, release, publish nothing — a pause wearing a delay's clothes, and an undocumented one.
+ * Half the budget is the ceiling: the other half has to cover the claim's round trip and the send
+ * itself, which is the thing the delay exists to make visible.
+ *
+ * Shared rather than the publisher's own, because three processes need the same number: the worker
+ * that honours it, the CLI that validates a typed value, and the API that validates a clicked one.
+ * `OUTBOX_LEASE_SAFETY_FRACTION` is how much of the lease a pass refuses to spend — publishing
+ * right up to `claim_until` is publishing under a lease another worker may already have taken.
+ */
+export const OUTBOX_LEASE_SAFETY_FRACTION = 0.1;
+
+export const maxPublishDelayMs = (leaseMs: number): number =>
+  Math.floor((leaseMs * (1 - OUTBOX_LEASE_SAFETY_FRACTION)) / 2);
+
+export interface SimulatorResponse {
+  state: SimulatorState;
+  /** Present only on `replay-last-event`. */
+  replayed?: ReplayedEventView | null;
+}

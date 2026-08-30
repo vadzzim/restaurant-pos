@@ -1400,3 +1400,62 @@ The lesson is narrower than "test the built artefact": it is that a test runner 
 modules cannot answer a question about module loading, and the only thing that can is starting the
 process. The same session also found the demo database two migrations behind, which no test could
 have found either, for the same reason — the test database is created and migrated by the suite.
+
+## M12 — the failure simulator
+
+Eleven controls, and the only decision that mattered was made before any of them was drawn: what
+the write surface is. `/debug` had been read-only since M11 and §17 lists a single debug write, so
+the obvious outcome was five endpoints for four switches. ADR 015 records what happened instead —
+the eleven divide by **where the switch lives**, and once that is the axis, the answer falls out.
+Four are rows in PostgreSQL and share one endpoint pair; the other seven are things a _client_ does
+and never reach the API at all.
+
+`Replay Last Kafka Event` was the interesting one. The obvious build is a Kafka producer in the API,
+and it is wrong: the publisher is the only thing in this system that writes to the topic, so a
+producer here would put an event on it that the outbox has no record of re-sending — and §19.6 is
+precisely a claim about the outbox path. So the replay is an `UPDATE`: the newest published row goes
+back to claimable, the worker sends it again, `processed_events` catches it. No new infrastructure,
+and the demonstration is the real machinery rather than a re-enactment of it. The statement reads
+`published_at` in a CTE rather than from `RETURNING`, which gives back the `null` it just wrote —
+the same trap `claimBatch` has a comment about — and takes its row `FOR UPDATE SKIP LOCKED`, so two
+presses replay two different events instead of one waiting on the other.
+
+`readOutboxControls`/`setOutboxControls` moved from the worker into `@pos/db` when the API became
+their second writer, next to `printer-controls.ts`, which had made the same move for the same
+reason. `maxPublishDelayMs` moved into `@pos/contracts` for a third caller: the worker honours the
+ceiling, the CLI validates a typed value, and now the API validates a clicked one — three copies of
+the formula would have been the alternative.
+
+The seven client controls hang off `postMutation`, not off a store. That is the same decision M8
+made for the offline switch, and it holds for the same reason: a control the sync engine could
+route around is not a control. Two of them are latches rather than actions, because `/debug` is its
+own route — a `Disconnect WebSocket` that closed an open socket would do nothing pressed from a page
+where no screen holds one. The latch is read by the connection store's `start`, and a watcher
+re-runs `start` so a switch thrown while a POS is up takes effect without leaving the page.
+
+### The review pass
+
+One P1, in the milestone's own feature. `applyVersionConflictArm` spent the arm when it rewrote the
+request, but two things in front of the send can refuse to send: the offline gate throws before
+`fetch`, and a dead network throws during it. So arming `Create Version Conflict` on `/debug` and
+walking to a POS that happened to be offline consumed the arm silently, and the operator would press
+again and again with nothing happening — the exact failure a demo switch must not have. The arm now
+returns a `spend()` the caller invokes only after the request has actually reached the server. Two
+tests pin it, one per way of not sending.
+
+Also corrected: the effect log told the operator that `Fail Printer` would be seen "within one
+`OUTBOX_POLL_MS`". It would not — the fake device reads its row on every print rather than polling
+it, so that switch is immediate. Not a defect in the code, a false sentence in the product, which on
+a page whose entire purpose is to say where numbers come from is the same kind of mistake.
+
+Two P3s went to the backlog unfixed: the replay does not reset `attempt_count`, and `busy` holds one
+control name so two overlapping presses under-disable one button.
+
+### What the automated verification cannot cover
+
+Item 5 of the M12 brief is a by-hand pass over all eleven controls in a browser. The four
+server-side ones were exercised against a running API over HTTP — pause, delay, fail printer, and a
+replay that came back naming `OrderSentToKitchen v3` — which is a stronger check than `inject`,
+because it proves the routes are reachable in the assembled process. The seven client ones are
+covered by unit tests that send real bodies through `fetch`, but "the badge changes and the presence
+row goes stale" is a claim only a browser can settle, and this session did not open one.

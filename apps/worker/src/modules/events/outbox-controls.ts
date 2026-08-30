@@ -1,64 +1,17 @@
-import { outboxControls, type Db } from '@pos/db';
-import { eq, sql } from 'drizzle-orm';
+import type { OutboxControls } from '@pos/db';
 import type { Logger } from 'pino';
 
 /**
- * The publisher is fleet-wide, so its switches are too: one row, one id. A per-restaurant pause
- * would be a different feature — it would have to pause the *claim query*, not the loop — and
- * nothing in §18 asks for it.
+ * The publisher's end of the two §18 outbox switches. The row itself — how it is read, how it is
+ * written, what a missing row means — moved to `@pos/db` in M12, when `/debug` became the second
+ * writer. What stays here is the only part that is the worker's alone: the loop that keeps a
+ * snapshot fresh so the publish loop can consult it per row without a query.
  */
-const SINGLETON = 'singleton';
-
-/** The two §18 switches, as the publisher sees them. */
-export interface OutboxControls {
-  /** `Pause Outbox Publisher`: claim nothing, publish nothing, hold no lease. */
-  paused: boolean;
-  /** `Delay Outbox Publishing`: an artificial wait before each send, so a demo can watch the
-   * backlog sit in the table. Milliseconds. */
-  publishDelayMs: number;
-}
-
-export const DEFAULT_OUTBOX_CONTROLS: OutboxControls = { paused: false, publishDelayMs: 0 };
 
 export interface OutboxControlWatcher {
   /** The last successfully read value. Synchronous, so the publish loop can consult it per row. */
   current: () => OutboxControls;
   stop: () => void;
-}
-
-export async function readOutboxControls(db: Db): Promise<OutboxControls> {
-  const [row] = await db
-    .select()
-    .from(outboxControls)
-    .where(eq(outboxControls.id, SINGLETON))
-    .limit(1);
-
-  if (row === undefined) {
-    return DEFAULT_OUTBOX_CONTROLS;
-  }
-
-  return { paused: row.paused, publishDelayMs: row.publishDelayMs };
-}
-
-/**
- * Upserts the singleton. Callers patch one switch at a time — the command-line tool sets `paused`
- * without knowing the current delay — so an absent field must not overwrite the other switch with
- * a default.
- */
-export async function setOutboxControls(db: Db, patch: Partial<OutboxControls>): Promise<void> {
-  const merged = { ...DEFAULT_OUTBOX_CONTROLS, ...patch };
-
-  await db
-    .insert(outboxControls)
-    .values({ id: SINGLETON, paused: merged.paused, publishDelayMs: merged.publishDelayMs })
-    .onConflictDoUpdate({
-      target: outboxControls.id,
-      set: {
-        ...(patch.paused === undefined ? {} : { paused: patch.paused }),
-        ...(patch.publishDelayMs === undefined ? {} : { publishDelayMs: patch.publishDelayMs }),
-        updatedAt: sql`now()`,
-      },
-    });
 }
 
 /**

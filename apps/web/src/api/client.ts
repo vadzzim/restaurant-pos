@@ -11,10 +11,13 @@ import type {
   MutationResponse,
   OrderSnapshot,
   OutboxDebugResponse,
+  SimulatorControl,
+  SimulatorResponse,
 } from '@pos/contracts';
 
 import { ApiRequestError } from './errors';
 import { assertOnline } from './offline';
+import { applyVersionConflictArm, fireMutationShadows } from './simulator-arms';
 
 export { ApiRequestError };
 
@@ -22,8 +25,26 @@ async function readJson(response: Response): Promise<unknown> {
   return (await response.json()) as unknown;
 }
 
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  return unwrap<T>(response);
+}
+
 async function get<T>(path: string): Promise<T> {
   const response = await fetch(path, { headers: { accept: 'application/json' } });
+  return unwrap<T>(response);
+}
+
+/**
+ * Every non-mutation call has the same two outcomes: a body, or the §17 error envelope. The
+ * mutation path below cannot use this — three of its 4xx answers are domain outcomes, not errors.
+ */
+async function unwrap<T>(response: Response): Promise<T> {
   const body = await readJson(response);
 
   if (!response.ok) {
@@ -66,6 +87,19 @@ export const fetchDebugConflicts = (): Promise<ConflictsDebugResponse> =>
 export const fetchDebugOutbox = (): Promise<OutboxDebugResponse> =>
   get<OutboxDebugResponse>('/api/debug/outbox');
 
+export const fetchSimulator = (): Promise<SimulatorResponse> =>
+  get<SimulatorResponse>('/api/debug/simulator');
+
+/**
+ * §18's four server-side controls, through the one endpoint pair M12 added (ADR 015). The response
+ * is the new state, so a button never has to guess or wait for the next poll to show what it did.
+ */
+export const postSimulatorControl = (
+  control: SimulatorControl,
+  body: Record<string, unknown> = {},
+): Promise<SimulatorResponse> =>
+  postJson<SimulatorResponse>(`/api/debug/simulator/${control}`, body);
+
 /**
  * An order that is not there yet is a normal state on this client, not an error.
  *
@@ -95,10 +129,25 @@ export async function fetchOrder(
  * status but are domain outcomes carrying a §5 body, so they are returned rather than thrown; only
  * the §17 error envelope becomes an exception.
  */
-export const postMutation = (
+export async function postMutation(
   orderId: string,
   request: MutationRequest,
-): Promise<MutationResponse> => postMutationTo(`/api/orders/${orderId}/mutations`, request);
+): Promise<MutationResponse> {
+  // §18's three mutation controls hang off this one call and not off `postMutationTo`, so the
+  // kitchen adapters below are untouched: all three are POS-queue demonstrations (§19.3–§19.5),
+  // and two of them need an `orderId` and a payload the kitchen commands do not carry.
+  const { request: outgoing, spend } = applyVersionConflictArm(request);
+  const response = await postMutationTo(`/api/orders/${orderId}/mutations`, outgoing);
+  spend();
+
+  if (response.status === 'APPLIED') {
+    await fireMutationShadows(orderId, outgoing, (id, body) =>
+      postMutationTo(`/api/orders/${id}/mutations`, body),
+    );
+  }
+
+  return response;
+}
 
 /** What the two §17 kitchen adapters take: a mutation identity, with the type in the URL. */
 export interface KitchenCommandRequest {

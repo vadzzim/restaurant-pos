@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import { registerConfigRoutes } from './modules/config/api/config-routes.js';
 import { registerDebugRoutes } from './modules/debug/api/debug-routes.js';
+import { registerSimulatorRoutes } from './modules/debug/api/simulator-routes.js';
 import type { ConsumerLagProbe } from './modules/debug/application/consumer-lag.js';
 import { incrementCounter } from './modules/debug/application/counters.js';
 import type {
@@ -55,6 +56,12 @@ export interface BuildAppOptions {
   sharedCounters?: SharedCounterStore | undefined;
   consumerLag?: ConsumerLagProbe | undefined;
   debugRowLimit?: number;
+  /**
+   * The publisher's lease, which is the only thing that bounds a usable `Delay Outbox Publishing`
+   * (§18). The API never publishes; it needs this number solely to refuse a delay the worker could
+   * not honour. Defaulted to `OUTBOX_LEASE_MS`'s own default so a test app needs no config.
+   */
+  outboxLeaseMs?: number;
 }
 
 /**
@@ -73,6 +80,7 @@ export function buildApp({
   sharedCounters,
   consumerLag,
   debugRowLimit = 50,
+  outboxLeaseMs = 30_000,
 }: BuildAppOptions): FastifyInstance {
   const app = Fastify({
     logger: {
@@ -160,6 +168,7 @@ export function buildApp({
     presence,
     sharedCounters,
   });
+  registerSimulatorRoutes(app, { db, outboxLeaseMs });
 
   return app;
 }

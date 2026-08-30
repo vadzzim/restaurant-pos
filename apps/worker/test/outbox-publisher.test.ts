@@ -1,13 +1,18 @@
 import { randomUUID } from 'node:crypto';
 
-import type { DomainEvent } from '@pos/contracts';
-import { kitchenTickets, orders, outboxEvents, processedEvents, type Db } from '@pos/db';
+import { maxPublishDelayMs, type DomainEvent } from '@pos/contracts';
+import {
+  kitchenTickets,
+  orders,
+  outboxEvents,
+  processedEvents,
+  type Db,
+  type OutboxControls,
+} from '@pos/db';
 import { eq, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 
-import type { OutboxControls } from '../src/modules/events/outbox-controls.js';
 import {
-  maxPublishDelayMs,
   publishOnce,
   type EventTransport,
   type PublisherOptions,

@@ -15,6 +15,14 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M12, P3]** `replayLastEvent` does not reset `attempt_count`, so a row that needed retries to
+  publish the first time starts its replay part-way to `OUTBOX_MAX_ATTEMPTS` and can dead-letter
+  sooner than a fresh event would. `apps/api/src/modules/debug/application/replay-last-event.ts`.
+  A row published on attempt 3, replayed against a broken transport, dead-lettering early proves it.
+- **[M12, P3]** `busy` in `apps/web/src/stores/simulator.ts` holds one control name, so two
+  overlapping presses leave the first button enabled while its request is still out. Harmless — the
+  endpoint is idempotent per switch — but the disabled state is not telling the truth. Pressing two
+  server controls within the same tick and watching both stay enabled proves it.
 - **[M11, P2]** Presence is only reported over the WebSocket: `connectRealtime` installs the
   heartbeat, and `start()` in `apps/web/src/stores/connection.ts` returns before it when
   `realtime.websocket_push` is off, so such a client never appears on `/debug`'s active-terminal
@@ -180,10 +188,23 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   instance answered the poll. Everything durable is derived from PostgreSQL for exactly this
   reason; making the in-process ones fleet-wide would mean shipping them to Redis, which buys a
   number nobody asked for at the cost of a write on every request.
-- **§18's eleven controls are in three places, and none of them is `/debug`.** `Simulate Offline` is
-  on the POS header, `Pause Outbox Publisher` and `Delay Outbox Publishing` are behind
-  `pnpm -F @pos/worker outbox`, and `Fail Printer` is behind `pnpm -F @pos/worker printer`. M12
-  gathers all of them into one page; the remaining seven do not exist yet.
+- ~~**§18's eleven controls are in three places, and none of them is `/debug`.**~~ Fixed in M12: all
+  eleven are on the page, grouped by where the switch lives (ADR 015). The POS header toggle and
+  both worker CLIs still work — they drive the same state, so nothing has two spellings.
+- **The seven client-side §18 controls do not cross tabs.** They are module refs in one browser tab
+  (ADR 015). Arming one on `/debug` and walking to `/pos/pos-1` works, because module state survives
+  a route change; a POS open in a _second_ tab sees nothing. Consistent with one screen per terminal,
+  and stated on the panel rather than left to be discovered mid-demo.
+- **`/debug` is a write surface now, and there is no authentication on it.** Anything that can reach
+  the API can pause the fleet's publisher or fail its printer. Deliberate in a demo with no auth
+  anywhere, and worth saying out loud beside the socket having none.
+- **`Force Polling Transport` reaches the `PUSH DISABLED` branch, not a polling transport.** M13
+  owns the second transport; until then the latch means "this terminal declines push", which is a
+  real and useful thing to demonstrate but is not what the label finally promises. The panel says so.
+- **`Replay Last Kafka Event` moves the published count down by one** while the row is back in
+  flight, and the replayed row is _earlier_ than any still-unpublished event for the same aggregate,
+  so the claim query holds those behind it until it lands. Both are the cost of expressing a replay
+  as an outbox reset rather than as a second producer (ADR 015), and both are visible on the page.
 - **The client has no backoff and no automatic retry.** By design (ADR 002): the engine runs on
   explicit triggers so the demo is deterministic. A server that is down and a socket that never
   reconnects therefore leave the queue sitting until the operator presses **Sync now**.

@@ -1,13 +1,13 @@
-import pino from 'pino';
-import { describe, expect, it } from 'vitest';
-
 import {
   DEFAULT_OUTBOX_CONTROLS,
   readOutboxControls,
   setOutboxControls,
-  watchOutboxControls,
   type OutboxControls,
-} from '../src/modules/events/outbox-controls.js';
+} from '@pos/db';
+import pino from 'pino';
+import { describe, expect, it } from 'vitest';
+
+import { watchOutboxControls } from '../src/modules/events/outbox-controls.js';
 import { db, useTestDatabase } from './helpers.js';
 
 useTestDatabase();

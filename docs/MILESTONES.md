@@ -31,9 +31,9 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M8 | Offline queue + sync + halt-on-conflict | **L** | **Opus** | yes | done |
 | M9 | Outbox hardening + crash-window tests | **L** | **Opus** | yes | done |
 | M10 | BullMQ print job | M | Sonnet | yes | done |
-| M11 | Debug dashboard + counters + presence | M | Sonnet | yes | next |
-| M12 | Failure simulator | M | Sonnet | yes | |
-| M13 | Feature flags + polling fallback | M | Sonnet | yes | |
+| M11 | Debug dashboard + counters + presence | M | Sonnet | yes | done |
+| M12 | Failure simulator | M | Sonnet | yes | done |
+| M13 | Feature flags + polling fallback | M | Sonnet | yes | next |
 | M14 | Production images + multi-instance smoke | M | Sonnet | yes | |
 | M15 | POS UX for rush + BAR-1 | M | Sonnet | yes | |
 | M16 | `/demo` guided scenarios | M | Sonnet | yes | |

@@ -1,8 +1,9 @@
 import type { DomainEvent, PresenceReport } from '@pos/contracts';
 import { defineStore } from 'pinia';
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 import { fetchConfig } from '../api/client';
+import { isLatched, latchStates } from '../api/simulator-arms';
 import { createEventGate, type GateVerdict } from '../realtime/event-gate';
 import { connectRealtime, type RealtimeConnection } from '../realtime/socket';
 
@@ -12,6 +13,10 @@ export type SocketState = 'DISCONNECTED' | 'CONNECTED';
  * `PUSH` is the WebSocket transport of §13. `PUSH DISABLED` is what M4 shows when the
  * `realtime.websocket_push` flag is off: the screens stay correct after every mutation, but there
  * are no live updates until M13 lands the polling transport as the flag's other, complete branch.
+ *
+ * §18's `Force Polling Transport` puts this terminal on that same `PUSH DISABLED` branch without
+ * touching the flag. Today the two are indistinguishable on the badge because the branch is one
+ * branch; M13 is what makes it a working second transport.
  */
 export type Transport = 'PUSH' | 'PUSH DISABLED' | 'UNKNOWN';
 
@@ -49,6 +54,8 @@ export const useConnectionStore = defineStore('connection', () => {
    * stale connection can neither replace a newer one nor outlive a `stop`.
    */
   let generation = 0;
+  /** What the mounted screen last asked for, so a §18 latch can rebuild the same connection. */
+  let lastOptions: RealtimeStartOptions | undefined;
 
   const pushEnabled = computed(() => transport.value === 'PUSH');
 
@@ -68,6 +75,12 @@ export const useConnectionStore = defineStore('connection', () => {
    * cancelled `start` cannot relabel the transport of the restaurant that replaced it.
    */
   async function resolveTransport(restaurantId: string): Promise<Transport> {
+    // §18's `Force Polling Transport`, per terminal and ahead of the flag: this screen declines
+    // push without touching a fleet-wide row that would take every other terminal with it.
+    if (isLatched('polling-forced')) {
+      return 'PUSH DISABLED';
+    }
+
     try {
       const config = await fetchConfig(restaurantId);
       return config.flags['realtime.websocket_push'] ? 'PUSH' : 'PUSH DISABLED';
@@ -83,6 +96,7 @@ export const useConnectionStore = defineStore('connection', () => {
   }
 
   async function start(options: RealtimeStartOptions): Promise<void> {
+    lastOptions = options;
     generation += 1;
     const mine = generation;
     teardown();
@@ -94,6 +108,13 @@ export const useConnectionStore = defineStore('connection', () => {
 
     transport.value = resolved;
     if (resolved !== 'PUSH') {
+      return;
+    }
+
+    // §18's `Disconnect WebSocket`. It is checked here rather than by closing an open socket
+    // because the operator throws it on `/debug`, where no screen holds one — a latch the next
+    // `start` obeys is what makes the control work from the page it is drawn on.
+    if (isLatched('socket-disabled')) {
       return;
     }
 
@@ -146,9 +167,26 @@ export const useConnectionStore = defineStore('connection', () => {
   }
 
   function stop(): void {
+    lastOptions = undefined;
     generation += 1;
     teardown();
   }
+
+  /**
+   * Both §18 latches change what `start` would have built, so flipping one re-runs it against the
+   * screen that is up. Without this the operator would have to leave `/pos` and come back for a
+   * switch thrown on `/debug` to take effect, which is a control that appears not to work.
+   *
+   * `stop()` clears `lastOptions`, so a latch thrown with no screen mounted rebuilds nothing.
+   */
+  watch(
+    () => [latchStates.value['socket-disabled'], latchStates.value['polling-forced']],
+    () => {
+      if (lastOptions !== undefined) {
+        void start(lastOptions);
+      }
+    },
+  );
 
   return { online, socketState, transport, pushEnabled, lastVerdict, start, resubscribe, stop };
 });
