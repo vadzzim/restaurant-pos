@@ -16,39 +16,39 @@ no `fetch`/`caches`/DOM, and maps a request to `shell` / `asset` / `menu` / `pas
 as if no worker existed. Non-`GET` is decided first, **`navigate` last**: a tab pointed at
 `/api/health/ready` is a navigation too, and calling it `shell` writes that JSON under the shell's
 key. `GET /api/menu` is the only cached API response; `GET /api/orders/:id` never is — a stale
-snapshot does not look like an error, it looks like the server's truth. `cache-policy.test.ts`
-walks every endpoint in `src/api/client.ts`.
+snapshot looks like the server's truth, not an error. `cache-policy.test.ts` walks every endpoint
+in `src/api/client.ts`.
 
-**`install` precaches the bundle, and this is the trap.** Runtime caching cannot cover it: the load
-that registers the worker fetched the script **before** the worker existed, and `clients.claim()`
-does not replay it — so a first visit plus an offline reload got a cached `index.html` whose script
-missed. `install` now reads the asset list **out of the document it just fetched**
-(`shellAssetUrls`, every hit re-checked through `classifyRequest`): no build-time manifest to go
-stale, and the list can never be wider than the policy. **The same shape still bites `/api/menu`** —
-first in the backlog.
+**`install` precaches, and this is the trap.** Runtime caching cannot cover the bundle: the load
+that registers the worker fetched it **before** the worker existed, and `clients.claim()` does not
+replay it, so a first visit plus an offline reload got a cached `index.html` whose script missed.
+`install` reads the asset list **out of the document it just fetched** (`shellAssetUrls`, every hit
+re-checked through `classifyRequest`): no build-time manifest to go stale, and the list can never
+be wider than the policy. **`/api/menu` lost the same race and is precached too**, best-effort, so
+a down API cannot fail the install.
 
 **Registration is `import.meta.env.PROD`-only** — a worker in dev makes HMR lie — and updates are
 `skipWaiting` + `clientsClaim` + one guarded reload. Safe only while `router.ts` imports its views
 statically; ADR 017 names that as the condition to revisit.
 
-**Built by a nested Vite build into one classic `iife` at `/sw.js`, and compiled by its own
-`tsconfig.sw.json`** — `WebWorker` and `DOM` cannot share a `lib`. Why, in ADR 017's Consequences.
+**Built by a nested Vite build into one classic `iife` at `/sw.js`, compiled by its own
+`tsconfig.sw.json`** — `WebWorker` and `DOM` cannot share a `lib`. Why: ADR 017, Consequences.
 
-**The hands-on check was done, in a real Chrome driven over CDP, offline by killing the server
-rather than by DevTools throttling** — and it found a P1 no unit test could: `Vary: Origin` made
-the precached bundle invisible. `Cache.match` compares the *stored* request's headers, the precache
-fetch has no `Origin`, and `<script crossorigin>` sends one — so the shell loaded and its script
-did not. **Every cache read now passes `{ ignoreVary: true }`; do not remove it.** The fake
-`CacheStorage` models `Vary` now, so it is a test. Confirmed after: shell, CSS, JS, manifest and
-icons all `fromServiceWorker`, the order on screen through an ordinary reload, a fresh navigation
-and a hard reload, and the queue draining on restart.
+**The hands-on check was done, in a real Chrome over CDP, offline by killing the server rather than
+by DevTools throttling** — and it found a P1 no unit test could: `Vary: Origin` made the precached
+bundle invisible. `Cache.match` compares the *stored* request's headers, the precache fetch has no
+`Origin`, and `<script crossorigin>` sends one — so the shell loaded and its script did not.
+**Every cache read now passes `{ ignoreVary: true }`; do not remove it.** The fake `CacheStorage`
+models `Vary` now, so it is a test. Confirmed after: shell, CSS, JS, menu, manifest and icons all
+`fromServiceWorker`, the order and all eleven products on screen through an ordinary reload, a fresh
+navigation and a hard reload alike, and the queue draining on restart.
 
-**Green:** typecheck (two projects for web now), lint, build, **447 tests** (61 domain, 96 api,
-55 worker, **247 web**). `verify:*` not re-run: nothing outside `apps/web` changed.
+**Green:** typecheck (two projects for web), lint, build, **450 tests** (61 domain, 96 api,
+55 worker, **250 web**). `verify:*` not re-run: nothing outside `apps/web` changed.
 
-**Three P1s, none from my own pass:** Codex found the precache (plus a navigate-ordering bug), and
-the browser found `Vary` and an uncaught `update()` rejection. All fixed. Codex's third finding (the
-menu revalidation is not held by `event.waitUntil`) is in the backlog.
+**Three P1s, none from my own pass:** Codex found the precache (plus a navigate-ordering bug), the
+browser found `Vary` and an uncaught `update()` rejection. All fixed. Codex's third (the menu
+revalidation is not held by `event.waitUntil`) is in the backlog.
 
 **Next:** M18 — Playwright E2E. **Sonnet**, size **M**.
 
@@ -83,7 +83,7 @@ ADRs are canon; history in `progress-archive.md`. What is not in one:
 
 ## Known problems
 
-`docs/known-problems.md`: limits, then the P2/P3 backlog — **twenty-five** entries, five from M17.
+`docs/known-problems.md`: limits, then the P2/P3 backlog — **twenty-four** entries, four from M17.
 **Badly overdue for its sweep**; if M18 lands early, sweep it. Not a session opener.
 
 ## First command of the next session
@@ -111,14 +111,14 @@ Six things worth knowing before you plan:
 4. **Terminal ids and the seed are fixed** — `POS-1`, `POS-2`, `BAR-1`, `POS-3`, 11 products.
    `TERMINALS` in contracts is the source; never hard-code a product name a reseed changes.
 5. **The §18 simulator arms are tab-local** (ADR 015), so a Playwright context starts clean. The
-   four server-side ones do not — a paused publisher survives, and looks like "Kafka is broken".
+   four server-side ones do not — a paused publisher survives and looks like "Kafka is broken".
 6. **`onBeforeUnmount` detaches, it does not clear** (M16). A test that leaves a POS screen and
-   comes back must expect the order to still be there.
+   returns must expect the order to still be there.
 
 Verification: `pnpm test:e2e` locally and the same job in `ci.yml`. Then lint, typecheck, build and
 `pnpm -F @pos/web test`. One review pass, P1s only.
 
-Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, and either `pnpm dev` (:5173) or
+Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, and `pnpm dev` (:5173) or
 `pnpm -F @pos/web build && pnpm -F @pos/web preview` (:4173). Postgres, Redis and Redpanda were up
 and the API answering `/api/health/ready` at the end of M17.
 ```

@@ -34,6 +34,12 @@ const SHELL_ASSET_PATHS = new Set(['/manifest.webmanifest', '/favicon.ico']);
 const ASSET_PREFIXES = ['/assets/', '/icons/'];
 
 /**
+ * The one API response on the allow-list. Exported because `install` precaches it, and two copies
+ * of this string in two files is exactly the drift the allow-list exists to prevent.
+ */
+export const MENU_PATH = '/api/menu';
+
+/**
  * This is an **allow-list**, not a deny-list, and that is the whole design.
  *
  * A deny-list is one new endpoint away from quietly caching a mutation. Under an allow-list a new
@@ -71,7 +77,7 @@ export function classifyRequest(request: ClassifiableRequest, origin: string): C
   // Cross-origin is somebody else's cache policy.
   if (url.origin !== origin) return 'passthrough';
 
-  if (url.pathname === '/api/menu') return 'menu';
+  if (url.pathname === MENU_PATH) return 'menu';
 
   // No `/api` or `/socket.io` response is cacheable beyond the line above, and saying so before
   // the asset check means a future `/api/assets/...` cannot fall through into it.

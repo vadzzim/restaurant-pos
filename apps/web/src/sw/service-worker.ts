@@ -14,7 +14,7 @@
  * script, so it has no `import` at runtime and needs no `{ type: 'module' }` registration.
  */
 
-import { classifyRequest, shellAssetUrls } from './cache-policy';
+import { classifyRequest, MENU_PATH, shellAssetUrls } from './cache-policy';
 
 // Injected by the build plugin: one cache name per build, so `activate` can drop everything that
 // is not this build's.
@@ -99,7 +99,7 @@ sw.addEventListener('fetch', (event) => {
 });
 
 /**
- * The document, plus the assets the document names.
+ * The document, the assets the document names, and the menu.
  *
  * The bundle has to be precached here and cannot be picked up as it is fetched, because the page
  * load that installs this worker fetched it **before** the worker existed and `clients.claim()`
@@ -109,9 +109,14 @@ sw.addEventListener('fetch', (event) => {
  * Still not a build-time manifest: the list is read out of the document that was just fetched, so
  * nothing has to be threaded through the build and there is no generated file to go stale.
  *
- * The assets are best-effort. Only the document is allowed to fail the installation, because
- * without it there is no shell at all; a single asset that 404s must not leave the worker stuck
- * `installing` forever.
+ * `/api/menu` is precached for exactly the same reason and is not an exception to "the worker owns
+ * the shell, never data": it is the one API response on the allow-list, it is the seeded product
+ * list rather than anything a terminal owns, and without it an offline reload draws an order with
+ * no product grid to add to. It is *not* the order — that is Dexie's, and stays Dexie's.
+ *
+ * Everything but the document is best-effort. Only a missing document may fail the installation,
+ * because without it there is no shell at all; one asset that 404s, or an API that is down while
+ * the static server is up, must not leave the worker stuck `installing` forever.
  */
 async function precacheShell(): Promise<void> {
   const cache = await openCache();
@@ -124,7 +129,10 @@ async function precacheShell(): Promise<void> {
   const html = await document.clone().text();
   await cache.put(SHELL_KEY, document);
 
-  await Promise.allSettled(shellAssetUrls(html, sw.location.origin).map((url) => cache.add(url)));
+  await Promise.allSettled([
+    ...shellAssetUrls(html, sw.location.origin).map((url) => cache.add(url)),
+    cache.add(MENU_PATH),
+  ]);
 }
 
 /** Navigations: the network's answer when there is one, the last good document when there is not. */

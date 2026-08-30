@@ -1926,3 +1926,16 @@ the manifest and the icon.
 
 One gap stays and is in the backlog: `/api/menu` is fetched by the uncontrolled first load, so the
 product grid is empty after an offline reload until the app has been loaded once more. 247 web tests.
+
+**Then `/api/menu`, which lost the same race.** The product grid was empty after an offline reload
+for exactly the reason the bundle was: the first page load fetches the menu before the worker
+controls anything, so runtime caching never sees it. `precacheShell()` now adds it beside the
+document's assets, and `MENU_PATH` is exported from `cache-policy.ts` so the path is not written
+twice. It is not a hole in "the worker owns the shell, never data": it is the one API response on
+the allow-list, it is the seeded product list rather than anything a terminal owns, and the order
+stays Dexie's. Best-effort like the assets, so an API that is down while the static server is up
+cannot leave the worker stuck `installing` — that case is a test.
+
+Confirmed in Chrome with the server killed: the cache holds `/api/menu`, the offline reload serves
+it `fromServiceWorker`, and the reloaded page draws all eleven products beside the surviving order.
+250 web tests.

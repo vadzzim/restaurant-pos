@@ -15,13 +15,6 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
-- **[M17, P2]** After an offline reload the **product grid is empty**: `/api/menu` is fetched by
-  the first page load, which happens before the worker controls the page, so it never enters the
-  cache — the same shape as the precache P1, but for the one allowed API response. A second online
-  load fixes it for that browser. The order, the queue and the shell are all fine; only adding a
-  _new_ item offline-after-reload is blocked. Fix: precache `/api/menu` in `precacheShell()`
-  alongside the document's assets. Proved by an offline reload on a first-ever visit showing the
-  eleven products.
 - **[M17, P2]** `activate` deletes the previous build's cache while a page running the old bundle is
   still open. Harmless today because `router.ts` imports all four views statically, so there are no
   lazily fetched chunks — but the day code splitting is introduced, that page can ask for a chunk no

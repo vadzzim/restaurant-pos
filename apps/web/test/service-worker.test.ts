@@ -190,8 +190,32 @@ describe('the service worker', () => {
     expect(await cache?.match(get('/assets/index-abc123.js'))).toBeDefined();
   });
 
-  it('installs even when an asset the document names cannot be fetched', async () => {
-    network.set('/assets/index-abc123.js', null);
+  /**
+   * `/api/menu` loses the same race as the bundle: the first page load fetches it before the worker
+   * controls anything, so runtime caching never sees it and an offline reload draws an order with
+   * no product grid to add to.
+   */
+  it('precaches the menu, the one API response on the allow-list', async () => {
+    await dispatch('install');
+
+    const cached = await cacheStore.get('pos-shell-build-2')?.match(get('/api/menu'));
+    expect(await cached?.text()).toBe('[{"id":"p-1"}]');
+  });
+
+  it('serves the menu from the cache on a first offline load', async () => {
+    await dispatch('install');
+    network.set('/api/menu', null);
+
+    const response = await dispatch('fetch', get('/api/menu'));
+
+    expect(await (response as Response).text()).toBe('[{"id":"p-1"}]');
+  });
+
+  it.each([
+    ['an asset the document names', '/assets/index-abc123.js'],
+    ['the menu, when the API is down but the static server is up', '/api/menu'],
+  ])('installs even when %s cannot be fetched', async (_label, path) => {
+    network.set(path, null);
 
     await expect(dispatch('install')).resolves.toBe('passthrough');
     expect(await cacheStore.get('pos-shell-build-2')?.match('/index.html')).toBeDefined();
