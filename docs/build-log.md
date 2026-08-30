@@ -2064,3 +2064,48 @@ asymmetry is the lesson, not the score: read the argument, then check the mechan
 
 Green: `pnpm test:e2e` PASS, lint, typecheck (three projects now — `tsconfig.e2e.json` exists
 because Playwright resolves like a bundler), build, 251 web tests.
+
+## M19 — Documentation and the finale
+
+The last milestone, and the only one that wrote no source. §23 asks for four documents;
+`docs/architecture.md`, `docs/interview-guide.md` and the README were the brief, and
+`docs/definition-of-done.md` was added because §26 wanted a walk and a walk buried inside the
+interview guide would have been a claim rather than an audit.
+
+**The whole method was to link, not to re-derive.** Every answer §23 asks for had already been
+argued once — in an ADR, in this file, or beside the code — and re-deriving it in prose would have
+cost the budget and produced a second, drifting version of the argument. So the reading was
+`awk '/^## Context/,/^## Consequences/'` over ADRs 001–018 and the two halves of
+`known-problems.md`, and the writing is a map with pointers. The weaknesses section in particular
+invents nothing: it chooses ten from the twenty-eight backlog entries and the accepted limits, and
+frames them.
+
+**Three §26 clauses do not pass, and saying so is the deliverable.** Clause 18 — _CI is green on a
+clean checkout_ — is **not met**: `.github/workflows/ci.yml` is complete and its command list is
+exactly what ran green locally, but the repository has **no git remote**, so the workflow has never
+executed. Calling that green would be the kind of claim `definition-of-done.md` exists to refuse.
+Clause 2 is partial (no UI path puts a second terminal on an existing order). Clause 17 carries the
+gap that was already known and is now stated at the top of a document rather than at the bottom of a
+backlog: §21.1 and §21.10 assert invariants, they do not force the interleaving.
+
+**Two README lines were stale by seventeen milestones.** _"M1 contains only the runnable monorepo"_,
+and _"the §18 failure simulator gets its buttons in M12"_ — both fixed, along with the missing demo
+sequence and §23's _Engineering concepts demonstrated_.
+
+**The review pass was a factual audit of my own citations, and it found two wrong ones.** Clause 2
+credited `hydration.test.ts` with a per-terminal test that lives in `order-store-behaviour.test.ts`,
+and clause 4 credited `persistence.test.ts` with the reload-survival test that is in
+`hydration.test.ts`. Both were written from the file names rather than from the `describe` titles,
+which is exactly the failure mode a document full of pointers has. Fixed by grepping every citation
+back to its test. Nothing else in the four documents cites a file it did not open.
+
+Prettier rejected the two long documents on first write: it normalises `*emphasis*` to `_emphasis_`
+and reflows at 100 columns, and its reflow broke an inline SQL span across a list item. Rewritten to
+avoid the long span rather than fought with.
+
+One P3 to `known-problems.md`: `verify:integration` emits two `TimeoutNegativeWarning` lines from a
+dependency in the worker's Kafka/BullMQ path. Traced far enough to rule out our own deadline
+arithmetic — `sendWithinLease` clamps, `settleWithin`'s callers pass constants — and left.
+
+Green: lint, typecheck (three projects), `pnpm test` **463 passed**, build, and
+`pnpm verify:integration` **PASS**. The hand smoke of §19.1 is the user's, per CLAUDE.md rule 3.

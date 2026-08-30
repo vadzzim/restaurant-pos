@@ -15,6 +15,13 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M19, P3]** `pnpm verify:integration` prints two `TimeoutNegativeWarning` lines from the worker's
+  integration run — a timer scheduled from what looks like `deadline - Date.now()` against a zero
+  deadline, so the wait collapses to 1 ms. Not ours: the only deadline arithmetic in
+  `apps/worker/src` is `sendWithinLease`, which clamps with `Math.max(remainingMs, 0)`, and
+  `settleWithin`'s two callers both pass configured constants. It comes from a dependency in the
+  Kafka or BullMQ path. Harmless — the run is PASS — and noted so it is not re-discovered. Proved by
+  `--trace-warnings` on `pnpm --filter @pos/worker run test:integration`.
 - **[M18, P3]** The two `getByText('WS CONNECTED')` socket assertions match by substring, which is a
   looser contract than they mean: `WS DISCONNECTED` does not match (checked), but a future label such
   as `WS CONNECTED (degraded)` would. `{ exact: true }` or `/^WS CONNECTED$/`. Raised by Codex as a

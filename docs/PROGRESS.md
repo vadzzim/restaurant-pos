@@ -6,56 +6,47 @@
 
 ## Current state
 
-**Last completed:** M18 — Playwright E2E. §21's last line: one spec crossing **every** process —
-POS-1 opens an order, adds an item, sends it; the kitchen shows the ticket, marks it PREPARING, and
-the POS follows without asking for anything. **ADR 018.**
+**The project is finished.** M0 through M19, twenty milestones, one commit each, nothing cut
+(ADR 001, 007). M19 was §23's documentation and §26's walk.
 
-**`pnpm test:e2e` owns the lifecycle; Playwright owns the bundle's server.** `scripts/verify-e2e.mjs`
-reuses `lib/compose-run.mjs` — Chromium, up, migrate, seed, build, teardown of only what it started —
-and runs the API and the worker as long-lived `node dist/index.js` children. `webServer` serves
-`dist/` on **:4173 via `preview`, never `dev`**: since M17 those are different builds and only one has
-the service worker. `test:e2e:run` is the spec alone, against a stack already up.
+**Four documents, and the method behind them matters more than their length.** Every answer §23
+asks for was already argued once — in an ADR, in `build-log.md`, or beside the code — so the
+documents **link** rather than re-derive. Anything that reopens one of these should do the same.
 
-**The runner learned to hold processes open**: `startService`, `waitForOutput`, `waitForHttp`,
-`crashedServices`. Children are spawned **without `shell: true`** — on Windows a shell wrapper means
-`kill` reaps the wrapper and leaves the real process on the port — and stop in `finish()` before the
-Compose teardown, **even under `--keep`**.
+- `docs/architecture.md` — three Mermaid diagrams (system; offline sync **including the
+  blocked-queue branch**; the outbox, HTTP → transaction → outbox → commit → worker → Kafka →
+  consumer), then the §23 scale section split into *already true here* and *would have to be built*.
+- `docs/interview-guide.md` — the 5-minute pitch, a 15-minute code walkthrough with file and line
+  pointers, a table over all ten §19 scenarios, answers to all **eighteen** questions §23 names, and
+  ten weaknesses **chosen from `known-problems.md`, not invented**.
+- `docs/definition-of-done.md` — §26 clause by clause, each labelled *proved* / *argued* / *partial*
+  with the test or command behind it. New, and not in §23's list: §26 asked for a walk, and a walk
+  buried inside the interview guide would have been a claim rather than an audit.
+- `README.md` — two lines were stale by seventeen milestones (*"M1 contains only the runnable
+  monorepo"*, *"the simulator gets its buttons in M12"*), plus the demo sequence and §23's
+  *Engineering concepts demonstrated*.
 
-**An API already answering on :3000 is reused, not duplicated.** The first run reported FAIL with the
-spec passing: `EADDRINUSE`, the child lost the bind, and the spec ran against the incumbent. Hence
-`crashedServices()` rather than trusting Playwright's exit code. A reused API may run code the run
-did not build — P2.
+**Three §26 clauses do not fully pass, and that is recorded rather than papered over.** Clause 18,
+*CI is green on a clean checkout*, is **not met**: `ci.yml` is complete and its command list is what
+ran green locally, but **this repository has no git remote**, so the workflow has never executed.
+Clause 2 is partial — no UI path puts a second terminal on an existing order. Clause 17 carries the
+known gap: §21.1 and §21.10 assert invariants, they do not force the interleaving.
 
-**The Kafka group join is setup, not an assertion's budget.** `child.kill()` on Windows is a
-terminate, so the worker never sends `LeaveGroup`; the group holds a dead member for its session
-timeout, and **while a rebalance is in flight nobody consumes**. Joins escalated 14.8 s → 28.5 s →
-never, and a run failed. The script now waits for the worker's `broker connected` and — when it
-started the API — the API's `realtime consumer running`, on `GROUP_JOIN_TIMEOUT_MS = 120_000`. The
-spec went from 25.2 s to 3 s. **Do not fold that back into `PIPELINE_TIMEOUT_MS`.**
+**The review pass audited my own citations and found two wrong**, both written from file names
+rather than from `describe` titles. Every citation in the four documents was then grepped back to
+its test. That is the failure mode a document made of pointers has, and it is worth knowing about.
 
-**No test hooks in the production markup** — roles, labels and text only; the product name comes out
-of a tile's `aria-label`. **No database reset**: the cover is unique per run. The §18 arms and
-`realtime.websocket_push` are reset in the spec's `beforeEach`, so `test:e2e:run` is covered too.
-
-**Green:** `pnpm test:e2e` PASS (spec 2.9 s), lint, typecheck (**three** projects now —
-`tsconfig.e2e.json`, because Playwright resolves like a bundler), build, 451 tests unchanged.
-
-**Three P1s, and the two that mattered were Codex's.** Mine: a throw bypassed `runner.finish` and
-would orphan a worker. Codex's first: `pnpm install` never installs Chromium, so the verifying
-command failed on a fresh checkout. Codex's second is the one to remember — **`openPos` waited for a
-menu tile, which is ready before the socket is**, and `onConnected` refetches the snapshot, so a late
-socket satisfied the final assertion with a plain re-read and the broadcast leg could have been dead.
-Both pages now wait for `WS CONNECTED`, which also asserts this runs on the socket and not §15's
-fallback. A third Codex round raised one more P1 against those very assertions; it was measured and
-demoted to P3. **Nothing left open.**
-
-**Next:** M19 — documentation and the finale. Opus, **L**. The last one.
+**Green:** lint, typecheck (three projects), `pnpm test` **463 passed**, build,
+`pnpm verify:integration` **PASS**. The hand smoke of §19.1 is the user's (CLAUDE.md rule 3).
 
 ## What exists
 
 One line per unit; detail lives in the code and the ADRs.
 
-- **Docs** — what CLAUDE.md lists, plus `milestones/M01…M18.md`. **ADRs 001–018.**
+- **Docs** — `architecture.md`, `interview-guide.md`, `definition-of-done.md`, `spec.md`,
+  `MILESTONES.md`, `known-problems.md`, `build-log.md`, `progress-archive.md`,
+  `milestones/M01…M19.md`. **ADRs 001–018**, indexed by `docs/adr/README.md` — the real index;
+  `spec.md` §23 names filenames that drifted.
 - `packages/` — `config` zod env (all defaulted); `contracts` the §5 shapes plus `TERMINALS` and
   `BAR_MENU`; `domain` `decide()`, **the whole of §8**; `db` fifteen tables, three migrations, seed
   (11 products), `@pos/db/testing`.
@@ -75,48 +66,39 @@ One line per unit; detail lives in the code and the ADRs.
 
 ADRs are canon; history in `progress-archive.md`. What is not in one:
 
-- Full scope, nothing cut (ADR 001, 007). **One left: M19.** It may not be dropped.
+- Full scope, nothing cut (ADR 001, 007). **All twenty milestones ran.**
 - **`BAR_MENU` is in contracts, not a `products.category` column.** Argued beside the constant.
 - **Leaving a POS route detaches, not clears.** M16. Do not put `clear()` back.
 - **The icons are generated** — `apps/web/scripts/make-icons.mjs`, by hand, not by the build.
+- **The documents link to the argument; they do not restate it.** Anything added to `docs/` should
+  cite an ADR or a test rather than re-explaining a mechanism.
 
 ## Known problems
 
-`docs/known-problems.md`: limits, then the P2/P3 backlog — **twenty-eight** entries, five from M18.
-**Long overdue for its sweep**, but M19 is an L: sweep only what §26 forces.
+`docs/known-problems.md`: the accepted limits, then the P2/P3 backlog — **twenty-nine** entries, one
+new in M19. **Never swept**: the sweep was due every three or four milestones and was deferred each
+time in favour of scope, which is itself a fact worth stating out loud in the interview.
 
-## First command of the next session
+## If a session does follow
 
-```
-Read CLAUDE.md and docs/PROGRESS.md, then expand M19 from docs/MILESTONES.md into
-docs/milestones/M19.md and implement M19 only. It is the last milestone.
+There is no next milestone. Four things are worth doing, in this order, and none of them is large:
 
-M19 is §23 documentation plus the finale: docs/architecture.md with Mermaid (system diagram, the
-offline-sync sequence *including the blocked-queue branch*, the outbox sequence); the whole of
-docs/interview-guide.md — 5-minute pitch, 15-minute walkthrough, the §19 demo script for all ten
-scenarios, honest answers to every question §23 lists, the weaknesses section; the scale section;
-the README. Then walk §26's Definition of done point by point, honestly.
-Verification: §26 walked, plus lint, typecheck, test, build, verify:integration and a hand smoke.
+1. **Push to a remote and read the CI run.** That is §26 clause 18, and it is the only clause that
+   is unmet rather than partial. Nothing in `ci.yml` is known to be wrong; it is unexecuted.
+2. **Sweep the backlog.** Twenty-nine entries in `known-problems.md`, each written as one line with
+   what would prove it, precisely so a single context can take ten at once. The strongest candidates
+   are the two M15 P2s (same-millisecond queue ordering; the storage-less `settle()` path) and the
+   M16 P2 (`conflict_log.resolution` is never written, so `/debug`'s conflict history never shows a
+   resolved row).
+3. **Force a real interleaving in §21.1 and §21.10.** The honest gap named in
+   `definition-of-done.md` clause 17 and in the interview guide's weakness 2 — advisory-lock
+   choreography or a fault-injecting proxy. Closing it would upgrade the single weakest claim in the
+   project.
+4. **Read `docs/definition-of-done.md` before claiming anything is done.** It is the map of what is
+   proved, what is argued, and what is neither.
 
-Six things worth knowing before you plan:
-
-1. **This is a writing milestone with a large read surface, and the budget is the risk.** Every
-   answer §23 asks for is already argued in an ADR or in build-log.md. `grep` for the argument and
-   *link*; do not re-derive and do not restate. ADRs 001-018 are canon.
-2. **The weaknesses section is not a formality — the honest material already exists.** It is
-   `docs/known-problems.md`: the accepted limits, then twenty-seven P2/P3 entries. That file is the
-   source; the guide's job is to choose and frame, not to invent.
-3. **README says "M1 contains only the runnable monorepo".** Wrong for seventeen milestones. Fix
-   the top of that file, and add §23's "Engineering concepts demonstrated".
-4. **Nothing in §26 is aspirational — check each clause against a test or a command**, and where
-   one is only argued rather than tested, say so. `known-problems.md` already admits that the two
-   concurrency tests assert invariants rather than forcing the interleaving.
-5. **Do not run `docker compose` by hand** (CLAUDE.md rule 3). `verify:integration`, `test:e2e` and
-   `verify:multi` each own their lifecycle and write to `.verify-output/*.log`; read the tail.
-6. **`spec.md` §23 lists ADR filenames that drifted** — `006-kafka-at-least-once` is
-   `006-realtime-consumer.md`. `docs/adr/README.md` is the real index; trust it.
-
-Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, and `pnpm dev` (:5173) or
-`pnpm -F @pos/web build && pnpm -F @pos/web preview` (:4173). Postgres, Redis and Redpanda were up,
-and an API and a worker were running on :3000, at the end of M18.
-```
+**Do not** re-argue an ADR without a new one, do not run `docker compose` by hand (rule 3 — the
+three `verify:*` commands own their lifecycles and write `.verify-output/*.log`), and do not restate
+in a document what a test already says. Running it: `pnpm -F @pos/api start`,
+`pnpm -F @pos/worker dev`, and `pnpm dev` (:5173) or `pnpm -F @pos/web build && pnpm -F @pos/web
+preview` (:4173).

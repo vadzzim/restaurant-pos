@@ -1,7 +1,24 @@
 # Restaurant POS Distributed Systems Demo
 
-An interview demo for a restaurant point-of-sale flow. M1 contains only the runnable monorepo and
-local infrastructure skeleton; business behavior arrives in later milestones.
+A restaurant point-of-sale where several terminals edit the same order and the network is not
+reliable. It is an interview demo, not a commercial product, and it exists to show two things
+working properly rather than many things working shallowly:
+
+- **A terminal may be offline when it decides something.** Every action is a mutation with a
+  client-generated id and the version it was built against, queued durably in IndexedDB and drained
+  sequentially on reconnect. A conflict **halts** that order's queue and waits for an operator.
+- **A database commit and a broker publish cannot be one transaction.** The order change, the
+  idempotency record and the domain event commit together into an outbox table; a worker publishes
+  from it, outside any transaction, with retries and dead-lettering in PostgreSQL.
+
+Three processes — `web`, `api`, `worker` — over PostgreSQL, Redpanda and Redis.
+
+**Documentation.** [`docs/architecture.md`](docs/architecture.md) has the diagrams and the scale
+section; [`docs/interview-guide.md`](docs/interview-guide.md) has the pitch, a code walkthrough, the
+demo script and the answers; [`docs/adr/`](docs/adr/README.md) has the eighteen decisions;
+[`docs/known-problems.md`](docs/known-problems.md) has what is wrong with it; and
+[`docs/definition-of-done.md`](docs/definition-of-done.md) walks the acceptance criteria clause by
+clause, including the three that are not met.
 
 ## Requirements
 
@@ -65,10 +82,37 @@ Two things look wrong in a two-replica run and are not: `activeWebSocketConnecti
 that instance's own sockets, and so is the in-process counter registry, so the page reports
 whichever replica answered. The shared counters in Redis are the ones that aggregate.
 
+## The demo
+
+Open **http://localhost:5173/demo**. It carries all ten §19 scenarios click by click — what has to
+be off before each one, what to press, and what to watch. The short version, in the order worth
+showing:
+
+1. **Normal flow** — one order from the first tap to payment, across a till and a kitchen display.
+   The till never calls the kitchen: the ticket arrives through Postgres, the outbox, Redpanda and
+   the consumer's projection.
+2. **Offline, then a clean sync** — a till with no network **creates** an order and takes four
+   mutations; reconnect drains them in order and the pending count reaches zero.
+3. **Conflict, and the queue behind it** — the first mutation gets a 409, the rest go `BLOCKED` and
+   are never sent, and the operator chooses Discard or Rebase. The one most systems get wrong.
+4. **The publisher stops; the order does not** — pause the outbox publisher, take an order, watch
+   the backlog grow on `/debug`, resume, watch it drain. The argument for the outbox, made visible.
+5. **The printer is down** — retries with backoff, a visible dead-letter, a manual retry that
+   succeeds. The order was never affected.
+
+The remaining five — a duplicate mutation, a reused id with a new payload, a duplicated Kafka event,
+two kitchen displays racing on one ticket, and a cross-replica broadcast — are on the same page.
+The last needs `pnpm verify:multi --keep`.
+
+Two setup traps. The seven client-side simulator controls are module refs in **one tab**: arm on
+`/debug` and walk to the POS in that same window, never a second tab. And a control left armed will
+fail the next scenario the way a broken broker would — `/demo` lists what must be off before each.
+
 ## Operational switches
 
-The §18 failure simulator gets its buttons in M12. Until then the switches it will drive are real
-and reachable from a terminal, and a running worker picks them up without a restart:
+All eleven §18 simulator controls are on `/debug`, grouped by where the switch lives (ADR 015). The
+four server-side ones are rows in PostgreSQL, so they are also reachable from a terminal, and a
+running worker picks a change up without a restart — the CLI and the page drive the same state:
 
 ```bash
 pnpm -F @pos/worker outbox status | pause | resume | delay 3000
@@ -80,8 +124,10 @@ print job into its dead-letter state; `printer retry` puts a dead-lettered ticke
 
 ## URLs
 
-- POS: http://localhost:5173/pos/pos-1
+- POS: http://localhost:5173/pos/pos-1 and http://localhost:5173/pos/pos-2
 - Kitchen: http://localhost:5173/kitchen
+- Debug and the §18 simulator: http://localhost:5173/debug
+- Demo script: http://localhost:5173/demo
 - API liveness: http://localhost:3000/api/health/live
 - API readiness: http://localhost:3000/api/health/ready — PostgreSQL only; a broker outage leaves
   this green and orders still accepted (ADR 011)
@@ -97,3 +143,26 @@ runs `tsx`; `docker-compose.multi.yml` is the opposite — the built images, no 
 different service names for that reason and can be told apart at a glance. Local `pnpm dev` is the
 supported workflow; do not run the `app` profile alongside host-side `pnpm dev` in the same
 checkout.
+
+## Engineering concepts demonstrated by this project
+
+Each of these is a decision with a written argument behind it, not a library import.
+
+| Concept                                           | Where it lives                                                                                                                                         | Where it is argued      |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
+| Optimistic concurrency                            | `UPDATE ... WHERE id = $1 AND version = $2` — the comparison in the statement, never "read, compare, write"                                            | ADR 003                 |
+| Idempotency at the write boundary                 | `processed_mutations(mutationId)` plus a `request_hash`, committed with the effect; a reused id with new content is refused, never answered from cache | ADR 004                 |
+| Explicit conflict resolution                      | a 409 halts that order's queue, blocks the tail, and waits for Discard or Rebase — no silent auto-rebase                                               | ADR 002, spec §14.1     |
+| Transactional outbox                              | order change, idempotency row and event in one commit; publish outside any transaction                                                                 | ADR 005                 |
+| At-least-once with idempotent consumers           | `processed_events(event_id, consumer_name)`; the kitchen consumer commits its marker with the projection                                               | ADR 009                 |
+| Honest delivery semantics                         | the realtime consumer's crash window is stated, and a duplicate ticket can physically print                                                            | spec §12.2, ADR 014     |
+| Retry, backoff and dead-lettering in the database | columns on the outbox row; a reclaim is not an attempt                                                                                                 | ADR 010                 |
+| Event ordering where it matters                   | topic partitioned by `orderId`; the publisher claims an order's earliest unpublished event                                                             | ADR 005                 |
+| Offline-first clients                             | a durable queue in IndexedDB, an optimistic view derived on read, a service worker for the shell                                                       | ADR 002, 013, 017       |
+| Graded health and degradation                     | liveness, readiness on hard dependencies only, and a three-state dependency report                                                                     | ADR 011                 |
+| Feature flags as a real rollout                   | percentage-rolled per restaurant, gating **transport** — two complete implementations, not an off switch                                               | ADR 008                 |
+| Horizontal scale-out of a stateful protocol       | Socket.IO over the Redis adapter, two replicas, asserted end to end                                                                                    | ADR 006, `verify:multi` |
+| A read model that is genuinely a read model       | the kitchen screen reads the projection, and commands from it                                                                                          | ADR 009, 012            |
+| Effects outside the database                      | the print job — BullMQ owns _when_, the row owns _what happened_, a sweep reconciles from the projection                                               | ADR 014                 |
+| Tenant scoping as a consistency guard             | `restaurantId` on every table; a cross-tenant mutation is a 403                                                                                        | spec §3                 |
+| Reproducible verification                         | one command per surface, each owning its own Compose lifecycle and writing a log                                                                       | `scripts/verify-*.mjs`  |
