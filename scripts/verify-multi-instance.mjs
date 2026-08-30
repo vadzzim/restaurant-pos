@@ -21,6 +21,15 @@ const SERVICES = ['postgres', 'redis', 'redpanda', 'api-1', 'api-2', 'worker-pro
 
 const BUILT = ['api-1', 'api-2', 'worker-prod', 'web-prod'];
 
+/**
+ * The stack's own database, seen from the host: `docker-compose.multi.yml` hard-codes
+ * `postgres:5432` for the replicas, and `postgres` publishes 5432. The migration below has to name
+ * it rather than inherit `DATABASE_URL`, or a shell — or a `.env` — pointing somewhere else would
+ * migrate that database instead and then leave the replicas starting against an empty schema.
+ * Found by the Codex review of M14.
+ */
+const STACK_DATABASE_URL = 'postgresql://pos:pos@localhost:5432/pos';
+
 const runner = createRunner({
   logName: 'multi-instance.log',
   services: SERVICES,
@@ -52,9 +61,10 @@ async function main() {
     return runner.finish(infrastructure.code, 'the infrastructure did not become healthy');
   }
 
+  const database = { env: { DATABASE_URL: STACK_DATABASE_URL } };
   const migrated = await runner.runSteps([
-    ['Schema', 'pnpm', ['run', 'db:migrate']],
-    ['Reference data', 'pnpm', ['run', 'db:seed']],
+    ['Schema', 'pnpm', ['run', 'db:migrate'], database],
+    ['Reference data', 'pnpm', ['run', 'db:seed'], database],
   ]);
   if (migrated.code !== 0) {
     return runner.finish(migrated.code, `${migrated.failed} failed`);

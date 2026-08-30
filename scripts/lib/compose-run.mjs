@@ -44,10 +44,17 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
    * without re-running anything. `shell: true` is what makes `pnpm` and `docker` resolve on
    * Windows.
    */
-  function run(command, args, { capture = false } = {}) {
+  function run(command, args, { capture = false, env } = {}) {
     return new Promise((resolve) => {
       write(`\n$ ${command} ${args.join(' ')}\n`);
-      const child = spawn(command, args, { cwd: repoRoot, shell: true });
+      // `env` overrides, it does not replace: the child still needs PATH. What it sets wins over
+      // the repository `.env`, because Node's `--env-file` yields to a variable already in the
+      // environment — which is what lets a step name the database it means.
+      const child = spawn(command, args, {
+        cwd: repoRoot,
+        shell: true,
+        env: env === undefined ? process.env : { ...process.env, ...env },
+      });
       let captured = '';
 
       for (const stream of [child.stdout, child.stderr]) {
@@ -152,11 +159,14 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
     process.exit(exitCode);
   }
 
-  /** Run a list of `[name, command, args]` in order, stopping at the first failure. */
+  /**
+   * Run a list of `[name, command, args, options?]` in order, stopping at the first failure.
+   * The options are `run`'s, so a step can pin its own environment.
+   */
   async function runSteps(steps) {
-    for (const [name, command, args] of steps) {
+    for (const [name, command, args, options] of steps) {
       banner(name);
-      const result = await run(command, args);
+      const result = await run(command, args, options);
       if (result.code !== 0) {
         return { code: result.code, failed: name };
       }

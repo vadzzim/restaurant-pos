@@ -1592,3 +1592,23 @@ and the CI `images` job builds the images without ever starting one.
 is the browser half of the two-replica story: `verify:multi --keep` puts the built app on :8081 in
 front of both replicas, and two tabs landing on different instances and seeing each other's orders
 is a claim only a browser can make. This session did not open one.
+
+### The Codex review of M14
+
+One finding, and a real one.
+
+**[P1, fixed]** `verify-multi-instance.mjs` migrated and seeded whatever `DATABASE_URL` named, while
+`docker-compose.multi.yml` hard-codes `postgres:5432/pos` for the replicas. The two agreed only
+because this machine's `.env` happens to point at the same container. Anywhere else the run would
+have written reference rows into an unrelated database and then failed, because the stack's own
+database would still be unmigrated — a verification that damages one database while reporting a
+failure of another. The schema steps now name `STACK_DATABASE_URL` explicitly; `run()` in
+`compose-run.mjs` grew an `env` override for it, and `runSteps` passes a step's options through.
+
+The override is enough because Node's `--env-file` yields to a variable already in the environment —
+checked, not assumed — so it reaches `db:migrate` past the `--env-file-if-exists=../../.env` in
+`@pos/db`'s own script. Proved by re-running the whole verification with
+`DATABASE_URL=…/pos_wrong_db` in the shell: PASS, and the name never appears in the log.
+
+`verify-integration.mjs` does not have the same defect and was left alone: it starts no application
+containers, so there is no hard-coded address for a host-side one to disagree with.
