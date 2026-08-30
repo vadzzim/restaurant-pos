@@ -1530,3 +1530,65 @@ after the poll's own fail and still expects a running polling transport.
 restoring the pre-toggle rows for one `FLAG_CACHE_TTL_MS`. Real, and the window is narrow enough
 that the cost is one extra poll interval on one demo toggle; written up in `known-problems.md` as
 `[M13, P2]` with a versioned fill named as the fix.
+
+## M14 — Production images and the multi-instance smoke test
+
+### The path the event takes, and why the obvious test would have been a coin flip
+
+§19.10 reads "a mutation on instance A reaches a client connected to instance B", and the obvious
+test is exactly that sentence: POST to A, listen on B. It would have been worthless. Nothing in
+`apps/api` broadcasts from the mutation handler — the only `RealtimeEmitter` producer is
+`modules/realtime/consumer.ts` — so the event travels outbox → worker → Kafka → the realtime
+consumer group → _one_ replica → the Redis adapter → the rest. Both replicas are in that group, so
+which one consumes is not ours to choose, and on the runs where B consumed, B's client would have
+received the event without any cross-instance hop at all. The test would have passed with the
+adapter removed, half the time.
+
+So the test attaches a client to **both** replicas and asserts both receive it. Whichever replica
+consumed, the other one's delivery crossed Redis, and asserting the two sockets saw the same
+`eventId` is what distinguishes one consumption fanned out from two independent consumptions.
+
+### Three things the images taught, all of them at the second attempt
+
+**`ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`.** Switching an existing install to `--prod` makes
+pnpm rebuild the modules directory, and it refuses to remove one unattended unless `CI=true` says it
+is unattended. Two of the three images died on it.
+
+**`localhost` is `::1` in the Node image.** The API bound to `0.0.0.0` was listening, serving and
+healthy, and the healthcheck's busybox `wget http://localhost:3000/...` answered "connection
+refused" because it tried the IPv6 address first. `docker compose up --wait` then reported
+"dependency failed to start" on a working container. The healthchecks name `127.0.0.1`.
+
+**The image is the only correct production build in the repository.** The container's bundle came
+out at 307 kB against the host's 446 kB, 97 modules against 100. The container's was the right one:
+the host bundle still carried Vue's dev warnings and 60 references to the devtools hook.
+`loadEnv()` in `vite.config.ts` is not read-only — a `NODE_ENV` in the files it reads is promoted
+to `process.env.VITE_USER_NODE_ENV`, which is what Vite consults for the build's mode, and the
+repository-root `.env` says `development` for the API's benefit. Every `pnpm build` since M1 has
+emitted a development bundle. One `delete process.env.VITE_USER_NODE_ENV` after the load, and the
+host now builds what the image builds. This is the milestone paying for itself: the defect was
+invisible until something built the app in a place with no `.env`.
+
+### Two runners, one lifecycle
+
+`verify-integration.mjs` and the new `verify-multi-instance.mjs` do the same four things — bring up,
+run steps, tear down only what this run started, write to a file — so that moved into
+`scripts/lib/compose-run.mjs`. The one non-obvious piece is `snapshot()`: the "what was already
+running" reading has to be taken _before_ anything is started, and the multi-instance script starts
+the infrastructure itself (the schema has to exist before a replica's readiness probe runs), so it
+takes the snapshot explicitly rather than leaving it to the first `up()`.
+
+### The review pass
+
+No P1. The three defects this milestone found were found by running it, not by reading it, and all
+three are fixed above. Four P2/P3 went to the backlog: the smoke run writes its two throwaway orders
+into the demo database rather than a test one; nginx resolves the replica names once at startup;
+`worker-prod` has no healthcheck, so `--wait` proves it is running and not that it is publishing;
+and the CI `images` job builds the images without ever starting one.
+
+### What the automated verification cannot cover
+
+365 tests unchanged, plus the three integration checks and the new §19.10 run. What no test settles
+is the browser half of the two-replica story: `verify:multi --keep` puts the built app on :8081 in
+front of both replicas, and two tabs landing on different instances and seeing each other's orders
+is a claim only a browser can make. This session did not open one.

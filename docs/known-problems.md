@@ -15,6 +15,22 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M14, P2]** `pnpm verify:multi` migrates, seeds and then writes to the **demo** database, not to
+  `pos_test`, so every smoke run leaves two throwaway orders on table 19 in `demo-restaurant`.
+  Harmless data, but a demo opened straight after a verification run shows them.
+  `scripts/verify-multi-instance.mjs`. A dedicated database, or a cleanup step, is the fix; running
+  it twice and counting orders proves it.
+- **[M14, P3]** nginx resolves `api-1` and `api-2` once, when it loads its config, so a replica that
+  restarts with a new address is proxied to the old one until nginx is reloaded. `apps/web/nginx.conf`.
+  A `resolver` plus a variable `proxy_pass` is the fix; recreating one replica under
+  `verify:multi --keep` and watching :8081 fail on half its requests proves it.
+- **[M14, P3]** `worker-prod` declares no healthcheck, so `--wait` only proves the container is
+  running, not that the publisher has claimed its lease. The smoke test's warm-up round trip is what
+  actually covers it, which means a worker that started and immediately failed would be reported as
+  a broadcast failure. `docker-compose.multi.yml`.
+- **[M14, P3]** The CI `images` job builds the three images and never runs one, and the base images
+  float on `node:24-alpine` / `nginx-unprivileged:1.29-alpine` rather than digests, so a green build
+  is not a green start. `.github/workflows/ci.yml`.
 - **[M13, P2]** A cache-aside fill can overwrite an invalidation: a request that missed reads the
   flag rows, and if a `POST /api/debug/flags/:key` commits and deletes the Redis key while it is in
   flight, the late `write` puts the pre-toggle rows back for one `FLAG_CACHE_TTL_MS`. So "the

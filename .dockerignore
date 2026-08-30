@@ -1,0 +1,10 @@
+# The build context is the repository root — every image needs the whole workspace to resolve
+# `@pos/*` — so what is excluded here is what makes that affordable.
+**/node_modules
+**/dist
+.git
+.github
+.verify-output
+docs
+*.md
+.env

@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "tsup src/index.ts --format esm --sourcemap --clean",
     "start": "node --env-file-if-exists=../../.env dist/index.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration": "vitest run -c vitest.integration.config.ts"
   },
   "dependencies": {
     "@pos/config": "workspace:*",
@@ -26,6 +27,7 @@
   },
   "devDependencies": {
     "@types/pg": "^8.23.1",
+    "socket.io-client": "^4.8.1",
     "vitest": "^4.1.11"
   }
 }

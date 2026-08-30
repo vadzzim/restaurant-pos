@@ -16,6 +16,10 @@ export default defineConfig({
     },
   },
   test: {
+    // `*.integration.test.ts` needs the two-replica stack from `docker-compose.multi.yml`, not a
+    // database; it has its own config and its own command. Without this exclude the default
+    // `include` would pick it up and `pnpm -F @pos/api test` would stop being runnable alone.
+    exclude: ['node_modules/**', 'dist/**', 'test/**/*.integration.test.ts'],
     // One database, one file at a time: the suites truncate shared tables.
     fileParallelism: false,
     hookTimeout: 60_000,

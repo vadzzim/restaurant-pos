@@ -51,3 +51,31 @@ jobs:
           name: verify-integration-log
           path: .verify-output/integration.log
           if-no-files-found: ignore
+
+  # The three §22 images, built and not pushed: there is no registry to push to and the point is
+  # that the Dockerfiles stay buildable from a clean checkout. Deliberately *not* `verify:multi` —
+  # that needs the whole stack plus a migrated database, and the `verify` job above already owns
+  # one Compose lifecycle in this workflow. The smoke run is a local and pre-demo command.
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, worker, web]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.app }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/${{ matrix.app }}/Dockerfile
+          push: false
+          tags: pos-${{ matrix.app }}:ci
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app }}

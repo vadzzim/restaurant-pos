@@ -1,0 +1,115 @@
+# The production-image stack: two API replicas behind the Redis adapter (§13), one worker, and
+# nginx in front of both. Used together with the base file, which supplies the infrastructure:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.multi.yml up -d --wait \
+#     api-1 api-2 worker-prod web-prod
+#
+# `pnpm verify:multi` is the supported way to run it, and §19.10 is what it proves.
+#
+# These are new service names rather than overrides of the base file's `api`/`web`/`worker`. Those
+# mount `.:/workspace` and run `tsx`, and Compose merges `volumes` by appending: an override can
+# add a mount, never remove one, so a "production" override would still run with the source tree
+# mounted over the image. Distinct names are the only way to get a clean container.
+#
+# The schema is not created here. `verify-multi-instance.mjs` migrates and seeds from the host
+# before starting these, because migrations are `tsx` scripts and the images carry built output
+# only — see the Dockerfiles.
+
+name: restaurant-pos
+
+services:
+  # The two replicas are two services, not `deploy.replicas: 2`, for one reason: §19.10 has to
+  # address A and B separately — apply the mutation *through A* and watch the socket *on B*.
+  # Replicas share one name and one port and cannot be told apart from the host.
+  api-1:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: pos-api:local
+    environment: &api_environment
+      NODE_ENV: production
+      LOG_LEVEL: warn
+      API_HOST: 0.0.0.0
+      DATABASE_URL: postgresql://pos:pos@postgres:5432/pos
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: redpanda:29092
+    ports:
+      - '3001:3000'
+    # `127.0.0.1`, never `localhost`: in the Node image `/etc/hosts` maps `localhost` to `::1` as
+    # well, busybox wget tries that first, and Fastify bound to `0.0.0.0` is not listening on it.
+    # The probe then reports "connection refused" against a perfectly healthy API.
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/api/health/ready']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    depends_on: &api_dependencies
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  api-2:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: pos-api:local
+    environment: *api_environment
+    ports:
+      - '3002:3000'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/api/health/ready']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    depends_on: *api_dependencies
+
+  # Exactly one. The outbox lease makes concurrent claiming safe (§21.16) but nothing in this
+  # demo asks for two publishers, and a second one would change what `/debug`'s backlog means.
+  worker-prod:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: pos-worker:local
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: warn
+      DATABASE_URL: postgresql://pos:pos@postgres:5432/pos
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: redpanda:29092
+      # The fake printer is an endpoint on the API (§12.3); `localhost` here would be the worker
+      # itself, and every ticket would dead-letter. Either replica serves it.
+      PRINTER_URL: http://api-1:3000/api/printer/print
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      api-1:
+        condition: service_healthy
+
+  # One entry point in front of both replicas, which is what makes §19.10 visible in a browser:
+  # two tabs on :8081 land on different instances and still see each other's orders.
+  web-prod:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    image: pos-web:local
+    ports:
+      - '8081:8080'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:8080/']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      api-1:
+        condition: service_healthy
+      api-2:
+        condition: service_healthy

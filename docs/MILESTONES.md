@@ -34,8 +34,8 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M11 | Debug dashboard + counters + presence | M | Sonnet | yes | done |
 | M12 | Failure simulator | M | Sonnet | yes | done |
 | M13 | Feature flags + polling fallback | M | Sonnet | yes | done |
-| M14 | Production images + multi-instance smoke | M | Sonnet | yes | next |
-| M15 | POS UX for rush + BAR-1 | M | Sonnet | yes | |
+| M14 | Production images + multi-instance smoke | M | Sonnet | yes | done |
+| M15 | POS UX for rush + BAR-1 | M | Sonnet | yes | next |
 | M16 | `/demo` guided scenarios | M | Sonnet | yes | |
 | M17 | PWA + service worker | S | Sonnet | yes | |
 | M18 | Playwright E2E | M | Sonnet | yes | |

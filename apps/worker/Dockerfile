@@ -1,0 +1,70 @@
+# The worker image (§22): the outbox publisher, the kitchen consumer and the print queue in one
+# process. Build context is the repository root, never `apps/worker` — the app imports built
+# `@pos/*` output, so a context holding one app directory cannot resolve a single import.
+#
+#   docker build -f apps/worker/Dockerfile -t pos-worker .
+#
+# The `deps` stage below is byte-identical in all three app Dockerfiles on purpose. BuildKit keys
+# its cache on instruction content, so three images share one `pnpm install` instead of paying for
+# it three times. Keep them in step or that stops being true silently.
+
+# --- deps -------------------------------------------------------------------------------------
+FROM node:24-alpine AS deps
+RUN corepack enable
+WORKDIR /app
+
+# Manifests only, so a source edit does not invalidate the install layer.
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY packages/config/package.json packages/config/
+COPY packages/contracts/package.json packages/contracts/
+COPY packages/domain/package.json packages/domain/
+COPY packages/db/package.json packages/db/
+COPY apps/api/package.json apps/api/
+COPY apps/web/package.json apps/web/
+COPY apps/worker/package.json apps/worker/
+RUN pnpm install --frozen-lockfile
+
+# --- build ------------------------------------------------------------------------------------
+FROM deps AS build
+COPY tsconfig.base.json ./
+COPY packages packages
+COPY apps/worker apps/worker
+RUN pnpm run build:packages && pnpm --filter @pos/worker run build
+
+# Prune devDependencies. `--frozen-lockfile` keeps this honest: it resolves the same lockfile, it
+# does not re-resolve a smaller one. `dist/` is outside `node_modules` and survives.
+#
+# `CI=true` is required, not cosmetic: switching an existing install to `--prod` makes pnpm rebuild
+# the modules directory, and it refuses to remove one without a TTY unless it is told it is running
+# unattended (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
+RUN CI=true pnpm install --frozen-lockfile --prod --ignore-scripts
+
+# Assemble exactly what ships, here rather than as a column of COPY lines in the runtime stage:
+# `cp` can skip a `node_modules` that pruning left empty, and COPY cannot. `-a` is what keeps
+# pnpm's links as links — they are relative and resolve identically under /app.
+RUN set -eu; \
+    mkdir -p /out; \
+    cp -a package.json node_modules /out/; \
+    for project in packages/config packages/contracts packages/domain packages/db apps/worker; do \
+      mkdir -p "/out/$project"; \
+      cp -a "$project/package.json" "$project/dist" "/out/$project/"; \
+      if [ -d "$project/node_modules" ]; then cp -a "$project/node_modules" "/out/$project/"; fi; \
+    done
+
+# --- runtime ----------------------------------------------------------------------------------
+FROM node:24-alpine AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+
+# Built output and the pruned dependency tree, nothing else — no sources, no toolchain, no pnpm.
+# The `outbox` and `printer` control CLIs stay out: they are `tsx` scripts for the demo, and §18
+# reaches the same switches over HTTP.
+COPY --from=build --chown=node:node /out /app
+
+# `node` exists in the base image with uid 1000; creating another user would only rename it.
+USER node
+WORKDIR /app/apps/worker
+# Not `pnpm start`: that script reads `../../.env`, deliberately absent from the image —
+# configuration comes from the environment (§22) — and pnpm as PID 1 would swallow SIGTERM, which
+# the publisher needs to release its outbox lease instead of leaving rows claimed.
+CMD ["node", "dist/index.js"]
