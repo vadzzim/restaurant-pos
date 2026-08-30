@@ -1853,3 +1853,35 @@ is gone, `activate` drops the previous build's cache, the menu serves stale then
 entry in the M17 backlog, with the exact steps.
 
 **Review pass: no P1.** Four findings, all P2/P3, in `known-problems.md`.
+
+### M17, Codex round — the first install cached the document but not the bundle
+
+**[P1, fixed] Runtime caching cannot see the load that installs the worker.** The milestone brief
+argued against a precache manifest on the grounds that "the hashed bundle is cached as it is fetched
+by the very load that installed this worker". That sentence is wrong, and it was wrong in exactly
+the case M17 exists for. Registration happens on `window.load`, by which point the page has already
+fetched its JS and CSS; the worker did not exist for those requests and `clients.claim()` does not
+replay them. First install → `hadController` is false, so no reload → the tab is controlled by a
+worker holding only `index.html`. Offline hard reload then served the cached document, whose script
+missed `cacheFirst` and rejected: a blank app. Every unit test passed throughout, because each one
+had already primed the cache through the worker.
+
+The fix keeps the reasoning that motivated the original decision. `install` fetches `index.html`
+with `cache: 'reload'`, caches it, and **reads the asset list out of that HTML** —
+`shellAssetUrls()` in `cache-policy.ts`, a regex over `src=`/`href=` whose every hit is re-checked
+through `classifyRequest` and kept only if the policy calls it an `asset`. So the precache list
+cannot be wider than the allow-list, and there is still no generated file threaded through the build
+to go stale. Assets are `Promise.allSettled` — only a missing document may fail the installation,
+because a single 404 must not leave the worker stuck `installing`. Checked against the real
+`dist/index.html`: the list is the two emitted bundle files plus the manifest and the icon.
+
+**[P2, fixed with it] A navigation to a real resource poisoned the shell entry.** `mode ===
+'navigate'` was tested before the path, so a tab pointed straight at `/api/health/ready` was
+classified `shell` and its JSON written under `/index.html` — after which the next offline POS load
+renders a health check. The navigate branch is now **last**: a path that names a real resource is
+that resource whatever the mode, and only paths that resolve to the document reach it. Fixed in the
+same pass because it corrupts the one cache entry the P1 fix depends on.
+
+Codex's third finding — the menu revalidation not held by `event.waitUntil`, so the browser may kill
+the worker mid-refresh — is correct and is in the backlog. Eleven seeded products that change with
+the seed do not justify reopening the round. 246 web tests.

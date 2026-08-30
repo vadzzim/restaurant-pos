@@ -26,6 +26,12 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   lazily fetched chunks — but the day code splitting is introduced, that page can ask for a chunk no
   cache holds and no network serves. Proved by adding a dynamic `import()` to a view and reloading
   offline after a rebuild. ADR 017 says this is the condition to revisit.
+- **[M17, P2]** The menu's revalidation is not attached to `event.waitUntil`:
+  `service-worker.ts` `staleWhileRevalidate` resolves `respondWith` from the cache and leaves the
+  refresh running loose, so the browser may kill the worker before it lands and the menu stays
+  stale indefinitely. Raised by Codex on M17 and left because the menu is eleven seeded products.
+  Fix: pass the `FetchEvent` down and `waitUntil` the revalidation, keeping the `catch`. Proved by
+  changing the seed, loading once, and finding the second load still serving the old products.
 - **[M17, P3]** A failed precache fails the whole installation: `install` does
   `waitUntil(cache.add('/index.html'))`, so a worker installing at the moment the network drops
   never activates and the next load has no shell. Retried on the next visit, so it self-heals.

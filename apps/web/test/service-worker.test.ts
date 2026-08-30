@@ -39,8 +39,9 @@ class FakeCache {
   }
 }
 
+// The real Cache API keys on the full URL whether it was handed a string or a `Request`.
 const keyOf = (request: Request | string): string =>
-  typeof request === 'string' ? new URL(request, 'https://pos.test').pathname : request.url;
+  new URL(typeof request === 'string' ? request : request.url, 'https://pos.test').href;
 
 const cacheStore = new Map<string, FakeCache>();
 const listeners = new Map<string, Listener>();
@@ -102,7 +103,13 @@ beforeEach(async () => {
   skipWaiting.mockClear();
   claim.mockClear();
   network = new Map([
-    ['/index.html', new Response('<!doctype html><title>Restaurant POS</title>')],
+    [
+      '/index.html',
+      new Response(
+        '<!doctype html><title>Restaurant POS</title>' +
+          '<script type="module" crossorigin src="/assets/index-abc123.js"></script>',
+      ),
+    ],
     ['/assets/index-abc123.js', new Response('console.log(1)')],
     ['/api/menu', new Response('[{"id":"p-1"}]')],
     ['/api/orders/o-1/mutations', new Response('{"status":"APPLIED"}')],
@@ -139,12 +146,44 @@ beforeEach(async () => {
 });
 
 describe('the service worker', () => {
-  it('precaches the document and takes over immediately', async () => {
+  /**
+   * The bundle, not just the document. The load that installs the worker fetched the script before
+   * the worker existed, so runtime caching never sees it and the first offline reload would render
+   * a cached `index.html` whose script misses.
+   */
+  it('precaches the document and the bundle it names, and takes over immediately', async () => {
     await dispatch('install');
 
     expect(skipWaiting).toHaveBeenCalledOnce();
     const cache = cacheStore.get('pos-shell-build-2');
     expect(await cache?.match('/index.html')).toBeDefined();
+    expect(await cache?.match(get('/assets/index-abc123.js'))).toBeDefined();
+  });
+
+  it('installs even when an asset the document names cannot be fetched', async () => {
+    network.set('/assets/index-abc123.js', null);
+
+    await expect(dispatch('install')).resolves.toBe('passthrough');
+    expect(await cacheStore.get('pos-shell-build-2')?.match('/index.html')).toBeDefined();
+  });
+
+  it('fails the installation when the document itself cannot be fetched', async () => {
+    network.set('/index.html', null);
+
+    await expect(dispatch('install')).rejects.toThrow(/offline/);
+  });
+
+  /** The whole point, end to end: install online, then reload with nothing but the cache. */
+  it('serves both the document and its bundle after the network is gone', async () => {
+    await dispatch('install');
+    network.set('/index.html', null);
+    network.set('/assets/index-abc123.js', null);
+
+    const document = await dispatch('fetch', navigation('/pos/pos-1'));
+    const script = await dispatch('fetch', get('/assets/index-abc123.js'));
+
+    expect(await (document as Response).text()).toContain('Restaurant POS');
+    expect(await (script as Response).text()).toBe('console.log(1)');
   });
 
   it('drops every cache that is not this build, then claims its clients', async () => {

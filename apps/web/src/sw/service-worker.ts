@@ -14,7 +14,7 @@
  * script, so it has no `import` at runtime and needs no `{ type: 'module' }` registration.
  */
 
-import { classifyRequest } from './cache-policy';
+import { classifyRequest, shellAssetUrls } from './cache-policy';
 
 // Injected by the build plugin: one cache name per build, so `activate` can drop everything that
 // is not this build's.
@@ -37,12 +37,7 @@ const SHELL_KEY = '/index.html';
 const openCache = (): Promise<Cache> => caches.open(CACHE_NAME);
 
 sw.addEventListener('install', (event) => {
-  // The only thing precached: the document. Not a build-time asset list — the hashed bundle is
-  // cached as it is fetched by the very load that installed this worker, which is the same load
-  // that must have happened before anyone can go offline. A generated precache manifest would buy
-  // a first-visit-then-immediately-offline case nobody has, at the cost of build plumbing that
-  // rots silently when the output layout changes.
-  event.waitUntil(openCache().then((cache) => cache.add(SHELL_KEY)));
+  event.waitUntil(precacheShell());
 
   // Take over as soon as installed rather than waiting for every tab to close. Deliberate, and
   // recorded in ADR 017: the demo's failure mode is an interviewer reloading and being served last
@@ -84,6 +79,35 @@ sw.addEventListener('fetch', (event) => {
 
   event.respondWith(staleWhileRevalidate(event.request));
 });
+
+/**
+ * The document, plus the assets the document names.
+ *
+ * The bundle has to be precached here and cannot be picked up as it is fetched, because the page
+ * load that installs this worker fetched it **before** the worker existed and `clients.claim()`
+ * does not replay those requests. Left to runtime caching, a first visit followed by an offline
+ * reload gets a cached `index.html` whose script then misses — a blank app, and M17's whole point.
+ *
+ * Still not a build-time manifest: the list is read out of the document that was just fetched, so
+ * nothing has to be threaded through the build and there is no generated file to go stale.
+ *
+ * The assets are best-effort. Only the document is allowed to fail the installation, because
+ * without it there is no shell at all; a single asset that 404s must not leave the worker stuck
+ * `installing` forever.
+ */
+async function precacheShell(): Promise<void> {
+  const cache = await openCache();
+
+  // `cache: 'reload'` so an update installs against the server's document rather than whatever the
+  // HTTP cache is still holding from the build before it.
+  const document = await fetch(SHELL_KEY, { cache: 'reload' });
+  if (!document.ok) throw new Error(`precache: ${SHELL_KEY} returned ${document.status}`);
+
+  const html = await document.clone().text();
+  await cache.put(SHELL_KEY, document);
+
+  await Promise.allSettled(shellAssetUrls(html, sw.location.origin).map((url) => cache.add(url)));
+}
 
 /** Navigations: the network's answer when there is one, the last good document when there is not. */
 async function networkFirstShell(request: Request): Promise<Response> {

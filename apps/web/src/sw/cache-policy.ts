@@ -71,10 +71,6 @@ export function classifyRequest(request: ClassifiableRequest, origin: string): C
   // Cross-origin is somebody else's cache policy.
   if (url.origin !== origin) return 'passthrough';
 
-  // A navigation, however deep the client route. `try_files ... /index.html` in nginx (and Vite's
-  // history fallback) means every one of them is the same document.
-  if (request.mode === 'navigate') return 'shell';
-
   if (url.pathname === '/api/menu') return 'menu';
 
   // No `/api` or `/socket.io` response is cacheable beyond the line above, and saying so before
@@ -86,5 +82,51 @@ export function classifyRequest(request: ClassifiableRequest, origin: string): C
   if (SHELL_ASSET_PATHS.has(url.pathname)) return 'asset';
   if (ASSET_PREFIXES.some((prefix) => url.pathname.startsWith(prefix))) return 'asset';
 
+  // A navigation, however deep the client route: `try_files ... /index.html` in nginx (and Vite's
+  // history fallback) means every one of them is the same document.
+  //
+  // **Last, not first.** A tab pointed straight at `/api/health/ready` or `/manifest.webmanifest`
+  // is a navigation too, and answering it as `shell` would store that JSON under the shell's cache
+  // key — after which the next offline POS load renders a health check. A path that names a real
+  // resource is that resource, whatever the mode; only paths that resolve to the document reach
+  // here.
+  if (request.mode === 'navigate') return 'shell';
+
   return 'passthrough';
+}
+
+/**
+ * The build outputs `html` references, as absolute same-origin paths, filtered to what
+ * `classifyRequest` would call an `asset`.
+ *
+ * This is the precache list, derived from the document instead of from a build-time manifest: the
+ * page load that installs the worker has **already** fetched the bundle, so the worker never sees
+ * those requests and `clients.claim()` cannot replay them. Without this, a first visit followed by
+ * an offline reload serves a cached `index.html` whose script then misses the cache — a blank app,
+ * which is precisely the case M17 exists to cover.
+ *
+ * Deliberately a regex and not a parser: a worker has no DOM, the input is Vite's own generated
+ * `index.html`, and every hit is re-checked against the policy above, so the worst a bad match can
+ * do is be dropped.
+ */
+export function shellAssetUrls(html: string, origin: string): string[] {
+  const found = new Set<string>();
+
+  for (const match of html.matchAll(/(?:src|href)\s*=\s*"([^"]+)"/g)) {
+    const reference = match[1];
+    if (reference === undefined) continue;
+
+    let url: URL;
+    try {
+      url = new URL(reference, origin);
+    } catch {
+      continue;
+    }
+
+    if (classifyRequest({ method: 'GET', url: url.href, mode: 'cors' }, origin) === 'asset') {
+      found.add(url.href);
+    }
+  }
+
+  return [...found];
 }
