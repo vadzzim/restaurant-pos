@@ -37,11 +37,11 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M14 | Production images + multi-instance smoke | M | Sonnet | yes | done |
 | M15 | POS UX for rush + BAR-1 | M | Sonnet | yes | done |
 | M16 | `/demo` guided scenarios | M | Sonnet | yes | done |
-| M17 | PWA + service worker | S | Sonnet | yes | |
+| M17 | PWA + service worker | S | Sonnet | yes | done |
 | M18 | Playwright E2E | M | Sonnet | yes | |
 | M19 | All documentation + final smoke | **L** | **Opus** | yes | |
 
-**Twenty milestones, M0 through M19 — thirteen still to run.** The scope grew from the review's
+**Twenty milestones, M0 through M19 — two still to run.** The scope grew from the review's
 additions and nothing was cut; that was a deliberate call, recorded in `docs/PROGRESS.md`.
 
 **M10 was first on this list and was built anyway** — see ADR 014 for what it turned out to be

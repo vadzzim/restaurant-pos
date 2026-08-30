@@ -15,6 +15,26 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+- **[M17, P2]** The service worker was never exercised in a real browser. This session's browser
+  pane refuses to register **any** service worker — a one-line probe worker failed identically
+  while an ordinary `fetch` of the same file returned 200 — and no Chrome was connected. Covered
+  instead by `test/service-worker.test.ts` against a fake `CacheStorage`. Proved by: a production
+  build served by `pnpm -F @pos/web preview`, DevTools > Application showing the worker activated
+  and the install prompt offered, then offline + hard reload landing on the same order.
+- **[M17, P2]** `activate` deletes the previous build's cache while a page running the old bundle is
+  still open. Harmless today because `router.ts` imports all four views statically, so there are no
+  lazily fetched chunks — but the day code splitting is introduced, that page can ask for a chunk no
+  cache holds and no network serves. Proved by adding a dynamic `import()` to a view and reloading
+  offline after a rebuild. ADR 017 says this is the condition to revisit.
+- **[M17, P3]** A failed precache fails the whole installation: `install` does
+  `waitUntil(cache.add('/index.html'))`, so a worker installing at the moment the network drops
+  never activates and the next load has no shell. Retried on the next visit, so it self-heals.
+  Proved by registering with `/index.html` returning 503 and watching the registration stay
+  `installing`.
+- **[M17, P3]** The update path force-reloads the tab on `controllerchange` with no prompt (ADR 017).
+  Nothing is lost today — the queue is in Dexie and the order pointer on disk — but a half-typed
+  table name in the POS header would be. Proved by deploying a new build with the "Another table"
+  field filled in.
 - **[M16, P2]** `conflict_log.resolution` is only ever written `null` — `mutation-handler.ts:391`
   writes it and nothing anywhere updates it, because Discard and Rebase happen in the browser and
   are never reported back. So `blockedMutations` is a monotonic counter under a note that calls it

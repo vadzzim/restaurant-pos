@@ -6,51 +6,51 @@
 
 ## Current state
 
-**Last completed:** M16 — `/demo`. All ten §19 scenarios guided: what to press, in which window,
-what to watch. The script is **data** in `domain/demo-script.ts`; `DemoView.vue` only renders it, so
-"does every scenario name a control that exists" is a test, not a walk-through.
+**Last completed:** M17 — PWA. Manifest, three generated icons, and a service worker that caches
+**the shell and nothing else**. The gap it closes is narrow and worth saying precisely: offline has
+worked since M8, but *reloading* offline never reached the code that knows how to be offline,
+because index.html and the bundle come from the server. **ADR 017.**
 
-**One `SimulatorPanel`, not two.** `/debug` already renders §18's eleven controls and they are the
-same module state, so `/demo` embeds it; steps link to a control's row by anchor, and names come
-from one `CONTROL_LABELS` map the panel's buttons read too. `demo-script.test.ts` reads the **real**
-`SimulatorPanel.vue`, `router.ts` and `DemoView.vue`, not a copy of them.
+**The policy is an allow-list in a pure module.** `src/sw/cache-policy.ts` imports nothing, touches
+no `fetch`/`caches`/DOM, and maps a request to `shell` / `asset` / `menu` / `passthrough`.
+`passthrough` means the handler **returns without calling `respondWith`** — the browser performs
+the request as if no worker existed. Non-`GET` is decided first. `GET /api/menu` is the only cached
+API response; `GET /api/orders/:id` is explicitly never cached, because a stale snapshot does not
+look like an error, it looks like the server's truth. `cache-policy.test.ts` walks every endpoint in
+`src/api/client.ts`.
 
-**Two M12 P1s fixed in `Create Version Conflict`, both flagged by M15's handoff.** It sent
-`baseVersion - 1` from v1, which `mutation-routes.ts` refuses as `min(1)` — a 400, not a conflict;
-the threshold is now **v2**. And `spend()` ran only on a returned response, so that 400 left the arm
-armed and tampered with every later mutation from the tab; it is now spent on an `ApiRequestError`
-too — the server answered — but still **not** on the offline gate or a dead socket.
+**Registration is `import.meta.env.PROD`-only** — a worker in dev makes HMR lie — and updates are
+`skipWaiting` + `clientsClaim` + one guarded reload on `controllerchange`. Safe only because
+`router.ts` imports all four views statically, so there are no lazy chunks; ADR 017 names that as
+the condition to revisit.
 
-**`onBeforeUnmount` no longer calls `clear()`.** M15 left this open and it was load-bearing:
-one-shots are armed on `/demo` and live in the tab (ADR 015), so a till emptied on every route
-change could only spend an arm on its own `CREATE_ORDER` — three of eleven controls were
-undemonstrable on an item. New **`detach()`** drops the in-memory view and keeps the pointer on disk
-for `hydrate()`. It cannot simply skip the clear: the store outlives the component, and POS-1's
-order left in `order.value` would be drawn on POS-2 until its own read answered. `clear()` is
-untouched and is still what **New table** means.
+**Built as a nested Vite build**, `vite/service-worker-plugin.ts`, `apply: 'build'` → one classic
+`iife` at a stable `/sw.js` with the per-build cache name injected. It needed **`tsconfig.sw.json`**:
+`WebWorker` and `DOM` cannot share one `lib`, so `src/sw/service-worker.ts` and
+`test/service-worker.test.ts` are excluded from the app project and compiled there instead.
+Nothing under `src/sw/` may import from the rest of `src/`.
 
-**The browser found four defects no unit test could reach.** Chief among them: `styles.css` had
-`a { color: inherit }` **unlayered**, and in Tailwind v4 unlayered CSS beats a layer whatever its
-specificity — it had overridden every `text-*` utility on a link since M1. Both anchor rules moved
-into `@layer base`. **And §19.3's last step was wrong**: a Rebase does not resolve the conflict row,
-because nothing ever writes `conflict_log.resolution` — the P2 below.
+**The hands-on browser check was not run.** This session's browser pane refuses to register **any**
+service worker — a one-line probe failed identically while `fetch('/sw.js')` from the same page
+returned 200 — and no external Chrome was connected. Verified there instead: the manifest, all three
+icons at their declared sizes, and the production bundle serving `/pos/pos-1` correctly through the
+new `pnpm -F @pos/web preview` (dev cannot exercise a worker at all). The worker's own behaviour is
+covered by `test/service-worker.test.ts` against a fake `CacheStorage`. **The remaining check is the
+first M17 entry in `known-problems.md`, with exact steps — do it before the interview.**
 
-**Codex then found two P1s, both breaking M16's own bar.** The page forgot which scenario you were
-on — six of them route away and back, which unmounts the view; the selection now lives in the query
-(`/demo?scenario=…`). And §19.8 raced **Start preparing**, not §19.8's **Mark ready**, which a card
-in `New` does not offer — a setup step now moves the ticket to `PREPARING` first.
+**Green:** typecheck (now two projects for web), lint, build, **439 tests** (61 domain, 96 api,
+55 worker, **239 web** — 9 policy, 9 worker). `verify:integration` / `verify:multi` not re-run:
+nothing outside `apps/web` changed.
 
-**Green:** typecheck, lint, build, **415 tests** (61 domain, 96 api, 55 worker, **203 web**), and
-§19.4, §19.7 and §19.3 walked end to end against a real stack reading only the page.
-`verify:integration` / `verify:multi` not re-run: nothing outside `apps/web` changed.
+**Review pass: no P1.** Four P2/P3 in `known-problems.md`.
 
-**Next:** M17 — PWA. **Sonnet**, size **S**.
+**Next:** M18 — Playwright E2E. **Sonnet**, size **M**.
 
 ## What exists
 
 One line per unit; detail lives in the code and the ADRs.
 
-- **Docs** — what CLAUDE.md lists, plus `milestones/M01…M16.md`. **ADRs 001–016 accepted.**
+- **Docs** — what CLAUDE.md lists, plus `milestones/M01…M17.md`. **ADRs 001–017 accepted.**
 - `packages/config` zod env (all defaulted); `packages/contracts` the §5 shapes plus `TERMINALS` and
   `BAR_MENU`; `packages/domain` `decide()` — **the whole of §8**; `packages/db` fifteen tables,
   three migrations, seed (11 products), `@pos/db/testing`.
@@ -59,8 +59,9 @@ One line per unit; detail lives in the code and the ADRs.
   `multi-instance.integration.test.ts` behind its own config, **excluded** by default.
 - `apps/worker` — the §10 outbox publisher (ADR 010), the producer, the kitchen consumer and its
   projection, `modules/printing/` (ADR 014). CLIs `outbox`/`printer`.
-- `apps/web` — POS, kitchen, `/debug` and now **`/demo`**; seven Pinia stores; Dexie (ADR 013); the
-  §14 sync engine; `realtime/`; `domain/{pos-screen,demo-script}.ts` (pure and tested).
+- `apps/web` — POS, kitchen, `/debug`, `/demo`; seven Pinia stores; Dexie (ADR 013); the §14 sync
+  engine; `realtime/`; `domain/{pos-screen,demo-script}.ts`; and now **`sw/`, `pwa/register.ts`,
+  `vite/service-worker-plugin.ts`, `public/manifest.webmanifest`, `public/icons/`**.
 - **Images, Compose, scripts, CI** — a Dockerfile per app, `nginx.conf`, `docker-compose.multi.yml`
   (the base file's `app` profile is the *dev* stack), `compose-run.mjs`, two `verify-*.mjs`, `ci.yml`.
 
@@ -68,53 +69,56 @@ One line per unit; detail lives in the code and the ADRs.
 
 ADRs are canon; history in `progress-archive.md`. What is not in one:
 
-- Full scope, nothing cut (ADR 001, 007). **Three left: M17–M19**; drop M17 first, never M18.
+- Full scope, nothing cut (ADR 001, 007). **Two left: M18, M19.** Neither may be dropped.
 - **`BAR_MENU` is in contracts, not a `products.category` column.** Argued beside the constant.
-- **Leaving a POS route detaches; it does not clear.** M16, above. Do not put `clear()` back.
+- **Leaving a POS route detaches; it does not clear.** M16. Do not put `clear()` back.
+- **The icons are generated, not drawn** — `apps/web/scripts/make-icons.mjs`, run by hand.
 
 ## Known problems
 
-`docs/known-problems.md`: accepted limits, then the P2/P3 backlog — now **twenty** entries, three new
-from M16. **Overdue for its sweep pass.** Do not read it to start a session.
+`docs/known-problems.md`: accepted limits, then the P2/P3 backlog — now **twenty-four** entries,
+four new from M17. **Badly overdue for its sweep pass**; if M18 lands early, sweep it. Do not read
+it to start a session.
 
 ## First command of the next session
 
 ```
-Read CLAUDE.md and docs/PROGRESS.md, then expand M17 from docs/MILESTONES.md into
-docs/milestones/M17.md and implement M17 only. Stop when the M17 Verification block passes.
+Read CLAUDE.md and docs/PROGRESS.md, then expand M18 from docs/MILESTONES.md into
+docs/milestones/M18.md and implement M18 only. Stop when the M18 Verification block passes.
 
-M17 is the PWA: manifest and service worker, carefully. It must not break dev mode, and it must
-never cache API mutations or the snapshot endpoint. Installability. Verification: install the app,
-reload offline, and the last local order is still on screen with the sync engine unaffected.
-Model: Sonnet. Size: S.
+M18 is the §21 Playwright E2E: POS-1 creates an order, adds an item, sends it to the kitchen, the
+kitchen screen shows the ticket, PREPARING is marked, and the POS follows. Wired into CI.
+Verification: `pnpm test:e2e` green locally and in CI. Model: Sonnet. Size: M.
 
 Six things worth knowing before you plan:
 
-1. **The offline story already exists and is not the service worker's.** Dexie holds the queue and
-   the cached snapshot (ADR 013); `stores/order.ts` `hydrate()` restores from it on mount. M17 adds
-   the *shell* — index.html, JS, CSS — so a cold reload with no network still boots. Do not let a
-   service worker start owning data; that is a second cache over ADR 013 and it will drift.
-2. **What must never be cached**, and the test must prove it: `POST /api/orders/:id/mutations`, the
-   two §17 kitchen adapters, `GET /api/orders/:id` (the canonical read — a stale snapshot silently
-   replaces the server's truth), `/api/debug/*`, `/api/config`. A stale `GET /api/menu` is the one
-   defensible cache. Prefer an allow-list over a deny-list.
-3. **Dev mode is Vite on :5173 with HMR over a WebSocket.** A service worker registered in dev
-   intercepts module requests and makes HMR lie. Register in production builds only, and say why in
-   the code — a future session will otherwise "fix" the guard away.
-4. **A stale service worker is the classic demo killer.** Decide the update strategy deliberately
-   (skipWaiting + clientsClaim, or a prompt) and write it in an ADR; an interviewer reloading and
-   seeing last week's bundle is worse than no PWA.
-5. **`/demo` and `/debug` poll every 2 s.** Nothing there may be precached as an API response, and
-   §18's arms stay tab-local (ADR 015) — a claimed client must not make it look otherwise.
-6. **`onBeforeUnmount` detaches, it does not clear** (M16). The pointer on disk is what makes an
-   offline reload land back on the same cover — precisely M17's verification. Do not regress it.
-   Anything that queues a mutation, or moves the order pointer, goes through `serialize()`.
+1. **This test needs the whole stack, and the user starts infrastructure** (CLAUDE.md rule 3). The
+   pattern to copy is `scripts/verify-integration.mjs` — Compose up, wait for readiness, run,
+   tear down, write output to a file you `grep`. Do not stream container logs.
+2. **Do not test against `pnpm dev` on :5173.** M17 made a production build meaningfully different:
+   the service worker exists only there. Run against a production build via
+   `pnpm -F @pos/web preview` (:4173, proxies `/api` and `/socket.io` like dev does) or the web
+   image. A worker serving a cached shell to a test that just rebuilt is a real flake source —
+   Playwright contexts are fresh, so this is a risk only if you reuse a profile.
+3. **The flow crosses the worker.** Send to kitchen → outbox → publisher → Kafka → consumer →
+   projection. The ticket does not appear synchronously. Poll the assertion; do not sleep.
+   `apps/worker` must be running, and its outbox must not be paused by a leftover §18 arm.
+4. **Terminal ids and the seed are fixed** — `POS-1`, `POS-2`, `BAR-1`, `POS-3`, 11 products.
+   `packages/contracts` `TERMINALS` is the source; do not hard-code a product name a reseed changes.
+5. **The §18 simulator arms are tab-local** (ADR 015), so a Playwright context starts clean. The
+   four server-side ones do not — a paused publisher survives, and that is the failure that will
+   look like "Kafka is broken".
+6. **`onBeforeUnmount` detaches, it does not clear** (M16). A test that navigates away from a POS
+   screen and back must expect the order to still be there.
 
-Verification: `pnpm -F @pos/web test`, lint, typecheck, build, and the browser — install the app,
-go offline, hard reload, and confirm the order is still there and the queue still drains on
-reconnect. One review pass, P1s only.
+Verification: `pnpm test:e2e` locally and the same job in `ci.yml`. Then lint, typecheck, build and
+`pnpm -F @pos/web test`. One review pass, P1s only.
 
-Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, `pnpm dev` on :5173. Postgres,
-Redis and Redpanda were up and the worker was running at the end of M16, with an empty outbox.
-A production build is `pnpm -F @pos/web build` — M17 needs one to test the worker at all.
+Also, if there is room: the M17 backlog's first entry is a **manual browser check of the service
+worker** that this session's tooling could not perform. It is ten minutes in a real Chrome and it
+is the only unverified claim in the repository.
+
+Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, `pnpm dev` on :5173, or
+`pnpm -F @pos/web build && pnpm -F @pos/web preview` on :4173. Postgres, Redis and Redpanda were up
+and the API was answering `/api/health/ready` at the end of M17.
 ```

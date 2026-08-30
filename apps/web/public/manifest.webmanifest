@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "Restaurant POS",
+  "short_name": "POS",
+  "description": "Offline-first restaurant point of sale.",
+  "start_url": "/pos/pos-1",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#17201c",
+  "background_color": "#17201c",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    { "name": "POS-1", "url": "/pos/pos-1" },
+    { "name": "Kitchen display", "url": "/kitchen" }
+  ]
+}

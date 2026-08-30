@@ -25,7 +25,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['apps/{api,worker}/**/*.ts', 'packages/**/*.ts', '*.config.js', 'scripts/**/*.mjs'],
+    files: ['apps/{api,worker}/**/*.ts', 'packages/**/*.ts', '*.config.js', '**/scripts/**/*.mjs'],
     languageOptions: {
       globals: globals.node,
     },
@@ -34,6 +34,20 @@ export default tseslint.config(
     files: ['apps/web/**/*.{ts,vue}'],
     languageOptions: {
       globals: globals.browser,
+    },
+  },
+  {
+    // The service worker runs in a worker scope, not a document: no `window`, no `document`, but
+    // `self`, `caches` and `clients`. Its Vite plugin, on the other hand, runs in Node.
+    files: ['apps/web/src/sw/**/*.ts'],
+    languageOptions: {
+      globals: globals.serviceworker,
+    },
+  },
+  {
+    files: ['apps/web/vite/**/*.ts'],
+    languageOptions: {
+      globals: globals.node,
     },
   },
   {

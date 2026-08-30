@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
-    "build": "vue-tsc --noEmit -p tsconfig.json && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.sw.json",
+    "build": "pnpm run typecheck && vite build",
     "test": "vitest run"
   },
   "dependencies": {

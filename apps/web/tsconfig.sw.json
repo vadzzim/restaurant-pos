@@ -1,0 +1,15 @@
+// The service worker's own compilation. `WebWorker` and `DOM` declare `self`, `fetch`, `caches`
+// and the event types with different shapes, so one `lib` array cannot hold both — hence a second
+// project rather than a second entry in `tsconfig.json`. It covers `src/sw/` only, which is why
+// nothing in there may import from the rest of `src/`.
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "lib": ["ES2023", "WebWorker"],
+    "types": []
+  },
+  "include": ["src/sw/**/*.ts", "test/service-worker.test.ts"]
+}

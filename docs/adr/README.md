@@ -44,3 +44,4 @@ What was evaluated and why it was rejected.
 | `015-simulator-write-surface.md` | M12 | one endpoint pair for four switches, and seven that stay in the tab |
 | `008-feature-flags.md` | M13 | why the flag gates transport, not the write path |
 | `016-production-images.md` | M14 | why the image ships the pruned workspace rather than one bundled file |
+| `017-service-worker-scope.md` | M17 | the shell only, on an allow-list, and why the worker never waits |
