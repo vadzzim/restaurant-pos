@@ -42,7 +42,7 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M19 | All documentation + final smoke | **L** | **Opus** | yes | done |
 | M20 | Backlog sweep | M | **Opus** | yes | done |
 | M21 | Verification that can fail | M | **Opus** | yes | done |
-| M22 | The flag path, end to end | S | **Opus** | yes | planned |
+| M22 | The flag path, end to end | S | **Opus** | yes | done |
 | M23 | The cached client | M | Sonnet | yes | planned |
 | M24 | The deployment surface | M | Sonnet | yes | planned |
 

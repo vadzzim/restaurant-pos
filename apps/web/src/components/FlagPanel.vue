@@ -68,7 +68,7 @@ async function applyRollout(key: FeatureFlagKey, current: number): Promise<void>
           <button
             type="button"
             class="w-40 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
-            :disabled="flags.busy === flag.key"
+            :disabled="flags.isBusy(flag.key)"
             @click="flags.update(flag.key, { enabled: !flag.enabled })"
           >
             {{ flag.enabled ? 'Disable' : 'Enable' }}
@@ -96,7 +96,7 @@ async function applyRollout(key: FeatureFlagKey, current: number): Promise<void>
           <button
             type="button"
             class="rounded border border-stone-400 px-3 py-1 text-sm font-semibold disabled:opacity-50"
-            :disabled="flags.busy === flag.key"
+            :disabled="flags.isBusy(flag.key)"
             @click="applyRollout(flag.key, flag.rolloutPercent)"
           >
             Apply

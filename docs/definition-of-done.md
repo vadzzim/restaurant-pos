@@ -128,8 +128,9 @@ replica A to a client attached to replica B"_. It is excluded from the default s
 `apps/web/test/transport.test.ts` — the socket opens when the flag is on, the snapshot is polled
 when it is off, and the transport is re-chosen on the 15-second config poll.
 `apps/api/test/flags.test.ts` — the rollout hash is stable per restaurant, a percentage separates
-the two seeded restaurants, the master switch overrides the percentage, and a toggle is invalidated
-in the cache without a restart.
+the two seeded restaurants, the master switch overrides the percentage, a toggle is invalidated in
+the cache without a restart, and — since M22 — a fill stalled across that toggle does not put the
+pre-toggle rows back (ADR 019).
 
 ### 17. Critical consistency guarantees have automated tests, including the two crash-window cases — _proved, with one honest gap_
 

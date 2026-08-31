@@ -32,8 +32,10 @@ a forced reload costs more than fifteen seconds of delay.
 
 - The write path is never gated: everything §5–§9 guarantees holds on both transports, which is
   why the flag is safe to flip in front of an audience.
-- Redis caches the rows and a write invalidates the key, so a toggle is fleet-wide and immediate
+- Redis caches the rows and a write invalidates them, so a toggle is fleet-wide and immediate
   rather than bounded by a TTL. Redis stays soft: a cache failure falls through to PostgreSQL.
+  Deleting the key was not enough to keep that promise — a fill already in flight put the old rows
+  straight back. ADR 019 is the versioned fill that closes it.
 - Presence needed a second path (`POST /api/presence`), because a terminal on the polling transport
   holds no socket to heartbeat over and would otherwise vanish from `/debug`.
 - A percentage between the two seeded buckets — 1 and 24 — puts `POS-1` and `POS-3` on different

@@ -11,6 +11,10 @@ import { buildApp } from '../src/app.js';
 import { writeFlag } from '../src/modules/config/application/flag-store.js';
 import type { FlagRow } from '../src/modules/config/application/flag-store.js';
 import type { FlagCache } from '../src/modules/config/application/resolve-flags.js';
+import {
+  createRedisFlagCache,
+  type FlagRedis,
+} from '../src/modules/config/infrastructure/redis-flag-cache.js';
 import type { PresenceOrigin, PresenceStore } from '../src/modules/debug/application/ports.js';
 import { DEMO_RESTAURANT, SECOND_RESTAURANT, db, testApp, useTestDatabase } from './helpers.js';
 
@@ -86,26 +90,49 @@ describe('GET /api/config', () => {
   });
 });
 
-/** A cache that records what it was asked, so a test can see the table being skipped. */
+/**
+ * Just enough Redis for the flag cache: the three commands it uses, over a `Map`.
+ *
+ * The point is that the tests below drive the **real** `createRedisFlagCache` — the versioning is
+ * the thing under test, and a hand-written fake cache would only ever prove that the fake agrees
+ * with itself. `PX` is ignored: no test here waits out a TTL.
+ */
+function fakeRedis(): FlagRedis {
+  const store = new Map<string, string>();
+
+  return {
+    mget: async (...keys: string[]) => keys.map((key) => store.get(key) ?? null),
+    set: async (key: string, value: string) => {
+      store.set(key, value);
+    },
+    incr: async (key: string) => {
+      const next = Number(store.get(key) ?? '0') + 1;
+      store.set(key, String(next));
+      return next;
+    },
+  };
+}
+
+/** The real cache, wrapped so a test can see the table being skipped. */
 function fakeCache(): {
   cache: FlagCache;
   calls: { reads: number; writes: number; invalidations: number };
 } {
-  let stored: FlagRow[] | undefined;
+  const inner = createRedisFlagCache(fakeRedis(), 60_000);
   const calls = { reads: 0, writes: 0, invalidations: 0 };
 
   const cache: FlagCache = {
     read: async () => {
       calls.reads += 1;
-      return stored;
+      return inner.read();
     },
-    write: async (rows: FlagRow[]) => {
+    write: async (rows: FlagRow[], version: string) => {
       calls.writes += 1;
-      stored = rows;
+      await inner.write(rows, version);
     },
     invalidate: async () => {
       calls.invalidations += 1;
-      stored = undefined;
+      await inner.invalidate();
     },
   };
 
@@ -152,6 +179,64 @@ describe('the flag cache', () => {
 
     expect(response.statusCode).toBe(200);
     expect(calls.invalidations).toBe(1);
+    expect((await config(app, DEMO_RESTAURANT)).flags[PUSH]).toBe(false);
+  });
+
+  /**
+   * The M13 race, driven deliberately rather than waited for (ADR 019).
+   *
+   * A request misses, reads the rows from the table, and is then held with the fill in its hand.
+   * The toggle commits and invalidates underneath it. When the fill finally lands it is carrying
+   * the **pre-toggle** rows, and before the version it presented was checked those rows became the
+   * cached answer for a whole `FLAG_CACHE_TTL_MS` — so a terminal polling `/api/config` kept its
+   * old transport for one more interval and §15's "immediate" was a lie in that window.
+   *
+   * Only the first fill is stalled, so the toggle's own request runs normally.
+   */
+  it('discards a fill that was overtaken by a toggle, rather than resurrecting the old rows', async () => {
+    const inner = createRedisFlagCache(fakeRedis(), 60_000);
+
+    let stallFill: (() => void) | undefined;
+    let fillStarted: (() => void) | undefined;
+    const released = new Promise<void>((resolve) => {
+      stallFill = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      fillStarted = resolve;
+    });
+
+    let stalls = 0;
+    const cache: FlagCache = {
+      read: () => inner.read(),
+      write: async (rows: FlagRow[], version: string) => {
+        stalls += 1;
+        if (stalls === 1) {
+          fillStarted?.();
+          await released;
+        }
+        await inner.write(rows, version);
+      },
+      invalidate: () => inner.invalidate(),
+    };
+
+    const app = buildApp({ db: db(), logLevel: 'silent', flagCache: cache });
+
+    // Missed, read the table while the flag was still on, and now held at the fill.
+    const inFlight = config(app, DEMO_RESTAURANT);
+    await started;
+
+    const toggle = await app.inject({
+      method: 'POST',
+      url: `/api/debug/flags/${PUSH}`,
+      payload: { enabled: false },
+    });
+    expect(toggle.statusCode).toBe(200);
+
+    stallFill?.();
+    // The stalled request still answers what it read, which is right: it read it before the toggle.
+    expect((await inFlight).flags[PUSH]).toBe(true);
+
+    // The next poll is the one that matters. It must see the toggle.
     expect((await config(app, DEMO_RESTAURANT)).flags[PUSH]).toBe(false);
   });
 });

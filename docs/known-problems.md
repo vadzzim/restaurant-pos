@@ -18,10 +18,15 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 > **Swept once in M20, and being swept again in M21–M24.** M20 closed fifteen of thirty entries in
 > one pass over unrelated surfaces, and paid for a fresh context per fix. What was left is grouped
 > **by the surface the fix lives on** — one milestone each, briefs in `MILESTONES.md`, _The second
-> sweep_. M21 has taken the four that live in the test harness, including both remaining P2s.
+> sweep_. M21 took the four that live in the test harness; M22 took the five on the feature-flag
+> path, including the `[M13, P2]` cache race — **so the only P2 left is the service worker's.**
+> Ten lines remain from the seventeen, plus the two each pass opens on itself: M23 is the browser
+> surface, M24 the deployment one.
 >
 > Two of M20's fifteen turned out to have been fixed by a later milestone without the line being
-> deleted, which is the argument for sweeping rather than accumulating. See `build-log.md`.
+> deleted, which is the argument for sweeping rather than accumulating. **Three of M22's five were
+> closed by an argument rather than a patch** and now sit under _Accepted limits_ — a line filed as
+> a defect is not thereby one. See `build-log.md`.
 
 - **[M21, P3]** `verify-e2e.mjs` probes `:3000` only after Chromium, the build, the migration and the
   seed, so a user who left an API up waits out two minutes of setup to be told to stop it. The probe
@@ -32,20 +37,16 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   replicas against a database that does not exist and they fail readiness until the script has been
   run once. The file says so in a comment; an init script under `postgres` would be the fix. Proved
   by `docker compose -f docker-compose.yml -f docker-compose.multi.yml up api-1` on a fresh volume.
-- **[M19, P3]** The realtime consumer marks `processed_events` and _then_ emits, so a crash between
-  them loses the broadcast permanently — redelivery finds the marker and emits nothing. §12.2 chose
-  that order, and in the same breath says duplicate emits are harmless because the client filters by
-  `eventId` and version; the opposite order would therefore trade a loss window for a harmless
-  duplicate window. Not changed, because §12.2 is explicit and the cost is bounded by
-  reconnect-and-refetch either way. Raised by the Codex review of M19. Proved by killing the API
-  between the commit and the emit and watching the redelivery answer `duplicate`.
-- **[M19, P3]** `pnpm verify:integration` prints two `TimeoutNegativeWarning` lines from the worker's
-  integration run — a timer scheduled from what looks like `deadline - Date.now()` against a zero
-  deadline, so the wait collapses to 1 ms. Not ours: the only deadline arithmetic in
-  `apps/worker/src` is `sendWithinLease`, which clamps with `Math.max(remainingMs, 0)`, and
-  `settleWithin`'s two callers both pass configured constants. It comes from a dependency in the
-  Kafka or BullMQ path. Harmless — the run is PASS — and noted so it is not re-discovered. Proved by
-  `--trace-warnings` on `pnpm --filter @pos/worker run test:integration`.
+- **[M22, P3]** The flag cache's version counter has no expiry and its payload does, so a Redis
+  configured with a `maxmemory` policy could evict the counter while a payload outlives it: the
+  counter restarts at 1 on the next `INCR`, and a payload stamped `1` from the process's first
+  generation would match again and be served. Nothing in `docker-compose.yml` sets `maxmemory`, so
+  it is unreachable as deployed; a `DEL config:feature-flags:version` followed by one toggle inside
+  `FLAG_CACHE_TTL_MS` would prove it. Found by M22's own review pass.
+- **[M22, P3]** `parse` in `redis-flag-cache.ts` checks that the payload is an array, not that its
+  elements are `FlagRow`s, so a hand-written Redis value with the right shape and wrong rows
+  reaches `describeFlags`. Pre-existing — the old code cast the same way — and the table is the
+  only writer. A zod parse of the payload is the fix; setting the key by hand proves it.
 - **[M17, P2]** `activate` deletes the previous build's cache while a page running the old bundle is
   still open. Harmless today because `router.ts` imports all four views statically, so there are no
   lazily fetched chunks — but the day code splitting is introduced, that page can ask for a chunk no
@@ -79,28 +80,29 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 - **[M14, P3]** The CI `images` job builds the three images and never runs one, and the base images
   float on `node:24-alpine` / `nginx-unprivileged:1.29-alpine` rather than digests, so a green build
   is not a green start. `.github/workflows/ci.yml`.
-- **[M13, P2]** A cache-aside fill can overwrite an invalidation: a request that missed reads the
-  flag rows, and if a `POST /api/debug/flags/:key` commits and deletes the Redis key while it is in
-  flight, the late `write` puts the pre-toggle rows back for one `FLAG_CACHE_TTL_MS`. So "the
-  toggle is fleet-wide and immediate" is true except in that window, where a client polling
-  `/api/config` keeps its old transport for one more interval.
-  `apps/api/src/modules/config/application/resolve-flags.ts`. A versioned or conditional fill is
-  the fix. Found by the Codex review of M13; a fill paused across a concurrent write would prove it.
-- **[M20, P3]** `flags.busy` in `apps/web/src/stores/flags.ts` holds one key, which is the defect
-  M20 fixed in the simulator store and did not fix here: two overlapping flag toggles leave the first
-  switch enabled while its request is still out. `FlagPanel.vue:71,99` read it. The fix is the same
-  three lines — a `Set` and an `isBusy(key)`. Pressing two flags within one tick and watching both
-  stay enabled proves it.
-- **[M20, P3]** A resolution reported while the terminal is offline is never recorded:
-  `postConflictResolution` goes through `assertOnline` and the report is best-effort, so a queue
-  discarded offline leaves its `conflict_log` row open for good — the report names the exact
-  mutations it closes, so no later resolution picks it up. Deliberate — the panel it feeds is unreachable offline too, and a durable
-  outbox for an observability field is the wrong trade — but it means `blockedMutations` is a gauge
-  that can read high. Discarding under §18's offline switch and re-reading `/api/debug/conflicts`
-  proves it.
 
 ## Accepted limits and open questions
 
+- **The realtime consumer marks `processed_events` and _then_ emits**, so a crash between the
+  commit and the emit loses that broadcast permanently: redelivery finds the marker and emits
+  nothing. §12.2 chose that order and in the same breath says duplicate emits are harmless, because
+  the client filters by `eventId` and version — so the opposite order would trade a loss window for
+  a duplicate window, not remove one. Bounded either way by reconnect-and-refetch (§13), and named
+  in `consumer.ts` and ADR 006 rather than hidden. Re-argued in M22 and left alone; it was filed as
+  a defect by the Codex review of M19 and it is a choice.
+- **`pnpm verify:integration` prints two `TimeoutNegativeWarning` lines**, and they are not ours.
+  The number is `-Date.now()` to the millisecond, so something schedules a timer from a zero
+  deadline; the only deadline arithmetic in `apps/worker/src` is `sendWithinLease`, which clamps
+  with `Math.max(remainingMs, 0)`. It comes from a dependency in the Kafka or BullMQ path, the run
+  is PASS, and this line exists so it is not investigated a third time. `--trace-warnings` on
+  `pnpm --filter @pos/worker run test:integration` would name the frame.
+- **A resolution reported while the terminal is offline is never recorded.**
+  `postConflictResolution` goes through `assertOnline` and the report is best-effort, so a queue
+  discarded offline leaves its `conflict_log` row open for good — the report names the exact
+  mutations it closes, so no later resolution picks it up, and `blockedMutations` is therefore a
+  gauge that can read high. Deliberate: the panel it feeds is unreachable offline too, and a
+  durable outbox for an observability field is the wrong trade (M20). It is the same rule as
+  “`conflict_log.resolution` is observability, not domain state”, applied to the offline case.
 - **`START_PREPARING` and `MARK_READY` conflict on a repeat rather than answering
   `ALREADY_APPLIED`.** This is deliberate (§8: out-of-order transitions conflict) and it is what
   makes §21.10 legible, but it means a kitchen display that lost a response and then _discarded_

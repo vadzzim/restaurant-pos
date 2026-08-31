@@ -16,7 +16,14 @@ import { DEBUG_POLL_MS } from './debug';
 export const useFlagStore = defineStore('flags', () => {
   const flags = ref<FlagState[]>([]);
   const error = ref<string | undefined>();
-  const busy = ref<FeatureFlagKey | undefined>();
+  /**
+   * Which flags have a request out — a set, not one key. It held a single key until M22, so two
+   * overlapping toggles left the first button enabled while its own request was still in flight:
+   * exactly the defect M20 fixed in the simulator store and did not fix here.
+   */
+  const busy = ref(new Set<FeatureFlagKey>());
+
+  const isBusy = (key: FeatureFlagKey): boolean => busy.value.has(key);
 
   let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -54,16 +61,18 @@ export const useFlagStore = defineStore('flags', () => {
     key: FeatureFlagKey,
     patch: { enabled?: boolean | undefined; rolloutPercent?: number | undefined },
   ): Promise<void> {
-    busy.value = key;
+    busy.value = new Set(busy.value).add(key);
     try {
       flags.value = (await postFlag(key, patch)).flags;
       error.value = undefined;
     } catch (caught) {
       error.value = caught instanceof Error ? caught.message : String(caught);
     } finally {
-      busy.value = undefined;
+      const next = new Set(busy.value);
+      next.delete(key);
+      busy.value = next;
     }
   }
 
-  return { flags, error, busy, refresh, start, stop, update };
+  return { flags, error, busy, isBusy, refresh, start, stop, update };
 });

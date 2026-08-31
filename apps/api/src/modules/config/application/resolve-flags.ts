@@ -9,6 +9,9 @@ import { RESTAURANTS, type Db } from '@pos/db';
 
 import { readFlagRows, type FlagRow } from './flag-store.js';
 
+/** What a cache lookup answers: the rows, or a miss carrying the version it observed. */
+export type FlagCacheRead = { hit: true; rows: FlagRow[] } | { hit: false; version: string };
+
 /**
  * The §15 cache, as a port rather than a Redis client (ADR 006): `buildApp()` without one reads the
  * table on every request and every `fastify.inject` test stays free of infrastructure.
@@ -18,9 +21,16 @@ import { readFlagRows, type FlagRow } from './flag-store.js';
  * cache outage that took the transport decision with it would be the outage §15 exists to avoid.
  */
 export interface FlagCache {
-  /** The cached rows, or `undefined` for a miss — never an error the caller has to handle. */
-  read: () => Promise<FlagRow[] | undefined>;
-  write: (rows: FlagRow[]) => Promise<void>;
+  /** A hit or a miss — never an error the caller has to handle. */
+  read: () => Promise<FlagCacheRead>;
+  /**
+   * Fills the cache with rows read from the table, presenting the version the miss observed.
+   *
+   * A fill whose version has moved since the miss must not become the cached value: the rows in
+   * hand were read from the table *before* an invalidation the fill knows nothing about, and
+   * writing them would put the pre-toggle state back for one TTL (ADR 019).
+   */
+  write: (rows: FlagRow[], version: string) => Promise<void>;
   /** Called after a write. A toggle is fleet-wide and immediate, not "within the TTL". */
   invalidate: () => Promise<void>;
 }
@@ -28,18 +38,26 @@ export interface FlagCache {
 /**
  * The flag rows, cache first, table second.
  *
+ * The version is opaque here on purpose: this function threads a string from the miss to the fill
+ * and never interprets it, so the port stays implementable by anything and `buildApp()` without a
+ * cache is unchanged (ADR 006).
+ *
  * The fill is awaited rather than fired and forgotten so a failing Redis cannot leave one rejected
  * promise per request unobserved; it is swallowed for the same reason the read is — the answer is
- * already in hand and the caller is a client waiting on its transport.
+ * already in hand and the caller is a client waiting on its transport. A read that *threw*
+ * observed no version and therefore does not fill at all: with nothing to present, the safe answer
+ * is to leave the next miss to do it.
  */
 export async function loadFlags(db: Db, cache?: FlagCache): Promise<FlagRow[]> {
   const cached = await cache?.read().catch(() => undefined);
-  if (cached !== undefined) {
-    return cached;
+  if (cached?.hit === true) {
+    return cached.rows;
   }
 
   const rows = await readFlagRows(db);
-  await cache?.write(rows).catch(() => undefined);
+  if (cached !== undefined) {
+    await cache?.write(rows, cached.version).catch(() => undefined);
+  }
   return rows;
 }
 

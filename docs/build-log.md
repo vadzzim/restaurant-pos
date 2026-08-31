@@ -2408,3 +2408,56 @@ already did.
 Proved by a `throw` at the end of the worker's shutdown, after `closeDb()`, so that everything is
 closed and only the code is wrong: the spec reports `1 passed` and the run reports
 `FAIL — checks passed but worker did not shut down cleanly`.
+
+## M22 — The flag path, end to end
+
+The second grouped sweep (`MILESTONES.md`, _The second sweep_): the five backlog entries that live
+on the feature-flag path. Two were code, three were arguments, and the split is the interesting
+part — a line filed as a defect is not thereby one.
+
+**The cache-aside race, closed by a version rather than a delete.** `[M13, P2]` said §15's
+"fleet-wide and immediate" is false for one `FLAG_CACHE_TTL_MS`, and it was right: a request that
+missed reads the rows, a toggle commits and deletes the key, and the late fill puts the pre-toggle
+rows back. Deleting cannot help, because the fill happens after the delete. The fix is ADR 019 —
+`config:feature-flags:version` is an integer with no expiry, `invalidate()` is one `INCR` and
+touches nothing else, and the payload carries the version it was filled at. A payload whose version
+no longer matches the counter **reads as a miss**, so the stale fill still lands and is never read.
+One `MGET`, one `SET`, one `INCR`: no Lua, no `WATCH`/`MULTI`, no single-flight lock.
+
+Two decisions worth naming. `loadFlags` threads the version as an **opaque string** it never
+interprets, so `buildApp()` without a cache is unchanged and every `fastify.inject` test stays free
+of infrastructure (ADR 006). And `createRedisFlagCache` now takes **the three commands it uses**
+rather than `Redis`, which is what lets the falsifying test drive the real cache over a `Map` — the
+repository's rule that a unit test never needs a live Redis was the constraint that shaped the
+design, not an afterthought.
+
+Proved by stalling a fill across a real `POST /api/debug/flags/:key`: only the first `write` is
+gated, so the toggle's own request runs normally, lands its fresh payload, and is then overwritten
+by the stalled fill carrying pre-toggle rows. The next `/api/config` must still say `false`.
+Falsified by dropping the version comparison from `read`, which reddens both that test and the
+older _"is invalidated by a write"_ one.
+
+**`flags.busy` became a `Set`.** `[M20, P3]`, and the same three lines M20 wrote in the simulator
+store. The falsifying test needed two keys and `FEATURE_FLAG_KEYS` holds one, so it casts a second:
+the panel renders whatever `GET /api/debug/flags` returns, so the assertion is about the store's
+contract rather than today's seed. Note what a `Set` does **not** fix — the same flag pressed twice
+still clears on the first response, because a set is not a counter. That is the simulator store's
+behaviour too, and the switches are idempotent.
+
+**Three entries answered with an argument.** Each was re-argued once and moved into _Accepted
+limits_, not deleted: the realtime consumer's mark-then-emit (§12.2 chose that order, and the
+opposite one trades a loss window for a duplicate window rather than removing one); the
+`TimeoutNegativeWarning`, whose value is `-Date.now()` to the millisecond while the only deadline
+arithmetic in `apps/worker/src` clamps with `Math.max(remainingMs, 0)` — so it is a dependency's;
+and the resolution reported offline, which is the standing "`conflict_log.resolution` is
+observability, not domain state" rule applied to the offline case. A deleted line is a fact nobody
+can find again, which is why all three moved rather than vanished.
+
+**Review pass (one round, P1s only).** No P1. One doc block had drifted off `FlagCache` onto the
+new `FlagCacheRead` and was moved back — part of the edit, not a round. Two P3s to the backlog: the
+version counter has no expiry while its payload does, so an evicting Redis could in principle let
+an old payload match a restarted counter; and `parse` still checks the payload is an array without
+checking its elements, as the code it replaced did.
+
+**Green:** lint, typecheck, `pnpm test` **478 passed** (475 + one API test + two web), build,
+`verify:integration`.
