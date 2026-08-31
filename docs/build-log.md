@@ -2525,3 +2525,46 @@ sandbox cannot reach it, so all three are hand checks left for the user. **Green
 `pnpm test` **490 passed** (478 + twelve), build. `verify:integration` was not re-run: nothing
 outside `apps/web`'s client changed, and `pnpm test:e2e`'s selectors were checked by hand against the
 new form ("Take it" cannot collide with the `exact: true` "Open").
+
+## M23 review fixes — what the Codex pass found between two correct changes
+
+A Codex review was run on the M23 commit (`--commit f946515`, `gpt-5.6-sol`, reasoning `high`). It
+returned one P1 and one P2, both real, and **both live between changes rather than inside one** —
+which is worth recording, because it is the failure mode of grouping a sweep by surface, and grouping
+by surface is the thing M21–M24 buy.
+
+**P1 — `staleWhileRevalidate` read one cache while `cacheFirst` read all of them.** M23 gave the
+`asset` route a cross-cache fallback so a claimed page could still fetch the previous build's chunks,
+and separately let an installation that could not reach the network activate **empty**. Each is
+correct alone. Composed, they are a broken till: the empty worker serves the shell and the bundle out
+of the retained generation, and then misses on `/api/menu` — which that same generation is holding —
+so `menu.load()` aborts POS startup and the operator gets an order with no product grid to add to.
+
+The fix is one function, `matchAnyCache`, used by both cache-reading routes, so the next route added
+cannot get this wrong by omission. The refresh still writes into **this** build's cache, so a
+generation is inherited once and then owned; there is a test for that too, because inheriting
+forever would make `activate` unable to ever drop the old cache.
+
+**P2 — `focusOrder` moved the pointer outside the serialized chain.** `command` captures
+`currentOrderId` the instant the screen is touched and re-checks it inside its own `serialize` link,
+which is what lets a tap be accepted at rush speed and still be stamped for the right order.
+`createOrder` and `clear` both move the pointer _inside_ that chain for exactly this reason, with the
+argument written beside them; `focusOrder` did not, so three taps followed by a focus lost all three
+to "that action was for an order this screen has left".
+
+**The defect is M16's, not M23's** — "Go to it" has had it since `focusOrder` was written. What M23
+did was add a second caller, the "Take it" field, and put it in the one place an operator is likely
+to press it with taps still in flight. `refetch()` deliberately stays _outside_ the link: it is a
+network read, and holding the local phase across it would stall every tap on the order that was just
+opened — offline, for good.
+
+**Falsified, both:** reverting `matchAnyCache` to `cache.match` in `staleWhileRevalidate` reddens the
+retained-generation menu test **and nothing else**, which is how the gap stayed invisible; replacing
+the `serialize` wrapper in `focusOrder` with a bare async block reddens the rush-tap one.
+
+`test/rush-taps.test.ts` was the right home for the second: it already models a thumb on a
+touchscreen rather than a polite test, with `settleLocal` draining the local phase while every
+`postMutation` hangs unanswered.
+
+**Green:** lint, typecheck, `pnpm test` **493 passed** (490 + three), build. No new backlog lines —
+both findings were fixed, and the review found nothing below P2.

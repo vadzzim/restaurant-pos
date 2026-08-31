@@ -227,16 +227,28 @@ async function networkFirstShell(event: FetchEvent): Promise<Response> {
 }
 
 /**
- * Content-hashed build output: the name pins the bytes, so a hit needs no revalidation.
+ * This build's cache first, then **every** cache — which is what makes keeping a generation worth
+ * anything, and is used by both cache-reading routes.
  *
- * **The fallback across every cache is load-bearing.** A page still running the previous build asks
- * for that build's chunks, and this build's cache has never held them. `caches.match` reaches the
- * one generation `activate` kept, which is the other half of the same fix; without it, keeping the
- * cache would buy nothing.
+ * Two callers, two reasons, one mechanism. A page still running the previous build asks for that
+ * build's chunks, and this build's cache has never held them. And a worker whose installation could
+ * not reach the network activates *empty* (see `tryPrecacheShell`): everything it serves comes from
+ * the generation `activate` kept, the menu included — miss that and an offline POS draws an order
+ * with no product grid, because `menu.load()` aborts its startup. Found by the Codex review of M23,
+ * which had the fallback on the asset route only.
+ *
+ * `caches.match` searches in creation order, so it prefers the *older* generation on a tie. Harmless
+ * for both routes — an `/assets/` name pins its bytes, and the menu is revalidated on every load —
+ * and the explicit `cache.match` first states the precedence rather than relying on that.
  */
+async function matchAnyCache(cache: Cache, request: Request): Promise<Response | undefined> {
+  return (await cache.match(request, MATCH)) ?? (await caches.match(request, MATCH));
+}
+
+/** Content-hashed build output: the name pins the bytes, so a hit needs no revalidation. */
 async function cacheFirst(request: Request): Promise<Response> {
   const cache = await openCache();
-  const cached = (await cache.match(request, MATCH)) ?? (await caches.match(request, MATCH));
+  const cached = await matchAnyCache(cache, request);
   if (cached) return cached;
 
   const response = await fetch(request);
@@ -244,11 +256,16 @@ async function cacheFirst(request: Request): Promise<Response> {
   return response;
 }
 
-/** `GET /api/menu` only. Draws immediately from the cache, and refreshes it for the next load. */
+/**
+ * `GET /api/menu` only. Draws immediately from the cache, and refreshes it for the next load.
+ *
+ * The refresh always writes into **this** build's cache even when the answer came from an older
+ * one, so a generation is inherited once and then owned.
+ */
 async function staleWhileRevalidate(event: FetchEvent): Promise<Response> {
   const { request } = event;
   const cache = await openCache();
-  const cached = await cache.match(request, MATCH);
+  const cached = await matchAnyCache(cache, request);
 
   const fromNetwork = fetch(request).then(async (response) => {
     if (response.ok) await cache.put(request, response.clone());

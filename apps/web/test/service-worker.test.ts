@@ -342,6 +342,50 @@ describe('the service worker', () => {
     expect(await (response as Response).text()).toBe('the old chunk');
   });
 
+  /**
+   * **The P1 the Codex review of M23 found.** M23 gave `cacheFirst` a cross-cache fallback and left
+   * `staleWhileRevalidate` reading this build's cache only. Compose the two new behaviours and that
+   * gap is a broken till: an installation that could not reach the network activates *empty*, an
+   * offline reload then serves the shell and the bundle out of the retained generation, and the menu
+   * — which the same generation is holding — misses, so `menu.load()` aborts POS startup and the
+   * operator gets an order with no product grid to add to.
+   *
+   * Reverting `matchAnyCache` to `cache.match` in `staleWhileRevalidate` reddens this and nothing
+   * else, which is how the review found it in the first place.
+   */
+  it('serves the retained generation the menu after an installation that never reached the network', async () => {
+    const previous = new FakeCache();
+    await previous.put('/api/menu', new Response('[{"id":"p-from-the-old-build"}]'));
+    cacheStore.set('pos-shell-build-1', previous);
+
+    network.set('/index.html', null);
+    await dispatch('install');
+    await dispatch('activate');
+    expect(cacheStore.get('pos-shell-build-1')).toBeDefined();
+
+    network.set('/api/menu', null);
+    const response = await dispatch('fetch', get('/api/menu'));
+
+    expect(await (response as Response).text()).toBe('[{"id":"p-from-the-old-build"}]');
+  });
+
+  /** And the inheritance is one-way: the refresh writes into *this* build's cache, not the old one. */
+  it('writes the revalidated menu into this build cache, not the one it inherited from', async () => {
+    const previous = new FakeCache();
+    await previous.put('/api/menu', new Response('[{"id":"p-old"}]'));
+    cacheStore.set('pos-shell-build-1', previous);
+    network.set('/index.html', null);
+    await dispatch('install');
+
+    network.set('/api/menu', new Response('[{"id":"p-new"}]'));
+    await dispatch('fetch', get('/api/menu'));
+
+    const mine = await cacheStore.get('pos-shell-build-2')?.match(get('/api/menu'));
+    expect(await mine?.text()).toBe('[{"id":"p-new"}]');
+    const theirs = await previous.match(get('/api/menu'));
+    expect(await theirs?.text()).toBe('[{"id":"p-old"}]');
+  });
+
   it('serves a navigation from the network while there is one, refreshing the shell', async () => {
     await dispatch('install');
     network.set('/index.html', new Response('<!doctype html><title>Newer</title>'));

@@ -770,22 +770,42 @@ export const useOrderStore = defineStore('order', () => {
    * and the refetch will not answer at all.
    */
   async function focusOrder(orderId: string): Promise<void> {
-    const terminalId = activeTerminalId.value;
-    if (terminalId === undefined || orderId === currentOrderId.value) {
+    if (activeTerminalId.value === undefined || orderId === currentOrderId.value) {
       return;
     }
 
-    order.value = undefined;
-    conflict.value = undefined;
-    readError.value = undefined;
-    currentOrderId.value = orderId;
+    // **Serialized for the same reason `createOrder` and `clear` are.** `command` captures the
+    // pointer the instant the screen is touched and compares it inside its own link, so a pointer
+    // moved *outside* the chain refuses every tap already accepted at rush speed: three taps and
+    // then "Take it" used to lose all three to "that action was for an order this screen has left".
+    // Inside the chain, every earlier tap is already in front of this link and gets stamped for the
+    // order it was meant for. Found by the Codex review of M23, which put a second caller on this
+    // function; the defect was M16's and "Go to it" had it too.
+    const moved = await serialize(async () => {
+      const terminalId = activeTerminalId.value;
+      // Re-checked inside the link: the pointer may have moved while this was queued behind a tap.
+      if (terminalId === undefined || orderId === currentOrderId.value) {
+        return false;
+      }
 
-    await localStore.setCurrentOrder(terminalId, orderId);
-    const cached = await localStore.readOrder(orderId);
-    if (cached !== undefined && order.value === undefined && currentOrderId.value === orderId) {
-      adopt(cached);
+      order.value = undefined;
+      conflict.value = undefined;
+      readError.value = undefined;
+      currentOrderId.value = orderId;
+
+      await localStore.setCurrentOrder(terminalId, orderId);
+      const cached = await localStore.readOrder(orderId);
+      if (cached !== undefined && order.value === undefined && currentOrderId.value === orderId) {
+        adopt(cached);
+      }
+      return true;
+    });
+
+    // Outside the link, deliberately: this is a network read, and holding the local phase across it
+    // would stall every tap on the order that was just opened — offline, for good.
+    if (moved) {
+      await refetch();
     }
-    await refetch();
   }
 
   /**

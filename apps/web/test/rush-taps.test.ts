@@ -259,3 +259,48 @@ describe('what the fire-and-forget path opened up', () => {
     expect(orders.currentOrderId).toBeUndefined();
   });
 });
+
+/**
+ * **The P2 the Codex review of M23 found**, and the one place a rush tap and a pointer move race.
+ *
+ * `command` reads `currentOrderId` when the thumb lands and re-checks it inside its serialized link,
+ * so anything that moves the pointer has to move it *in that chain* or the taps already accepted are
+ * refused. `createOrder` and `clear` always did; `focusOrder` did not, and M23 gave it a second
+ * caller — the "Take it" field — pressed at exactly the moment taps are still in flight.
+ *
+ * The defect is M16's: "Go to it" had it too, and both callers go through this function.
+ */
+describe('taps in flight when the screen is moved to another order', () => {
+  it('stamps every accepted tap for the order it was meant for', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot(3));
+    postMutationMock.mockReturnValue(new Promise<MutationResponse>(() => undefined));
+
+    // Three thumbs on the tiles, none of them awaited...
+    const taps = [
+      orders.addItem('pos-1', 'demo-restaurant', 'burger'),
+      orders.addItem('pos-1', 'demo-restaurant', 'pizza'),
+      orders.addItem('pos-1', 'demo-restaurant', 'cola'),
+    ];
+    expect(taps).toHaveLength(3);
+
+    // ...and then, in the same breath, the operator takes another till's order. Not awaited either:
+    // `focusOrder` has to get in line behind the taps, not overtake them.
+    fetchOrderMock.mockResolvedValue({ ...snapshot(9), id: 'order-from-pos-2' });
+    const focused = orders.focusOrder('order-from-pos-2');
+
+    await settleLocal(3);
+    await focused;
+
+    // All three reached the queue, at distinct versions, stamped for `order-a` — not one of them
+    // refused because the pointer had already moved to the order that replaced it.
+    expect(orders.queue.map((row) => row.orderId)).toEqual(['order-a', 'order-a', 'order-a']);
+    expect(orders.queue.map((row) => row.baseVersion)).toEqual([3, 4, 5]);
+    expect(orders.lastError).toBeUndefined();
+
+    // And the screen did move: the pointer is on the new order and the queue for it is empty.
+    expect(orders.currentOrderId).toBe('order-from-pos-2');
+    expect(orders.currentQueue).toHaveLength(0);
+  });
+});
