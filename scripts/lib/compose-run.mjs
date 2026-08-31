@@ -105,6 +105,20 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
   let snapshotted = false;
 
   /**
+   * The services this run actually asked Compose to bring up, which is what teardown removes.
+   *
+   * It used to be inferred — everything not running at snapshot time — and that inference is only
+   * true while `up()` is reached. Since M24 `verify-e2e.mjs` can refuse a foreign API **before**
+   * bringing anything up, and then the difference named every service the user owned but had
+   * stopped: a run that started nothing removed containers it had never touched. Found by the Codex
+   * review of M24.
+   *
+   * Recorded as *intent*, before the `up` rather than after it, so a stack that half started and
+   * then failed its healthchecks is still torn down.
+   */
+  const startedHere = new Set();
+
+  /**
    * The user keeps Compose up for the demo. Tearing down services this run did not start would
    * destroy that as a side effect of running the tests, so what was already there is recorded
    * before anything is started — and it has to be *before*, which is why a caller that brings some
@@ -128,6 +142,11 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
    */
   async function up({ timeoutSeconds = 180, only = services } = {}) {
     await snapshot();
+    for (const service of only) {
+      if (!alreadyRunning.includes(service)) {
+        startedHere.add(service);
+      }
+    }
     return compose(['up', '-d', '--wait', '--wait-timeout', String(timeoutSeconds), ...only]);
   }
 
@@ -156,9 +175,9 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
     if (keep) {
       banner('Teardown skipped (--keep)');
     } else {
-      const toRemove = services.filter((service) => !alreadyRunning.includes(service));
+      const toRemove = services.filter((service) => startedHere.has(service));
       if (toRemove.length === 0) {
-        banner('Teardown skipped — every service was already running before this run');
+        banner('Teardown skipped — this run started nothing');
       } else {
         banner('Teardown');
         // `rm -sf`, never `down -v`: it removes only the containers this run started and never

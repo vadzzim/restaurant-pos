@@ -137,6 +137,34 @@ describe('waiting for a Redis that is not there', () => {
  * `Worker.close()` disconnects the duplicate locally rather than sending it a `QUIT`. This asserts
  * the property rather than the mechanism, because the mechanism is BullMQ's to change.
  */
+describe('what the print worker reports about itself', () => {
+  /**
+   * The Codex review of M24: `worker.isRunning()` is BullMQ's main loop, and that loop keeps
+   * running while the blocking client reconnects — so a readiness probe built on it alone answers
+   * "printing is fine" through a Redis outage, which is the one failure the healthcheck exists to
+   * catch. This connection is refused on every attempt, and `isConsuming()` has to say so.
+   */
+  it('is not consuming while its Redis is unreachable, however alive BullMQ looks', async () => {
+    const redis = connectRedis(UNREACHABLE_REDIS, BLOCKING_CONNECTION, 'test', logger);
+    const printer: Printer = {
+      print: async () => {
+        throw new Error('the device is never reached in this test');
+      },
+    };
+    const worker = startPrintWorker(redis, db(), printer, logger, {
+      queueName: `print-consuming-${randomUUID()}`,
+      maxAttempts: 3,
+    });
+
+    try {
+      expect(worker.isConsuming()).toBe(false);
+    } finally {
+      await worker.close();
+      redis.disconnect();
+    }
+  });
+});
+
 describe('closing the print worker with Redis unreachable', () => {
   it('finishes rather than waiting on a connection it cannot reach', async () => {
     const redis = connectRedis(UNREACHABLE_REDIS, BLOCKING_CONNECTION, 'test', logger);

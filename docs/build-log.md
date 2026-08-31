@@ -2653,3 +2653,59 @@ the `nginx -t` pair above, and the `load: true` half by what `docker run` says w
 checks are left**, both needing a stack the user brings up: recreating a replica under
 `verify:multi --keep` and watching :8081 keep serving, and pointing `worker-prod`'s
 `KAFKA_BROKERS` at nothing to see `--wait` time out where it used to report success.
+
+## M24 review fixes — four P2s, two of them the reorder's own
+
+A Codex pass on the M24 commit returned four P2s and no P1. Under _Review discipline_ that is four
+backlog lines and nothing else; the user asked for all four to be fixed, so they were. Two of them
+are worth knowing about beyond this milestone, because they were **introduced by moving the port
+probe to the front** of `verify-e2e.mjs` — the cheap-looking half of the whole session.
+
+**The preflight was asking the wrong question.** It probed `/api/health/ready`, and readiness is 503
+whenever PostgreSQL is down (ADR 011) — which is the state this script starts in _every time it
+starts the containers itself_. So a foreign API up beside stopped infrastructure read as an empty
+port, and the run went on to lose the bind after two minutes of setup: exactly the cost the `[M21,
+P3]` line was written about, reintroduced through the other door. It asks `/api/health/live` now,
+because the question is who owns the port, not whether that owner can serve a write. Proved in the
+same breath as the CI smoke check, which shows a container answering `live=200` and `ready=503` with
+no database at all.
+
+**And `finish()` was inferring what it had started.** `toRemove` was every service not _running_ at
+snapshot time, which is only the same thing as "this run started it" while `up()` is reached at all.
+With the probe first it is not: a run that refused a foreign API and started nothing would have run
+`docker compose rm -sf` over every service the user owned but had stopped. `compose-run.mjs` now
+records intent — the services `up()` asked for, minus those already running — and teardown removes
+that set. Recorded _before_ the `up` rather than after, so a stack that half started and then failed
+its healthchecks is still torn down. The banner for the empty case says what it means now: "this run
+started nothing".
+
+Both are proved by one run. With a built API deliberately left on :3000, `pnpm test:e2e` refuses in
+**one second** — no Chromium, no build, no seed — and prints `Teardown skipped — this run started
+nothing`. Before the fix that refusal cost two minutes; before this session it did not happen at all.
+
+**The CI readiness assertion was too weak to mean anything.** `if wget …; then fail; fi` accepts every
+nonzero exit as "correctly refused" — including a 404 from a route that has been renamed, a refused
+connection, and a container that died right after the liveness probe. It reads the status code now
+and requires exactly 503. Two details: busybox `wget -S` prints the header on **stderr** and then
+repeats the status in its own error line, where the second field is a word rather than a number, so
+the awk takes the first `HTTP/` line and exits; and the helper ends in `|| true` because the runner's
+shell is `bash -e -o pipefail` and wget exits non-zero on the very status being measured — without it
+the step would die at the assignment instead of reading it. The step was then run **verbatim** out of
+`ci.yml` under `bash --noprofile --norc -e -o pipefail`, which is the only way to test a workflow
+step short of pushing it.
+
+**`isRunning()` was the wrong half of the print check.** BullMQ keeps its main loop running while its
+blocking client reconnects, so `worker.isRunning()` stays true straight through a Redis outage — and
+readiness would have gone on answering 200 with the print pipeline dead, which is the one failure the
+new healthcheck was added for. `PrintWorkerHandle.isConsuming()` is `worker.isRunning() &&
+connection.status === 'ready'`, the same `status` field the API's Redis probe reads, and the
+connection parameter narrowed from BullMQ's `ConnectionOptions` union to `Redis` so the module can
+ask. This is not a retreat from ADR 014's "Redis is soft": soft means the process keeps running and
+still shuts down cleanly, never that an unreachable Redis is a working printer.
+
+`print-queue.test.ts` already had a Redis nothing listens on, so the test is three lines there and it
+is exactly the reported defect: `isConsuming()` is false while BullMQ looks alive. **Falsified** by
+dropping the `status` half — that test reddens and nothing else does.
+
+**Green:** lint, typecheck, `pnpm test` **506 passed** (505 + one), build, `pnpm verify:multi` PASS,
+and the api CI step run verbatim. The two hand checks M24 left are unchanged.

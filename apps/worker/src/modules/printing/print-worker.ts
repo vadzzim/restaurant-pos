@@ -1,5 +1,6 @@
 import type { Db } from '@pos/db';
-import { Worker, type ConnectionOptions } from 'bullmq';
+import { Worker } from 'bullmq';
+import type { Redis } from 'ioredis';
 import type { Logger } from 'pino';
 
 import { processPrintJob } from './print-processor.js';
@@ -14,10 +15,20 @@ export interface PrintWorkerOptions {
 export interface PrintWorkerHandle {
   close: () => Promise<void>;
   /**
-   * Whether BullMQ is still consuming. Read by the worker's readiness probe — a process that
-   * publishes but has stopped printing is not a healthy worker, and until M24 nothing asked.
+   * Whether tickets can actually be taken off the queue. Read by the worker's readiness probe — a
+   * process that publishes but has stopped printing is not a healthy worker, and until M24 nothing
+   * asked.
+   *
+   * **Both halves are needed and `isRunning()` alone is not enough.** BullMQ keeps its main loop
+   * running while its blocking client reconnects, so `isRunning()` stays true through a Redis
+   * outage and readiness would have gone on answering 200 with the print pipeline dead — the whole
+   * failure the healthcheck was added for. Found by the Codex review of M24.
+   *
+   * This is not a retreat from ADR 014's "Redis is soft". Soft means the process keeps running and
+   * still shuts down cleanly through an outage; it never meant that an unreachable Redis is a
+   * working print pipeline, and readiness is where the difference is reported.
    */
-  isRunning: () => boolean;
+  isConsuming: () => boolean;
 }
 
 /**
@@ -33,7 +44,9 @@ export interface PrintWorkerHandle {
  * (ADR 011, ADR 014).
  */
 export function startPrintWorker(
-  connection: ConnectionOptions,
+  // A live client rather than BullMQ's `ConnectionOptions` union: both callers pass one, and
+  // `isConsuming` below has to be able to ask it whether Redis is reachable.
+  connection: Redis,
   db: Db,
   printer: Printer,
   logger: Logger,
@@ -83,6 +96,10 @@ export function startPrintWorker(
     close: async () => {
       await worker.close();
     },
-    isRunning: () => worker.isRunning(),
+    // `status` is ioredis's own state machine, and `ready` is the only value that means commands
+    // are being served — the API's Redis probe reads the same field (ADR 011). BullMQ duplicates
+    // this client for its blocking commands, so what is asked here is "is that server reachable",
+    // which is the question, rather than "is that exact socket the one blocking on BZPOPMIN".
+    isConsuming: () => worker.isRunning() && connection.status === 'ready',
   };
 }

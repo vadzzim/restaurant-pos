@@ -145,13 +145,28 @@ jobs:
       # answered 200 here would be one that checks nothing.
       #
       # `API_HOST=0.0.0.0` only because the probe runs through `docker exec`; the default
-      # `127.0.0.1` would serve it too. `wget` is busybox's, and it exits non-zero on a 503.
+      # `127.0.0.1` would serve it too. `wget` is busybox's.
+      #
+      # The readiness half reads the **status code** rather than wget's exit code, which was the
+      # first version and was too weak to mean anything: wget exits non-zero on a 404 from a route
+      # that no longer exists, on a refused connection, and on a container that died right after
+      # the liveness probe — and all three would have been read as "correctly refused". Found by
+      # the Codex review of M24. `-S` prints the response header on stderr; the `exit` in the awk
+      # takes the first `HTTP/` line, because wget repeats the status in its own error line and the
+      # second field there is a word.
       - name: Start the api image
         if: matrix.app == 'api'
         run: |
           docker run -d --name smoke -e API_HOST=0.0.0.0 pos-api:ci
+          # `|| true` because the runner's shell is `bash -e -o pipefail` and busybox wget exits
+          # non-zero on any status but 2xx — which is the case being measured. Without it the step
+          # would die at the assignment below instead of reading the code out of it.
+          status() {
+            docker exec smoke wget -S -q -O /dev/null "$1" 2>&1 |
+              awk '/^[[:space:]]*HTTP\//{print $2; exit}' || true
+          }
           for _ in $(seq 1 30); do
-            if docker exec smoke wget -q -O /dev/null http://127.0.0.1:3000/api/health/live; then
+            if [ "$(status http://127.0.0.1:3000/api/health/live)" = 200 ]; then
               live=1
               break
             fi
@@ -159,11 +174,13 @@ jobs:
           done
           if [ "${live:-}" != 1 ]; then
             docker logs smoke
-            echo '::error::the api image never served /api/health/live'
+            echo '::error::the api image never answered 200 on /api/health/live'
             exit 1
           fi
-          if docker exec smoke wget -q -O /dev/null http://127.0.0.1:3000/api/health/ready; then
-            echo '::error::readiness answered 200 with no database behind it'
+          ready=$(status http://127.0.0.1:3000/api/health/ready)
+          if [ "$ready" != 503 ]; then
+            docker logs smoke
+            echo "::error::readiness answered '${ready:-nothing}' with no database behind it, not 503"
             exit 1
           fi
           docker rm -f smoke

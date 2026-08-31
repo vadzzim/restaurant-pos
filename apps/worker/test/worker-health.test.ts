@@ -13,7 +13,7 @@ const logger = pino({ level: 'silent' });
 const READY: WorkerHealthChecks = {
   brokerConnected: true,
   publisherPassCompleted: true,
-  printWorkerRunning: true,
+  printPipelineConsuming: true,
 };
 
 let server: WorkerHealthServer | undefined;
@@ -48,8 +48,8 @@ describe('the worker readiness predicate', () => {
     );
   });
 
-  it('is unavailable when the print worker has stopped consuming', () => {
-    expect(describeWorkerReadiness({ ...READY, printWorkerRunning: false }, 1).status).toBe(
+  it('is unavailable when the print pipeline has stopped consuming', () => {
+    expect(describeWorkerReadiness({ ...READY, printPipelineConsuming: false }, 1).status).toBe(
       'unavailable',
     );
   });

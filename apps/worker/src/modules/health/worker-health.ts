@@ -25,8 +25,11 @@ export interface WorkerHealthChecks {
    * heartbeat log is what says the loop is still turning an hour later.
    */
   publisherPassCompleted: boolean;
-  /** BullMQ's print worker is consuming rather than closed or paused (§12.3). */
-  printWorkerRunning: boolean;
+  /**
+   * The print pipeline can actually take a ticket off the queue (§12.3) — BullMQ's loop running
+   * *and* its Redis reachable. `print-worker.ts` says why the first half alone is not an answer.
+   */
+  printPipelineConsuming: boolean;
 }
 
 export interface WorkerHealthReport {
@@ -47,7 +50,7 @@ export function describeWorkerReadiness(
   uptimeSeconds: number,
 ): WorkerHealthReport {
   const ready =
-    checks.brokerConnected && checks.publisherPassCompleted && checks.printWorkerRunning;
+    checks.brokerConnected && checks.publisherPassCompleted && checks.printPipelineConsuming;
 
   return { status: ready ? 'ok' : 'unavailable', uptimeSeconds, checks };
 }

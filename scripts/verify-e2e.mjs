@@ -33,6 +33,15 @@ const SERVICES = ['postgres', 'redis', 'redpanda'];
 const API_PORT = process.env.API_PORT ?? '3000';
 const API_ORIGIN = `http://localhost:${API_PORT}`;
 const API_READY_URL = `${API_ORIGIN}/api/health/ready`;
+/**
+ * The preflight probe asks *liveness*, not readiness: the question is whether something owns this
+ * port, and readiness is 503 whenever PostgreSQL is down (ADR 011). A foreign API up while the
+ * containers are not — which is the state this script starts in, every time it starts them — would
+ * therefore have read as an empty port, and the run would go on to lose the bind after two minutes
+ * of setup. Found by the Codex review of M24, which is also when the probe moved early enough for
+ * it to matter. Liveness touches nothing, so it answers whatever the dependencies are doing.
+ */
+const API_LIVE_URL = `${API_ORIGIN}/api/health/live`;
 
 process.env.API_PROXY_TARGET ??= API_ORIGIN;
 
@@ -67,10 +76,11 @@ async function main() {
   // It needs nothing from any of them, and a user who left a demo API up was spending two minutes
   // of setup to be told to stop it (`[M21, P3]`, closed in M24).
   //
-  // The snapshot has to come first in turn: `finish` tears down every service this run started,
-  // and it decides which those were by difference against what was already up. Reached before
-  // anything is running, it would treat the user's demo containers as this run's and remove
-  // them — the one thing the runner promises not to do.
+  // The snapshot has to come first in turn: `finish` tears down the services this run started, and
+  // it reports what it is leaving alone from here. The teardown itself is safe on this path either
+  // way — `compose-run.mjs` records what `up()` asked for rather than inferring it — and that
+  // record exists because the first version of this reorder let `finish` remove the user's stopped
+  // containers on a run that had started nothing.
   await runner.snapshot();
 
   // A short probe, so a machine with nothing on that port is not taxed for it. What answers is
@@ -79,7 +89,7 @@ async function main() {
   // behalf of code nobody here compiled. So it is a reason to stop, unless the flag says otherwise.
   runner.banner('A foreign API?');
   runner.write(`probing :${API_PORT} for an API already up\n`);
-  const apiAlreadyUp = await runner.waitForHttp(API_READY_URL, {
+  const apiAlreadyUp = await runner.waitForHttp(API_LIVE_URL, {
     timeoutMs: 2_000,
     intervalMs: 250,
     optional: true,

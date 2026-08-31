@@ -207,7 +207,7 @@ const health =
         probe: () => ({
           brokerConnected: broker.current()?.isAlive() === true,
           publisherPassCompleted,
-          printWorkerRunning: printWorker.isRunning(),
+          printPipelineConsuming: printWorker.isConsuming(),
         }),
       }).catch((error: unknown) => {
         logger.warn(
