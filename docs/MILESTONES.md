@@ -45,8 +45,9 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M22 | The flag path, end to end | S | **Opus** | yes | done |
 | M23 | The cached client | M | **Opus** | yes | done |
 | M24 | The deployment surface | M | **Opus** | yes | done |
+| M25 | Prometheus observability | M | **Opus** | yes | done |
 
-**Twenty milestones, M0 through M19 — all run.** The scope grew from the review's
+**Twenty-six milestones, M0 through M25 — all run.** The scope grew from the review's
 additions and nothing was cut; that was a deliberate call, recorded in `docs/PROGRESS.md`.
 
 **M10 was first on this list and was built anyway** — see ADR 014 for what it turned out to be
@@ -281,3 +282,15 @@ resolves `api-1` and `api-2` once at load, so a restarted replica is proxied to 
 `[M14, P3]` the CI `images` job builds three images and never starts one, and the base images float
 on tags rather than digests. Verification: recreating a replica under `verify:multi --keep` keeps
 :8081 serving; the `images` job fails when an image cannot start.
+
+---
+
+## Portfolio passes, M25
+
+### M25 — Prometheus observability
+A deliberately small Prometheus surface at `/metrics`: bounded HTTP and mutation counters, request
+duration, per-instance WebSocket presence, and PostgreSQL-backed outbox/print gauges collected only
+on scrape. Add one integration test, a metric catalogue, and three alert examples; do not add a
+Prometheus deployment, dashboards, tracing, or pretend consumer lag is exported. Verification:
+lint, typecheck, 507 tests, real integration round trips, the production images, and the existing
+two-replica assertion.

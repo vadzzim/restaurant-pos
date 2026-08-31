@@ -336,11 +336,12 @@ would have to be built**.
 - **Rate limits and admission control** do not exist. A per-terminal token bucket at the mutation
   endpoint is the obvious first one; the second is a cap on queue drain rate per terminal, because a
   terminal returning from an hour offline sends its whole queue as fast as the server answers.
-- **Observability.** Structured pino logs already carry `traceId requestId restaurantId terminalId
-orderId mutationId eventId`. At this size the counters move from a per-instance registry to
-  Prometheus (§20 calls it optional), the correlation fields become real distributed tracing across
-  the HTTP → outbox → Kafka → consumer hop, and the two numbers worth alerting on are **outbox
-  backlog age** and **consumer lag per group** — both already computed, neither currently alerting.
+- **Observability.** Structured pino logs carry correlation fields from `traceId` through `eventId`.
+  The API now exposes bounded-label Prometheus counters and histograms plus
+  scrape-time durable gauges at `/metrics`; starter rules alert on old outbox work and dead letters
+  ([observability guide](observability.md)). A production deployment still needs the scraper and
+  alert routing, Kafka consumer-lag export, and distributed tracing across the HTTP → outbox → Kafka
+  → consumer hop.
 - **Multi-region** is the one that changes the model rather than the deployment. The order aggregate
   is single-writer by version, so a region-local primary per restaurant with asynchronous
   replication elsewhere is coherent; a global primary is not, because the whole point of the

@@ -1,0 +1,29 @@
+groups:
+  - name: restaurant-pos-delivery
+    rules:
+      - alert: PosOutboxBacklogOld
+        expr: pos_outbox_oldest_unpublished_age_seconds > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Old events are waiting in the transactional outbox
+          description: The oldest unpublished event has been waiting for more than 60 seconds.
+
+      - alert: PosOutboxDeadLetters
+        expr: pos_delivery_items{pipeline="outbox",state="dead_lettered"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Transactional outbox contains dead-lettered events
+          description: Event delivery needs operator investigation and explicit recovery.
+
+      - alert: PosPrintDeadLetters
+        expr: pos_delivery_items{pipeline="print",state="dead_lettered"} > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Receipt print jobs are dead-lettered
+          description: The order is safe, but one or more receipt effects need manual recovery.

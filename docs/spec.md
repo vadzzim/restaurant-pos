@@ -598,7 +598,8 @@ received, mutations applied, duplicate mutations prevented, mutation-id reuse re
 cross-tenant rejections, conflicts detected, blocked mutations, outbox events pending, outbox
 events published, outbox events dead-lettered, Kafka events consumed, duplicate Kafka events
 prevented, print jobs succeeded/failed/dead-lettered, offline sync successes, offline sync
-failures. Prometheus is optional.
+failures. The implementation also exposes a deliberately small, bounded-label Prometheus surface at
+`GET /metrics`; see `docs/observability.md`.
 
 ## 21. Testing
 

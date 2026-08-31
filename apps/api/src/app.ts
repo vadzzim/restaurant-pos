@@ -19,6 +19,8 @@ import type { DependencyProbe } from './modules/health/application/dependency-pr
 import { registerKitchenCommandRoutes } from './modules/kitchen/api/kitchen-command-routes.js';
 import { registerKitchenReadRoutes } from './modules/kitchen/api/kitchen-read-routes.js';
 import { registerMenuRoutes } from './modules/menu/api/menu-routes.js';
+import { registerMetricsRoute } from './modules/observability/metrics-route.js';
+import { createPrometheusRegistry, observeHttp } from './modules/observability/prometheus.js';
 import { registerConflictRoutes } from './modules/orders/api/conflict-routes.js';
 import { registerMutationRoutes } from './modules/orders/api/mutation-routes.js';
 import { registerOrderReadRoutes } from './modules/orders/api/order-read-routes.js';
@@ -105,6 +107,8 @@ export function buildApp({
 
   registerRequestContext(app);
 
+  const metrics = createPrometheusRegistry(db, socketGauge);
+
   /**
    * §20's `apiRequests` / `apiErrors`, at the one place every response passes through.
    *
@@ -113,11 +117,12 @@ export function buildApp({
    * by whether the error handler ran, because a 503 from readiness is an error to whoever is
    * reading this page whether or not it was thrown.
    */
-  app.addHook('onResponse', async (_request, reply) => {
+  app.addHook('onResponse', async (request, reply) => {
     incrementCounter('apiRequests');
     if (reply.statusCode >= 400) {
       incrementCounter('apiErrors');
     }
+    observeHttp(request, reply);
   });
 
   /**
@@ -164,6 +169,7 @@ export function buildApp({
   });
 
   registerHealthRoutes(app, { db, probes, timeoutMs: healthTimeoutMs, consumerLag });
+  registerMetricsRoute(app, metrics);
   registerConfigRoutes(app, { db, cache: flagCache });
   registerMenuRoutes(app, db);
   registerOrderReadRoutes(app, db);

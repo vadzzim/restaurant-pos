@@ -3,6 +3,7 @@ import type { Db } from '@pos/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { incrementCounter } from '../../debug/application/counters.js';
+import { observeMutation } from '../../observability/prometheus.js';
 import { applyMutation, type MutationInput } from '../application/mutation-handler.js';
 
 /**
@@ -61,6 +62,7 @@ export async function executeMutation(
   const body = outcome.body;
 
   countOutcome(body.status);
+  observeMutation(body.status);
 
   const fields = {
     orderId: input.orderId,

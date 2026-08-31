@@ -16,6 +16,7 @@
     "@pos/contracts": "workspace:*",
     "@pos/db": "workspace:*",
     "@pos/domain": "workspace:*",
+    "@prometheus-io/client": "^0.16.1",
     "@socket.io/redis-adapter": "^8.3.0",
     "drizzle-orm": "^0.45.2",
     "fastify": "^5.12.1",
