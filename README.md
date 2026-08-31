@@ -16,11 +16,10 @@ working properly rather than many things working shallowly:
 Three processes — `web`, `api`, `worker` — over PostgreSQL, Redpanda and Redis.
 
 **Documentation.** [`docs/architecture.md`](docs/architecture.md) has the diagrams and the scale
-section; [`docs/interview-guide.md`](docs/interview-guide.md) has the pitch, a code walkthrough, the
-demo script and the answers; [`docs/adr/`](docs/adr/README.md) has the eighteen decisions;
+section; [`docs/adr/`](docs/adr/README.md) has the nineteen decisions;
 [`docs/known-problems.md`](docs/known-problems.md) has what is wrong with it; and
 [`docs/definition-of-done.md`](docs/definition-of-done.md) walks the acceptance criteria clause by
-clause, including the three that are not met.
+clause, including the one that is still not met.
 
 ## Requirements
 

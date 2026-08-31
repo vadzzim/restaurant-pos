@@ -139,7 +139,7 @@ sequenceDiagram
     else conflict, 409
         A-->>E: 409 CONFLICT, canonicalOrder, serverVersion
         E->>D: mark this row CONFLICT, the rest of the order BLOCKED
-        Note over E: the blocked tail is never sent;<br/>other orders keep syncing
+        Note over E: the blocked tail is never sent -<br/>other orders keep syncing
         S-->>U: canonical state beside the local intent
         U->>S: Discard or Rebase
         alt Discard

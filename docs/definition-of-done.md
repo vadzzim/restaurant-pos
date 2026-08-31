@@ -1,8 +1,10 @@
 # Definition of done, walked
 
 `docs/spec.md` §26, clause by clause, with the thing that proves each one. Written in M19 against
-the repository as it stands, and deliberately unflattering: **four** clauses below are not fully
-met — two of them not met at all — and one more is carried by an argument rather than by a test.
+the repository as it stands, and deliberately unflattering: **three** clauses below are not fully
+met — one of them not met at all — and one more is carried by an argument rather than by a test.
+Clause 18 was the second of the two and was closed after the repository got a remote; the sentence
+above is the only number in this document that moves.
 
 Legend: **proved** — an automated check fails if the clause is false. **argued** — the reasoning is
 written down and reviewable, but no test would fail. **partial** — stated where it falls short.
@@ -147,28 +149,35 @@ not force the interleaving. They cannot fail falsely, but neither is a proof tha
 was broken — the reasoning is in `build-log.md`, and reasoning is not a test. Forcing a genuine race
 needs advisory-lock choreography or a fault-injecting proxy.
 
-### 18. CI is green on a clean checkout — **not met**
+### 18. CI is green on a clean checkout — _proved, by two runs_
 
-`.github/workflows/ci.yml` is complete — three jobs (`verify`, `e2e`, `images`), installing from the
-lockfile, declaring no service containers of its own because `verify:integration` and `test:e2e` own
-their lifecycles, and uploading both verification logs. It has **never run**: this repository has no
-git remote. What has been established is that its commands pass locally, which is the same command
-list.
+Written in M19 as **not met**, because the workflow was complete and had never executed: the
+repository had no remote, and what had been established was only that the same command list passed
+locally. That is now closed. `.github/workflows/ci.yml` ran on a clean GitHub checkout and every
+job is green — `verify` (lint, typecheck, unit, `verify:integration`, build), `e2e`, and `images`
+over the matrix `api, worker, web`, each image built _and started_.
 
-To close it: push to a remote and read the run. Nothing in the workflow is known to be wrong; it is
-simply unexecuted, and calling that "green" would be the kind of claim this document exists to
-refuse.
+Two runs, on two commits, so the first is not a coincidence:
+[06b6a79](https://github.com/vadzzim/restaurant-pos/actions/runs/33415271193) and
+[f2ebef3](https://github.com/vadzzim/restaurant-pos/actions/runs/33416213901).
 
-### 19. The architecture doc and interview guide are complete and honest about weaknesses — _met, by inspection_
+Nothing needed configuring for it, which is itself part of the clause: no secrets, no `services:`
+block (`verify:integration` and `test:e2e` own their container lifecycles), and no `.env` —
+`docker-compose.yml` has no variable substitutions, `@pos/config` defaults every URL to the ports
+Compose publishes, and every `--env-file` outside the `dev` scripts is `--env-file-if-exists`. A
+clean checkout is genuinely all it takes.
+
+### 19. The architecture documentation is complete and honest about weaknesses — _met, by inspection_
 
 `docs/architecture.md` — three Mermaid diagrams (system, offline sync including the blocked-queue
 branch, outbox), plus the §23 scale section split into _already true here_ and _would have to be
-built_. `docs/interview-guide.md` — the five-minute pitch, the fifteen-minute walkthrough, the
-demo script table over all ten §19 scenarios, answers to all eighteen questions §23 names, and ten
-weaknesses drawn from `known-problems.md` rather than invented.
+built_. Behind it, nineteen ADRs in Context / Decision / Consequences form, fourteen of them also
+recording the alternatives considered — §23's eighteen questions are answered there and in the
+tests, where an answer can be checked rather than recited.
 
-Honesty is delegated rather than performed: `docs/known-problems.md` carries the accepted limits and
-a P2/P3 backlog of twenty-eight entries, and the guide chooses from it.
+Honesty is delegated rather than performed: `docs/known-problems.md` carries the accepted limits
+and the P2/P3 review backlog, and its count moves — twenty-eight entries when this clause was first
+walked, five open P3s after the M20 and M24 sweeps.
 
 ### 20. `pnpm lint typecheck test build` are green — _proved, by running them_
 

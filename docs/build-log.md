@@ -2068,9 +2068,9 @@ because Playwright resolves like a bundler), build, 251 web tests.
 ## M19 — Documentation and the finale
 
 The last milestone, and the only one that wrote no source. §23 asks for four documents;
-`docs/architecture.md`, `docs/interview-guide.md` and the README were the brief, and
-`docs/definition-of-done.md` was added because §26 wanted a walk and a walk buried inside the
-interview guide would have been a claim rather than an audit.
+`docs/architecture.md`, the README and the pitch-and-answers material were the brief, and
+`docs/definition-of-done.md` was added because §26 wanted a walk, and a walk buried inside a
+document written to be read aloud would have been a claim rather than an audit.
 
 **The whole method was to link, not to re-derive.** Every answer §23 asks for had already been
 argued once — in an ADR, in this file, or beside the code — and re-deriving it in prose would have
@@ -2228,7 +2228,7 @@ covered by a test that makes the report throw at the call site.
 ### What the fixes falsified elsewhere
 
 Three documents claimed the resolution is never written: `/demo`'s §19.3 step 7, weakness 7 in the
-interview guide, and the backlog entry itself. The demo step now reads the row as `REBASED` and
+pitch material, and the backlog entry itself. The demo step now reads the row as `REBASED` and
 names the honest limit that replaces it — an offline resolution is still never recorded. Weakness 7
 is replaced by the M13 cache-aside race, drawn from `known-problems.md` like the other nine rather
 than invented. Weakness 10's "eleven scans every two seconds" is now twenty, and says so.
@@ -2709,3 +2709,57 @@ dropping the `status` half — that test reddens and nothing else does.
 
 **Green:** lint, typecheck, `pnpm test` **506 passed** (505 + one), build, `pnpm verify:multi` PASS,
 and the api CI step run verbatim. The two hand checks M24 left are unchanged.
+
+## CI, executed at last — and the documentation that had assumed it never would
+
+Not a milestone. The repository got a remote, and the one claim in this project that had been stated
+and not carried out was carried out.
+
+**What the push established that local runs could not.** `ci.yml` had been complete since M18 and
+had never executed once; M19 recorded that honestly and M24 tested its `images` steps by hand with
+`docker run`. It now runs on a clean GitHub checkout, and every job is green across two commits —
+`verify`, `e2e`, and `images` over `api, worker, web` — so the first run is not a coincidence.
+Nothing needed configuring, which is the part worth writing down: no secrets, no `services:` block,
+and **no `.env`**. `docker-compose.yml` has no `${...}` substitution anywhere, `@pos/config` defaults
+every URL to the ports Compose publishes, and every `--env-file` outside the `dev` scripts is
+`--env-file-if-exists`. A clean checkout is genuinely all it takes, and that was an assumption until
+a runner tested it.
+
+**What is still not established.** The run logs need a token — the unauthenticated API answers 403 —
+so green is read off step statuses and the two uploaded artifacts, not off the text of
+`integration.log`. Worth knowing before quoting a line from it.
+
+**What the push falsified elsewhere.** Four documents:
+
+- `definition-of-done.md` clause 18 said "It has **never run**: this repository has no git remote",
+  and its header counted **four** clauses not fully met, two of them not met at all. Now three and
+  one; clause 21, the hand smoke of the main flow, is the last one left.
+- `PROGRESS.md` ended its M24 green block with "**Not run:** … CI itself".
+- `README.md` claimed "the **eighteen** decisions" against nineteen ADRs — 019 arrived in M22 — and
+  "the **three** that are not met" when the audit had listed two even before this.
+- `definition-of-done.md` clause 19 claimed "a P2/P3 backlog of **twenty-eight** entries". Five are
+  open, all P3, after the M20 and M24 sweeps.
+
+**The one broken link in the repository.** The pitch-and-answers document is excluded through
+`.git/info/exclude` and was never committed — `git log --all` finds no trace of it — so the README's
+link to it pointed at nothing for anyone who cloned. Eleven references to it across six files are
+gone: the pointers in `README.md` and `definition-of-done.md`, the deliverable in
+`spec.md` §23 and the clause in §26, the M19 brief and its entry in `MILESTONES.md`, and three
+sentences in this log. The historical entries were rephrased rather than emptied — a build log that
+describes a milestone it did not run is worse than one that names a file you cannot open. `spec.md`
+keeps the eighteen questions, because two other documents point at that list; what it no longer asks
+for is a single document written to be read aloud.
+
+**And one defect only a renderer could find.** GitHub renders `docs/architecture.md`, and the
+offline-sync sequence diagram did not render at all — a mermaid parse error where the §14 note reads
+`the blocked tail is never sent;<br/>other orders keep syncing`. In mermaid `;` is a statement
+separator, so the note ended there and `<br/>other orders keep syncing` began a statement that is
+not one. Three other notes in the same file carry `<br/>` and render fine, which is the whole
+control: the semicolon was the defect. It shipped in M19 (b468de2) and survived five milestones
+because nothing in this pipeline renders markdown — `pnpm lint` checks that Prettier agrees with the
+formatting, not that a fenced diagram parses. A hyphen now, matching the two notes below it.
+
+Added afterwards: the CI badge in the README, and a `concurrency` group that cancels superseded
+pull-request runs and never a push, because a push to `main` is one milestone commit and the claim
+is about that commit. `PROGRESS.md`'s housekeeping line for a stray container from M24's image
+probing is gone; the container is gone too.

@@ -219,8 +219,8 @@ Verification: `pnpm test:e2e` green locally and in CI.
 
 ### M19 — Documentation and finale
 `docs/architecture.md` with Mermaid diagrams including the blocked-queue branch. All eleven ADRs.
-The whole of `docs/interview-guide.md`, including the weaknesses section and the answers listed in
-§23. The scale section. The README. Final run of `pnpm lint typecheck test build` plus
+The weaknesses section and the answers §23 lists, each landing on an ADR or a test rather than on
+prose. The scale section. The README. Final run of `pnpm lint typecheck test build` plus
 `pnpm verify:integration` and a manual smoke of the main flow.
 Verification: walk the Definition of done in §26 point by point, honestly.
 

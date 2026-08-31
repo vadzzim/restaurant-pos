@@ -54,12 +54,14 @@ CI smoke commands were run by hand against `pos-*:local`, the api one **verbatim
 under `bash -e -o pipefail`; `pnpm test:e2e` against a foreign API refuses in **one second**, tearing
 down nothing.
 
-**CI has now actually run.** Pushed to `github.com/vadzzim/restaurant-pos`; `ci.yml` fired on
-`06b6a79` and all five jobs are green — [run
-33415271193](https://github.com/vadzzim/restaurant-pos/actions/runs/33415271193). Nothing needed
-configuring: no secrets, no service containers, no `.env` — `@pos/config` defaults every URL to the
-ports Compose publishes and every `--env-file` in the repo is `--env-file-if-exists`. Added after:
-a README badge and a PR-only `concurrency` group.
+**CI has now actually run**, on `github.com/vadzzim/restaurant-pos`: five green jobs on each of two
+commits ([06b6a79](https://github.com/vadzzim/restaurant-pos/actions/runs/33415271193),
+[f2ebef3](https://github.com/vadzzim/restaurant-pos/actions/runs/33416213901)). Nothing needed
+configuring — no secrets, no service containers, no `.env`: Compose has no `${...}` substitution,
+`@pos/config` defaults every URL to the ports it publishes, and every `--env-file` outside the `dev`
+scripts is `--env-file-if-exists`. Run logs need a token, so green is read off step statuses.
+The push falsified four documents and closed clause 18; the sweep, including eleven references to an
+excluded document that was never committed, is in `build-log.md`.
 
 ## What exists
 
@@ -121,8 +123,5 @@ because **a line filed as a defect is not thereby one**.
 3. **Still from M19:** walk §19.1 by hand, force a real interleaving in §21.1 and §21.10.
    (Reading a real CI run is done — see above.) `definition-of-done.md` maps what is proved, what is
    argued and what is neither.
-
-**Housekeeping:** `docker rm -f infallible_bhabha` — an idle container left by M24's image probing;
-`docker rm` is denied inside a session.
 
 Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, `pnpm dev` (:5173).

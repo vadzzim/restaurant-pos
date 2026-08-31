@@ -223,9 +223,9 @@ Generic last-write-wins is unacceptable.
   to "merge independent additions where safe", which contradicted the strict versioned UPDATE in
   §6 — a stale `baseVersion` never matches, so the merge could never have run. Merging happens
   only through the explicit rebase in §14.1, driven by a human.
-  Server-side replay of provably commutative operations is a real alternative, and it is discussed
-  in the interview guide as the road not taken: it is a small CRDT, it is where subtle bugs live,
-  and it quietly reintroduces last-write-wins for the cases it gets wrong.
+  Server-side replay of provably commutative operations is a real alternative, and it is the road
+  not taken: it is a small CRDT, it is where subtle bugs live, and it quietly reintroduces
+  last-write-wins for the cases it gets wrong.
 - `CANCELLED`: reject `ADD_ITEM`, `REMOVE_ITEM`, `CHANGE_QUANTITY`, `SEND_TO_KITCHEN`,
   `START_PREPARING`, `MARK_READY`, `PAY`.
 - `PAID`: reject any modification.
@@ -356,8 +356,8 @@ pretend otherwise. The chosen semantics:
   canonical snapshot on reconnect and on a periodic timer;
 - duplicate emits are harmless because of that client-side filtering.
 
-This is the correct answer to "what if WebSocket messages are missed" and is stated as such in the
-interview guide.
+This is the correct answer to "what if WebSocket messages are missed", and the three mechanisms
+above are where it is implemented rather than merely asserted.
 
 ### 12.3 Kitchen ticket printing — the BullMQ job
 
@@ -380,7 +380,7 @@ That is a deliberate choice, not an oversight. A missing ticket loses an order; 
 wastes paper. For a kitchen, at-least-once is the correct trade, and the same reasoning is why real
 POS printers expose an idempotency key — which the fake printer here implements, so that §21.14
 tests a real property of *this* endpoint rather than pretending to guarantee something about
-physical hardware. The interview guide states this plainly.
+physical hardware. ADR 014 states this plainly.
 
 ## 13. WebSockets
 
@@ -665,16 +665,16 @@ ships the artifacts that back that up.
   004-idempotency, 005-transactional-outbox, 006-kafka-at-least-once, 007-drizzle,
   008-feature-flags, 009-kitchen-projection, 010-db-outbox-retries, 011-health-and-degradation.
   Format: Context / Decision / Consequences / Alternatives considered.
-- `docs/interview-guide.md` — critically important. A 5-minute architecture explanation; a
-  15-minute technical walkthrough; a demo script covering all ten scenarios; strong answers to
-  the likely interviewer questions: why not last-write-wins, why Kafka, why Redis, why an outbox,
-  why not exactly-once, what happens when the client retries, what happens when Kafka delivers
-  twice, what if the browser closes while offline, what if two terminals modify the same order,
-  what if WebSocket messages are missed, what if the outbox publisher crashes, what if PostgreSQL
-  commits but Kafka is down, why retries live in Postgres rather than BullMQ, why readiness
-  ignores the broker, how this scales to 20,000 restaurants, how to shard or partition, how
-  multi-region would work, what would change in a real payment system, and **what the biggest
-  weaknesses of this architecture are**.
+- **The eighteen likely questions, answered where the answer belongs** — critically important, and
+  deliberately not one document: each answer lands on an ADR, a test or a section of
+  `docs/architecture.md`, so that it can be checked rather than recited. The questions are: why not
+  last-write-wins, why Kafka, why Redis, why an outbox, why not exactly-once, what happens when the
+  client retries, what happens when Kafka delivers twice, what if the browser closes while offline,
+  what if two terminals modify the same order, what if WebSocket messages are missed, what if the
+  outbox publisher crashes, what if PostgreSQL commits but Kafka is down, why retries live in
+  Postgres rather than BullMQ, why readiness ignores the broker, how this scales to 20,000
+  restaurants, how to shard or partition, how multi-region would work, what would change in a real
+  payment system, and **what the biggest weaknesses of this architecture are**.
   Do not pretend the architecture is perfect. Discuss trade-offs explicitly.
 - A scale section — documented, not implemented: stateless API replicas, connection pooling,
   WebSocket scaling, the Redis Socket.IO adapter, partition count, hot partitions, partition key
@@ -716,6 +716,6 @@ creation are atomic. Events genuinely flow through Redpanda, with retries and de
 PostgreSQL. A duplicate Kafka event does not duplicate effects. Canonical updates reach connected
 clients over WebSocket, across two API instances. The polling fallback works and is
 percentage-rolled by feature flag. Critical consistency guarantees have automated tests, including
-the two crash-window cases. CI is green on a clean checkout. The architecture doc and interview
-guide are complete and honest about weaknesses. `pnpm lint typecheck test build` are green.
+the two crash-window cases. CI is green on a clean checkout. The architecture documentation is
+complete and honest about weaknesses. `pnpm lint typecheck test build` are green.
 The main flow has been smoke-tested by hand.
