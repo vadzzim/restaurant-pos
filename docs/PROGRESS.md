@@ -5,9 +5,9 @@
 
 ## Current state
 
-**M25 is complete.** M0–M19 built the system, M20–M24 closed the review backlog and deployment
-surface, and M25 added the repository's first Prometheus-compatible operator surface without adding
-monitoring infrastructure.
+**M26 is complete.** M0–M19 built the system, M20–M24 closed the review backlog and deployment
+surface, M25 added the Prometheus operator surface, and M26 made the evidence immediately visible
+and reproducible for an interviewer.
 
 The API exposes six bounded-label metric families at `/metrics`: HTTP count/duration, mutation
 outcomes, WebSocket connections, durable outbox/print states, and oldest unpublished outbox age.
@@ -15,10 +15,18 @@ The two durable gauges share one aggregate PostgreSQL query per scrape; normal r
 none. Starter alerts cover old outbox work and outbox/print dead letters. Consumer lag, distributed
 tracing, and a consumer-side dead-letter topic remain explicitly unimplemented.
 
+The README now opens with a concrete requirement-to-implementation map and a Mermaid diagram. A
+captioned 87.8-second H.264 MP4 is published as a GitHub attachment rather than stored in Git;
+`pnpm demo:record` deterministically rebuilds its local WebM source against the production Vue
+bundle, PostgreSQL, Redis, Redpanda, API, and worker. The ordinary Playwright spec remains the CI
+path and does not overwrite the recording.
+
 **Green:** format, lint, typecheck, `pnpm test` **507 passed**, `verify:integration` (104 API, 68
 worker, three real broker/queue round trips), `test:e2e`, production builds, and `verify:multi` — a
 mutation through replica A reached a socket on replica B. The new metrics test proves route labels
-contain no order UUID and PostgreSQL-backed gauges report inserted outbox and print states.
+contain no order UUID and PostgreSQL-backed gauges report inserted outbox and print states. The demo
+recording passed, local Markdown links resolve, Mermaid CLI rendered the README diagram, and no
+Playwright scratch recording remains.
 
 ## What exists
 
@@ -32,7 +40,7 @@ contain no order UUID and PostgreSQL-backed gauges report inserted outbox and pr
 - Infrastructure and proof — PostgreSQL, Redis, Redpanda, three production images, two-API Compose
   overlay, CI, Vitest/integration/Playwright suites, and lifecycle-owning `verify:*` scripts.
 - Decisions and limits — ADR 001–019, `architecture.md`, `known-problems.md`, and milestone briefs
-  M01–M25.
+  M01–M26.
 
 ## Standing decisions
 
@@ -57,7 +65,6 @@ HTTP → outbox → Kafka → consumer hop. Production auth/rate limiting are al
 
 ## Next milestone
 
-**M26 — portfolio presentation and recorded demo.** Move the engineering evidence into the first
-README screenful, expose the architecture diagram, and add a deterministic captioned Playwright
-recording for the realtime, offline-sync, conflict, and outbox-recovery paths. Keep the existing E2E
-spec unchanged and do not fake a GIF or add media tooling.
+There is no planned M27. The highest-ROI next engineering work is consumer poison-message
+isolation/dead-lettering, then Kafka lag metrics and asynchronous tracing. The only verification not
+available locally is the remote GitHub Actions run for commits M25 and M26; push them when desired.

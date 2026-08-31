@@ -46,8 +46,9 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M23 | The cached client | M | **Opus** | yes | done |
 | M24 | The deployment surface | M | **Opus** | yes | done |
 | M25 | Prometheus observability | M | **Opus** | yes | done |
+| M26 | Portfolio presentation and recorded demo | M | **Opus** | yes | done |
 
-**Twenty-six milestones, M0 through M25 — all run.** The scope grew from the review's
+**Twenty-seven milestones, M0 through M26 — all run.** The scope grew from the review's
 additions and nothing was cut; that was a deliberate call, recorded in `docs/PROGRESS.md`.
 
 **M10 was first on this list and was built anyway** — see ADR 014 for what it turned out to be
@@ -285,7 +286,7 @@ on tags rather than digests. Verification: recreating a replica under `verify:mu
 
 ---
 
-## Portfolio passes, M25
+## Portfolio passes, M25–M26
 
 ### M25 — Prometheus observability
 A deliberately small Prometheus surface at `/metrics`: bounded HTTP and mutation counters, request
@@ -294,3 +295,13 @@ on scrape. Add one integration test, a metric catalogue, and three alert example
 Prometheus deployment, dashboards, tracing, or pretend consumer lag is exported. Verification:
 lint, typecheck, 507 tests, real integration round trips, the production images, and the existing
 two-replica assertion.
+
+### M26 — Portfolio presentation and recorded demo
+Move the system's strongest engineering evidence, CI badge, and an implemented-components diagram
+into the first README screenful. Reuse the existing Playwright lifecycle to record a captioned,
+deterministic one-minute demonstration of realtime kitchen delivery, offline queue drain, explicit
+conflict recovery, and a paused/resumed outbox. Keep the ordinary E2E spec unchanged, publish a
+browser-compatible H.264 MP4 outside Git history, keep generated source media local, and clean
+recorder scratch files without adding a media dependency. Verification: the recording spec and
+ordinary E2E both pass, the video metadata is sane, every local README link resolves, and Mermaid
+CLI renders the diagram.

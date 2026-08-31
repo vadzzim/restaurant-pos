@@ -62,9 +62,13 @@ const GROUP_JOIN_TIMEOUT_MS = 120_000;
  * user who keeps a demo stack up, minus the part where nobody could tell afterwards which it was.
  */
 const REUSE_API = process.argv.includes('--reuse-api');
+const RECORD_DEMO = process.argv.includes('--demo');
+if (RECORD_DEMO) {
+  process.env.DEMO_RECORD = '1';
+}
 
 const runner = createRunner({
-  logName: 'e2e.log',
+  logName: RECORD_DEMO ? 'demo-recording.log' : 'e2e.log',
   services: SERVICES,
   keep: process.argv.includes('--keep'),
 });
@@ -190,7 +194,7 @@ async function main() {
   }
 
   const { code, failed } = await runner.runSteps([
-    ['End-to-end spec', 'pnpm', ['exec', 'playwright', 'test']],
+    [RECORD_DEMO ? 'Demo recording' : 'End-to-end spec', 'pnpm', ['exec', 'playwright', 'test']],
   ]);
 
   // A process this script started and that died mid-run is the most likely cause of a spec that
@@ -204,7 +208,7 @@ async function main() {
   const reused = apiAlreadyUp ? ' (against the API already running, --reuse-api)' : '';
   const summary =
     code === 0
-      ? `the end-to-end flow passed${reused}`
+      ? `${RECORD_DEMO ? 'the demo video was recorded' : 'the end-to-end flow passed'}${reused}`
       : `${failed} failed${crashed.length > 0 ? ` (${crashed.join(' and ')} exited)` : ''}`;
   return runner.finish(code, summary);
 }

@@ -461,29 +461,6 @@ watch(terminalId, async () => {
     </div>
 
     <p
-      v-else-if="orders.pendingCount"
-      class="flex flex-wrap items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
-    >
-      <span class="flex-1">
-        <strong>{{ orders.pendingCount }} mutation(s) queued locally.</strong>
-        <span v-if="orders.pendingForOtherOrders">
-          {{ orders.pendingForOtherOrders }} of them belong to an order this screen has left — the
-          queue is per aggregate and they sync on their own.
-        </span>
-        Each keeps its <code>mutationId</code> across a reload, so a re-send is answered
-        <code>ALREADY_APPLIED</code> rather than applied twice.
-      </span>
-      <button
-        type="button"
-        class="min-h-12 rounded-lg border border-amber-500 px-4 font-semibold disabled:opacity-40"
-        :disabled="committing || offline"
-        @click="syncNow"
-      >
-        Sync now
-      </button>
-    </p>
-
-    <p
       v-if="offline"
       class="rounded-lg border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900"
     >
@@ -753,5 +730,29 @@ watch(terminalId, async () => {
         </form>
       </div>
     </div>
+
+    <!-- Queue detail follows the tap targets so its short online appearance cannot move them. -->
+    <p
+      v-if="!orders.halted && orders.pendingCount"
+      class="flex flex-wrap items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+    >
+      <span class="flex-1">
+        <strong>{{ orders.pendingCount }} mutation(s) queued locally.</strong>
+        <span v-if="orders.pendingForOtherOrders">
+          {{ orders.pendingForOtherOrders }} of them belong to an order this screen has left — the
+          queue is per aggregate and they sync on their own.
+        </span>
+        Each keeps its <code>mutationId</code> across a reload, so a re-send is answered
+        <code>ALREADY_APPLIED</code> rather than applied twice.
+      </span>
+      <button
+        type="button"
+        class="min-h-12 rounded-lg border border-amber-500 px-4 font-semibold disabled:opacity-40"
+        :disabled="committing || offline"
+        @click="syncNow"
+      >
+        Sync now
+      </button>
+    </p>
   </section>
 </template>

@@ -16,6 +16,7 @@
     "test:unit": "pnpm run build:packages && pnpm --filter @pos/domain --filter @pos/web run test",
     "test:e2e": "node scripts/verify-e2e.mjs",
     "test:e2e:run": "playwright test",
+    "demo:record": "node scripts/verify-e2e.mjs --demo",
     "verify:integration": "node scripts/verify-integration.mjs",
     "verify:multi": "node scripts/verify-multi-instance.mjs",
     "build": "pnpm run build:packages && pnpm --filter @pos/api --filter @pos/web --filter @pos/worker run build",

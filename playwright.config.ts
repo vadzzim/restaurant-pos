@@ -21,10 +21,12 @@ import { defineConfig, devices } from '@playwright/test';
 /* eslint-disable no-restricted-syntax */
 const isCI = process.env.CI !== undefined && process.env.CI !== '';
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:4173';
+const recordsDemo = process.env.DEMO_RECORD === '1';
 /* eslint-enable no-restricted-syntax */
 
 export default defineConfig({
   testDir: './e2e',
+  testMatch: recordsDemo ? '**/demo.spec.ts' : '**/kitchen-flow.spec.ts',
 
   // The stack is shared and singular: one database, one outbox publisher, one kitchen projection.
   // Parallel workers would be four browsers writing to the same aggregate table, which is a fine
