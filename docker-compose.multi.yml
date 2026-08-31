@@ -21,6 +21,15 @@
 # `@pos/config` established the convention; this stack is the one runner that never got it. The
 # name is spelled here as the containers see it and in the script as the host sees it, and the two
 # have to agree.
+#
+# **A separate database is only a third of the isolation, and the first attempt shipped only that**
+# (found by the Codex review of M21). The runner preserves services that were already running, so
+# the user's demo API and worker are a supported case — and while these three shared the demo's
+# Kafka topic, its consumer groups and its Redis, a demo consumer could be handed a `pos_multi`
+# event and write the projection into `pos`, and a demo realtime consumer could carry the broadcast
+# §19.10 asserts, so the smoke test would pass with this stack's own consumer broken. Hence the
+# `.multi` topic, the `-multi` groups and Redis database 1 below: three names and one number, and
+# the two stacks cannot touch each other anywhere.
 
 name: restaurant-pos
 
@@ -38,8 +47,13 @@ services:
       LOG_LEVEL: warn
       API_HOST: 0.0.0.0
       DATABASE_URL: postgresql://pos:pos@postgres:5432/pos_multi
-      REDIS_URL: redis://redis:6379
+      # Database 1: the demo stack is on 0, and the Socket.IO adapter, presence and §20's shared
+      # counters all live in whichever one this points at.
+      REDIS_URL: redis://redis:6379/1
       KAFKA_BROKERS: redpanda:29092
+      KAFKA_ORDER_EVENTS_TOPIC: restaurant.order.events.multi
+      KITCHEN_CONSUMER_GROUP: kitchen-multi
+      REALTIME_CONSUMER_GROUP: realtime-multi
     ports:
       - '3001:3000'
     # `127.0.0.1`, never `localhost`: in the Node image `/etc/hosts` maps `localhost` to `::1` as
@@ -86,8 +100,11 @@ services:
       NODE_ENV: production
       LOG_LEVEL: warn
       DATABASE_URL: postgresql://pos:pos@postgres:5432/pos_multi
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://redis:6379/1
       KAFKA_BROKERS: redpanda:29092
+      KAFKA_ORDER_EVENTS_TOPIC: restaurant.order.events.multi
+      KITCHEN_CONSUMER_GROUP: kitchen-multi
+      REALTIME_CONSUMER_GROUP: realtime-multi
       # The fake printer is an endpoint on the API (§12.3); `localhost` here would be the worker
       # itself, and every ticket would dead-letter. Either replica serves it.
       PRINTER_URL: http://api-1:3000/api/printer/print

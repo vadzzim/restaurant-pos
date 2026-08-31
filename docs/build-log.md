@@ -2370,3 +2370,41 @@ together. What the assertion holds is the _arithmetic between them_. Proved by a
 `recalculateTotal`'s `sum(quantity * unit_price_cents)` and running the spec: `Received string:
 "Total$24.01"` against an expected `$24.00`, which is a defect no other test in the repository
 would have noticed.
+
+### M21 review round 2 — Codex, and the two thirds of an isolation
+
+Two findings, and the first is the more instructive: it is the same defect the milestone was written
+to close, one layer further out.
+
+**A separate database is a third of an isolation.** `verify:multi` preserves services that were
+already running — the user's demo API and worker are a supported case — and while the overlay shared
+the demo's Kafka topic, its consumer groups and its Redis, the new database bought nothing. Kafka
+can hand a `pos_multi` event to a demo consumer, which writes `processed_events` and
+`kitchen_tickets` into `pos`; worse, a demo realtime consumer can carry the very broadcast §19.10
+asserts, so the smoke test would pass with _this stack's_ consumer broken. Three names and one
+number fix it: `restaurant.order.events.multi`, `kitchen-multi`, `realtime-multi`, Redis database 1.
+They have to stay in step with the script, exactly as the database name does.
+
+That fix then had a defect of its own, which is why the topic is now created beside the database
+rather than left to whoever subscribes first. `ensureOrderEventsTopic` gives the topic three
+partitions on purpose — §11's ordering is per order key and the count is meant to be ours rather
+than a broker default — but the replicas start before `worker-prod`, which waits on `api-1`, and a
+KafkaJS `subscribe` auto-creates a missing topic with the broker's default of one. On the demo topic
+that race has been invisible since M3, because the topic already exists; on a fresh `.multi` topic
+it would have decided the partition count on every clean broker.
+
+Proved by the run and then by looking: PASS, `kitchen-multi` and `realtime-multi` `Stable` while the
+demo's `kitchen` and `realtime` sat `Empty`, `rpk topic describe` reporting `PARTITIONS 3`, and
+`dbsize` reading 1 against database 0's 6.
+
+**A stop that failed was reported as a stop.** `closedWithin()` answers whether the child is gone,
+and the graceful branch took that as success — but both apps set `process.exitCode = 1` when a
+cleanup step throws, so a run could print PASS over a process that had just said it could not shut
+down cleanly, leaving whatever it had not closed for the next one. `stop()` now reads the code, and
+only for a stop it asked for: a killed process says nothing by its code, since on Windows a
+terminate is always 1. `finish()` turns the list into the result the same way a failed teardown
+already did.
+
+Proved by a `throw` at the end of the worker's shutdown, after `closeDb()`, so that everything is
+closed and only the code is wrong: the spec reports `1 passed` and the run reports
+`FAIL — checks passed but worker did not shut down cleanly`.

@@ -7,7 +7,9 @@
 // `lib/compose-run.mjs` with: bring up, run, tear down only what this run started, write to a
 // file. Never a live log stream — see CLAUDE.md.
 //
-// The stack has its own database (`pos_multi`), so a smoke run never writes into the demo.
+// The stack is isolated from the demo one that may be running beside it: its own database
+// (`pos_multi`), its own Kafka topic and consumer groups, and its own Redis database. Both halves
+// of that are created here — see `docker-compose.multi.yml` for why a database alone is not enough.
 //
 //   pnpm verify:multi          build, verify, tear down what was started
 //   pnpm verify:multi --keep   leave the stack running (two replicas on :3001 and :3002,
@@ -53,6 +55,22 @@ const STACK_DATABASE_URL = `postgresql://pos:pos@localhost:5432/${STACK_DATABASE
 const CREATE_DATABASE = ['exec', '-T', 'postgres', 'createdb', '-U', 'pos', STACK_DATABASE];
 const ALREADY_EXISTS = 'already exists';
 
+/**
+ * The overlay's own topic, created here rather than left to whoever subscribes first.
+ *
+ * `ensureOrderEventsTopic` in the worker creates it with three partitions on purpose — §11's
+ * ordering guarantee is per order key, and the partition count is meant to be ours rather than a
+ * broker default. But the replicas start *before* `worker-prod` (it waits for `api-1` to be
+ * healthy), and a KafkaJS `subscribe` auto-creates a missing topic with the broker's default of
+ * one. On the demo topic that race is invisible because the topic has existed since M3; on a fresh
+ * `.multi` topic it would decide the partition count every time.
+ *
+ * The count is spelled here to match `KAFKA_ORDER_EVENTS_PARTITIONS` in `@pos/config`.
+ */
+const STACK_TOPIC = 'restaurant.order.events.multi';
+const CREATE_TOPIC = ['exec', '-T', 'redpanda', 'rpk', 'topic', 'create', STACK_TOPIC, '-p', '3'];
+const TOPIC_EXISTS = 'ALREADY_EXISTS';
+
 const runner = createRunner({
   logName: 'multi-instance.log',
   services: SERVICES,
@@ -87,6 +105,11 @@ async function main() {
   const created = await runner.compose(CREATE_DATABASE, { capture: true });
   if (created.code !== 0 && !created.output.includes(ALREADY_EXISTS)) {
     return runner.finish(created.code, `could not create the ${STACK_DATABASE} database`);
+  }
+
+  const topic = await runner.compose(CREATE_TOPIC, { capture: true });
+  if (topic.code !== 0 && !topic.output.includes(TOPIC_EXISTS)) {
+    return runner.finish(topic.code, `could not create the ${STACK_TOPIC} topic`);
   }
 
   const database = { env: { DATABASE_URL: STACK_DATABASE_URL } };

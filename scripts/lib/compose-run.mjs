@@ -139,6 +139,20 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
     // wants to poke at, never about leaving an API holding :3000 for the next run.
     await stopServices();
 
+    // Reported for the same reason a failed teardown is, below: the run promises to leave the
+    // machine as it found it, and a shutdown that threw has left something behind. Raised by the
+    // Codex review of M21, which found this branch reporting PASS over a process that had just
+    // said it could not stop cleanly.
+    if (uncleanStops.length > 0) {
+      const who = uncleanStops.join(' and ');
+      if (exitCode === 0) {
+        exitCode = 1;
+        result = `checks passed but ${who} did not shut down cleanly`;
+      } else {
+        result = `${result}; ${who} also did not shut down cleanly`;
+      }
+    }
+
     if (keep) {
       banner('Teardown skipped (--keep)');
     } else {
@@ -190,6 +204,8 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
 
   /** Long-lived children this run started, newest first, so `finish` can stop them all. */
   const appProcesses = [];
+  /** Services that were asked to stop and reported a failure while doing it; read by `finish`. */
+  const uncleanStops = [];
 
   /**
    * Start a long-lived process and keep it running until `finish`.
@@ -241,6 +257,8 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
     }
 
     let exited = false;
+    /** The child's own code, which only a stop it was *asked* for can be read against. */
+    let exitCode;
     // Set before a deliberate kill, so a signalled exit is not read as a crash. On Windows
     // `kill` is a terminate and the code is always 1, which would make every clean run look
     // failed.
@@ -251,6 +269,7 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
     });
     child.on('close', (code) => {
       exited = true;
+      exitCode = code ?? 1;
       write(`\n[${name}] ${stopping ? 'stopped' : `exited with code ${code ?? 1}`}\n`);
     });
 
@@ -311,6 +330,15 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
           write(`asking ${name} to stop\n`);
           child.stdin.write(`${shutdownCommand}\n`);
           if (await closedWithin(SHUTDOWN_GRACE_MS)) {
+            // A process that was *asked* to stop has an exit code that means something: both apps
+            // set it to 1 when a cleanup step throws, and that is a shutdown that did not finish —
+            // a consumer group member, a Redis key or an open connection left for the next run.
+            // A *killed* process says nothing by its code (on Windows a terminate is always 1),
+            // which is why only this branch reads it. `finish()` turns the list into the result.
+            if (exitCode !== 0) {
+              write(`${name} stopped with code ${exitCode}: its shutdown did not finish cleanly\n`);
+              uncleanStops.push(name);
+            }
             return;
           }
           write(`${name} did not stop when asked; killing it\n`);
