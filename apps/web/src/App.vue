@@ -1,5 +1,10 @@
+<script setup lang="ts">
+import UpdateBanner from './components/UpdateBanner.vue';
+</script>
+
 <template>
   <div class="min-h-screen bg-stone-100 text-stone-950">
+    <UpdateBanner />
     <header class="border-b border-stone-300 bg-[#17201c] text-white">
       <div class="mx-auto flex min-h-16 max-w-6xl items-center justify-between gap-6 px-5">
         <strong class="text-base font-semibold">Restaurant POS</strong>

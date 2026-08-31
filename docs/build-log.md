@@ -2461,3 +2461,67 @@ checking its elements, as the code it replaced did.
 
 **Green:** lint, typecheck, `pnpm test` **478 passed** (475 + one API test + two web), build,
 `verify:integration`.
+
+## M23 — The cached client
+
+The third pass of _The second sweep_: the five browser-surface entries. Two of them turned out to be
+**one argument**, which is the reason for grouping a sweep by surface rather than by date.
+
+**The update banner and the retained cache are the same fix.** `[M17, P2]` was that `activate`
+deletes the previous build's cache while a page still running the old bundle has been claimed by the
+new worker; `[M17, P3]` was that the same event force-reloads that page with no prompt, eating a
+half-typed cover name. Fixing the second makes the first _worse_ — a page nobody reloads runs the old
+bundle indefinitely — so they were fixed together: `activate` keeps `GENERATIONS_KEPT = 2` build
+caches, an `asset` miss in this build's cache falls back across `caches.match`, and
+`controllerchange` raises `pwa/update.ts`'s flag instead of calling `location.reload()`.
+`components/UpdateBanner.vue` renders it in the app header, not over the till — §19 is walked on
+these screens and a modal is something to dismiss before serving anybody.
+
+ADR 017 had named code splitting as the condition to revisit the aggressive `activate`. M23 did the
+revisit **before** the condition arrived, because the condition was no longer the only thing holding
+it up. The ADR now says so rather than contradicting the code.
+
+**One trap inside the fix itself.** `slice(0, -(GENERATIONS_KEPT - 1))` reads correctly and is a
+landmine: at `GENERATIONS_KEPT === 1` it is `slice(0, -0)`, which is `slice(0, 0)`, which deletes
+nothing at all. Counted from the front instead. Found in the review pass, on the review pass's own
+milestone's code.
+
+**`install` no longer fails, the document included.** `[M17, P3]`. ADR 017 argued for failing loudly
+— without the document there is no shell — and the argument was wrong in the one case it mattered: a
+registration landing in the second the network drops leaves the worker stuck `installing` forever,
+which is _no_ worker rather than an empty one. It now activates, and the first navigation that
+reaches the network re-reads the asset list out of the document it just got. That recovery is not
+decoration: the bundle is the one thing runtime caching can never pick up on its own, because the
+page that installed the worker fetched it before the worker existed.
+
+**Two terminals on one order, from the UI.** `[M16, P3]`. `focusOrder` has always been able to do it
+— the pointer is "which order is this device on", and nothing in it says this device opened the order
+— so the fix is a field, plus the `connection.resubscribe()` that was missing from the existing
+"Go to it" button as well: without it the screen shows the order while the socket is still in the
+previous aggregate's room, so §19.3's "POS-1 watches its order change under it" would only arrive on
+the next refetch. Both callers now go through one function.
+
+**`/demo`'s ticks moved into the query string.** `[M16, P3]`. `?scenario=` was already there and
+`DemoView.vue` already argued the case; `?done=1,3,4` keeps the property the in-memory version got
+for free — a fresh link starts empty, so a second walk-through does not start half done — while
+surviving the F5 that a scenario telling you to reload a till invites. `parseDoneSteps` is bounded by
+the scenario's step count, so a hand-edited URL cannot make the counter disagree with the list.
+
+**Falsified, each one:** `GENERATIONS_KEPT = 1` reddens both new `activate` tests; deleting the
+`caches.match` fallback in `cacheFirst` reddens the lazy-chunk one; putting `precacheShell()` back
+on `install` reddens three; disabling the `!shellPrecached` recovery reddens the asset-recovery one;
+restoring the `location.reload()` in `onControllerChange` reddens two (`window` does not exist under
+vitest, which is the point); and dropping the total bound from `parseDoneSteps` reddens the one that
+holds `progressLabel` in step with the list.
+
+**Review pass (one round, P1s only).** One P1-adjacent trap, in the fix's own code, above. Three P3s
+to the backlog: two generations is a number, not a proof, and a tab left across two deploys still
+loses; `shellPrecached` is set before the assets are attempted, so a doubly-failing install is never
+retried; and the new order-id field does not check the order's restaurant.
+
+**Not verified here:** the browser half of the block — the offline reload after a rebuild with a
+dynamic `import()`, POS-2 taking POS-1's order, and F5 on `/demo`. `vite preview` binds and this
+sandbox cannot reach it, so all three are hand checks left for the user. **Green:** lint, typecheck,
+`pnpm test` **490 passed** (478 + twelve), build. `verify:integration` was not re-run: nothing
+outside `apps/web`'s client changed, and `pnpm test:e2e`'s selectors were checked by hand against the
+new form ("Take it" cannot collide with the `exact: true` "Open").

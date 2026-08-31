@@ -9,7 +9,9 @@ import {
   DEMO_SCENARIOS,
   controlAnchor,
   controlsUsed,
+  formatDoneSteps,
   offlineControlFor,
+  parseDoneSteps,
   progressLabel,
   renderInline,
   scenarioById,
@@ -226,5 +228,35 @@ describe('renderInline', () => {
 
   it('leaves an unpaired marker alone rather than opening a tag', () => {
     expect(renderInline('2 ** 8 and a stray `')).toBe('2 ** 8 and a stray `');
+  });
+});
+
+/**
+ * M23: the ticks live in the query string, so a reload mid-demo no longer loses the place. This is
+ * the half that is testable; `DemoView.vue` is the wiring.
+ */
+describe('the ticked steps, as they travel in the URL', () => {
+  it('round-trips a set, one-based and in order', () => {
+    expect(formatDoneSteps(new Set([2, 0, 3]))).toBe('1,3,4');
+    expect([...parseDoneSteps('1,3,4', 10)]).toEqual([0, 2, 3]);
+  });
+
+  it('leaves no key behind for an empty set', () => {
+    expect(formatDoneSteps(new Set())).toBeUndefined();
+  });
+
+  it('reads nothing out of a query this page did not write', () => {
+    // `route.query.done` is `string | string[] | null` before it is anything else.
+    expect(parseDoneSteps(undefined, 5).size).toBe(0);
+    expect(parseDoneSteps(['1', '2'], 5).size).toBe(0);
+    expect(parseDoneSteps('', 5).size).toBe(0);
+    expect(parseDoneSteps('x,,3x,1.5', 5).size).toBe(0);
+  });
+
+  it('drops a step the scenario does not have, so the count cannot disagree with the list', () => {
+    const done = parseDoneSteps('0,1,6,-2', 5);
+
+    expect([...done]).toEqual([0]);
+    expect(progressLabel(done, 5)).toBe('1 of 5');
   });
 });

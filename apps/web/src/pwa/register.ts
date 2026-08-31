@@ -1,3 +1,5 @@
+import { onControllerChange } from './update';
+
 /**
  * Registers the service worker — **in production builds only**.
  *
@@ -10,18 +12,14 @@ export function registerServiceWorker(): void {
   if (!import.meta.env.PROD) return;
   if (!('serviceWorker' in navigator)) return;
 
-  // Whether *this* page was already controlled when it loaded. A first-ever install claims its
-  // clients (that is the point), which fires `controllerchange` — reloading on that would bounce
-  // every first visit. Only a controller being *replaced* means the bundle underneath changed.
+  // Whether *this* page was already controlled when it loaded. Read once, here, because after the
+  // event has fired it is too late to ask. The decision it feeds is in `pwa/update.ts`, which is
+  // where the test can reach it: this function returns early under vitest, since `PROD` is false.
   const hadController = navigator.serviceWorker.controller !== null;
-  let reloading = false;
 
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!hadController || reloading) return;
-    // One reload, guarded: `controllerchange` can fire again during the reload, and a loop here
-    // is an app that never finishes loading.
-    reloading = true;
-    window.location.reload();
+    // Raises the banner; the reload is the operator's (M23, and the reasoning in `update.ts`).
+    onControllerChange(hadController);
   });
 
   window.addEventListener('load', () => {

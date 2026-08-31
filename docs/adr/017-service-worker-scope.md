@@ -24,11 +24,19 @@ snapshot does not look like an error, it looks like the server's truth, and the 
 would never fire. The module has no `fetch`, no `caches`, no DOM and no imports, so its tests run in
 Node over every endpoint in `src/api/client.ts`.
 
-**`skipWaiting` + `clientsClaim`, and one guarded reload on `controllerchange`,** rather than an
-update prompt. The worst failure of a demo is an interviewer reloading into last week's bundle, and
-no unsaved in-memory state is lost — the queue is on disk. Safe only because `router.ts` imports all
-four views statically, so there are no lazy chunks a claimed page could ask for after `activate`
-dropped the old cache. **Introducing code splitting means revisiting this.**
+**`skipWaiting` + `clientsClaim`, and — since M23 — an update _banner_ rather than a reload.** The
+worst failure of a demo is an interviewer reloading into last week's bundle, so the new build still
+claims the page immediately; but the reload itself is now the operator's, because not all in-memory
+state is worthless. The queue is on disk (ADR 013) and a half-typed cover name in the POS header is
+not. `pwa/update.ts` holds the decision — `register.ts` returns early outside `PROD` and so cannot
+be tested — and `components/UpdateBanner.vue` renders it.
+
+That defers the reload indefinitely, so **`activate` keeps two generations of cache** and an `asset`
+miss falls back across all of them. A page left running the old bundle can therefore still fetch
+that bundle's chunks. This was originally argued the other way — safe only because `router.ts`
+imports all four views statically, with code splitting named as the condition to revisit — and M23
+did the revisit _before_ the condition arrived, because the condition was no longer the only thing
+holding it up.
 
 **Registration only under `import.meta.env.PROD`:** in dev a worker intercepting module requests
 makes HMR lie, which reads as a compiler bug.
@@ -40,8 +48,12 @@ the page load that installs the worker fetched the script **before** the worker 
 `clients.claim()` does not replay those requests, so runtime caching alone leaves a first visit one
 offline reload away from a blank app. Deriving the list from the document keeps that out of the
 build, where a generated file would go stale when the output layout changes. Assets are
-best-effort — only a missing document fails the installation. **One cache per build**; `activate`
-deletes every other.
+best-effort, **the document included since M23**: an `install` that could not reach the network used
+to leave the worker stuck `installing` forever, which is no worker and therefore no shell at all,
+rather than an empty cache that fills itself. The first navigation that reaches the network re-reads
+the asset list out of the document it just got, which is where the bundle would otherwise be lost —
+runtime caching alone never sees it. **Two caches at a time** (see above); `activate`
+deletes every older one.
 
 ## Consequences
 

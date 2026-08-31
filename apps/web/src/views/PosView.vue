@@ -39,6 +39,16 @@ const committing = ref(false);
 const showEvidence = ref(false);
 const cover = ref('');
 
+/**
+ * The order id typed into "Open an existing order" — §19.3's second terminal, from the UI.
+ *
+ * Until M23 the only caller of `focusOrder` was the "Go to it" button on a stranded halt, so the
+ * literal two-terminal form of §19.3 (POS-2 cancels behind POS-1's back) needed `curl`. The store
+ * has always been able to do it: the pointer is "which order is this device on", and nothing about
+ * it says this device opened the order.
+ */
+const openId = ref('');
+
 const money = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 
 /**
@@ -173,6 +183,21 @@ const createOrder = (tableNumber: string): Promise<void> =>
     await orders.createOrder(terminalId.value, restaurantId, tableNumber.trim());
     cover.value = '';
     // The socket has to start following the new aggregate's room (§13).
+    connection.resubscribe();
+  });
+
+/**
+ * Put this terminal on an order it did not open.
+ *
+ * The `resubscribe` matters as much as the `focusOrder`: without it the screen shows the order but
+ * the socket is still in the previous aggregate's room, so §19.3's "POS-1 watches its order change
+ * under it" would only arrive on the next refetch. Which is also why "Go to it" now calls this.
+ */
+const openExisting = (orderId: string): Promise<void> =>
+  commit(async () => {
+    if (orderId.trim() === '') return;
+    await orders.focusOrder(orderId.trim());
+    openId.value = '';
     connection.resubscribe();
   });
 
@@ -518,7 +543,7 @@ watch(terminalId, async () => {
         type="button"
         class="min-h-12 rounded-lg border border-rose-500 px-4 font-semibold disabled:opacity-40"
         :disabled="committing"
-        @click="commit(() => orders.focusOrder(strandedId))"
+        @click="openExisting(strandedId)"
       >
         Go to it
       </button>
@@ -703,6 +728,29 @@ watch(terminalId, async () => {
             mutation with its own <code>mutationId</code> and the version shown in the header.
           </p>
         </div>
+
+        <!-- §19.3 without `curl`: two terminals on one order. Below the pad and not beside it,
+             because opening a cover is the common action and this one is a demo path. -->
+        <form
+          class="flex items-end gap-2 border-t border-stone-300 pt-3"
+          @submit.prevent="openExisting(openId)"
+        >
+          <label class="flex-1 text-sm">
+            <span class="mb-1 block text-stone-600">Open an existing order by id</span>
+            <input
+              v-model="openId"
+              class="min-h-12 w-full rounded-lg border border-stone-300 px-3 font-mono text-sm"
+              placeholder="order id from the other till"
+            />
+          </label>
+          <button
+            type="submit"
+            class="min-h-12 rounded-lg border-2 border-stone-400 px-5 font-semibold disabled:opacity-40"
+            :disabled="committing || orders.halted || openId.trim() === ''"
+          >
+            Take it
+          </button>
+        </form>
       </div>
     </div>
   </section>

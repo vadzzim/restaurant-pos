@@ -237,10 +237,55 @@ describe('the service worker', () => {
     expect(await cacheStore.get('pos-shell-build-2')?.match('/index.html')).toBeDefined();
   });
 
-  it('fails the installation when the document itself cannot be fetched', async () => {
+  /**
+   * M23. It used to reject, and ADR 017 argued for that: without the document there is no shell, so
+   * fail loudly. The argument was wrong in the one case it mattered — a registration landing in the
+   * second the network drops leaves the worker stuck `installing` forever, which is *no* worker and
+   * therefore no shell at all, rather than an empty one that fills itself.
+   */
+  it('installs even when the document itself cannot be fetched', async () => {
     network.set('/index.html', null);
 
-    await expect(dispatch('install')).rejects.toThrow(/offline/);
+    await expect(dispatch('install')).resolves.toBe('passthrough');
+  });
+
+  /**
+   * ...and makes good on it. The bundle is the part runtime caching can never pick up on its own —
+   * the page that installed the worker fetched it before the worker existed — so the first
+   * navigation that reaches the network re-reads the asset list out of the document it just got.
+   *
+   * Without that recovery the second half of this test fails: the document is cached by
+   * `networkFirstShell` either way, and its script is not.
+   */
+  it('precaches the assets it missed on the first navigation that answers', async () => {
+    network.set('/index.html', null);
+    await dispatch('install');
+
+    network.set(
+      '/index.html',
+      new Response(
+        '<!doctype html><title>Restaurant POS</title>' +
+          '<script type="module" crossorigin src="/assets/index-abc123.js"></script>',
+      ),
+    );
+    await dispatch('fetch', navigation('/pos/pos-1'));
+
+    network.set('/index.html', null);
+    network.set('/assets/index-abc123.js', null);
+    const document = await dispatch('fetch', navigation('/pos/pos-1'));
+    const script = await dispatch('fetch', get('/assets/index-abc123.js'));
+
+    expect(await (document as Response).text()).toContain('Restaurant POS');
+    expect(await (script as Response).text()).toBe('console.log(1)');
+  });
+
+  it('does not re-read the asset list on every navigation once the shell is precached', async () => {
+    await dispatch('install');
+    extended = 0;
+
+    await dispatch('fetch', navigation('/pos/pos-1'));
+
+    expect(extended).toBe(0);
   });
 
   /** The whole point, end to end: install online, then reload with nothing but the cache. */
@@ -256,14 +301,45 @@ describe('the service worker', () => {
     expect(await (script as Response).text()).toBe('console.log(1)');
   });
 
-  it('drops every cache that is not this build, then claims its clients', async () => {
+  /**
+   * **M23, and the only P2 that was left in `known-problems.md`.** `skipWaiting` + `clientsClaim`
+   * hands a page still running the old bundle to the new worker, and since M23 that page is offered
+   * a banner rather than reloaded — so it may sit there. Dropping its cache underneath it is the
+   * defect; one generation of slack is the fix.
+   *
+   * `pos-shell-build-0` proves the slack is *one*, not unbounded.
+   */
+  it('keeps the previous build and drops everything older, then claims its clients', async () => {
+    cacheStore.set('pos-shell-build-0', new FakeCache());
     cacheStore.set('pos-shell-build-1', new FakeCache());
+    cacheStore.set('a-cache-that-is-not-ours', new FakeCache());
     await dispatch('install');
 
     await dispatch('activate');
 
-    expect([...cacheStore.keys()]).toEqual(['pos-shell-build-2']);
+    expect([...cacheStore.keys()].sort()).toEqual(['pos-shell-build-1', 'pos-shell-build-2']);
     expect(claim).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * The half that makes keeping it worth anything: an `asset` miss in this build's cache falls back
+   * across every cache, so a claimed page can still fetch a chunk only the previous build holds.
+   * That is ADR 017's code-splitting condition, closed before the condition arrives.
+   *
+   * Deleting the `caches.match` fallback in `cacheFirst` reddens this; so does dropping
+   * `GENERATIONS_KEPT` back to 1.
+   */
+  it('serves the previous build a lazy chunk only the previous build ever cached', async () => {
+    const previous = new FakeCache();
+    await previous.put('/assets/lazy-view-old.js', new Response('the old chunk'));
+    cacheStore.set('pos-shell-build-1', previous);
+    await dispatch('install');
+    await dispatch('activate');
+
+    // The old page asks for its chunk with nothing on the network to answer with.
+    const response = await dispatch('fetch', get('/assets/lazy-view-old.js'));
+
+    expect(await (response as Response).text()).toBe('the old chunk');
   });
 
   it('serves a navigation from the network while there is one, refreshing the shell', async () => {

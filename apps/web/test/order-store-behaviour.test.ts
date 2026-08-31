@@ -569,3 +569,39 @@ describe('a queued mutation belongs to the terminal that formed it', () => {
     expect(await localStore.readQueue('pos-1')).toEqual([]);
   });
 });
+
+/**
+ * §19.3's literal two-terminal form, which until M23 needed `curl`: no UI path put a second
+ * terminal on an existing order. The store could always do it — the pointer is "which order is this
+ * device on", and nothing in it says this device opened the order — so what this asserts is that
+ * `focusOrder` works for an order the terminal has **never seen**, which is what the new field in
+ * `PosView.vue` calls. Wiring it up without this being true would produce an empty screen.
+ */
+describe('putting a second terminal on an existing order', () => {
+  it('adopts an order this terminal never opened, and moves its pointer to it', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-2');
+    expect(orders.currentOrderId).toBeUndefined();
+
+    fetchOrderMock.mockResolvedValue(snapshot('order-from-pos-1', 7));
+    await orders.focusOrder('order-from-pos-1');
+
+    expect(orders.currentOrderId).toBe('order-from-pos-1');
+    expect(orders.order?.version).toBe(7);
+    expect(fetchOrderMock).toHaveBeenCalledWith('order-from-pos-1', 'pos-2');
+  });
+
+  it('leaves the pointer alone when the order cannot be read, and says so', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-2');
+
+    fetchOrderMock.mockRejectedValue(new Error('404 Not Found'));
+    await orders.focusOrder('no-such-order');
+
+    // The pointer still moved — that is what `focusOrder` is — but the screen reports the read
+    // rather than drawing a blank order as if it were the server's truth.
+    expect(orders.currentOrderId).toBe('no-such-order');
+    expect(orders.order).toBeUndefined();
+    expect(orders.readError).toContain('404');
+  });
+});

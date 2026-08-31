@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { computed } from 'vue';
+import { type LocationQueryRaw, useRoute, useRouter } from 'vue-router';
 
 import SimulatorPanel from '../components/SimulatorPanel.vue';
 import StateBadge from '../components/StateBadge.vue';
@@ -9,6 +9,8 @@ import {
   DEMO_SCENARIOS,
   controlAnchor,
   controlsUsed,
+  formatDoneSteps,
+  parseDoneSteps,
   progressLabel,
   renderInline,
   scenarioById,
@@ -55,32 +57,57 @@ const selectedId = computed<string>({
       : DEMO_SCENARIOS[0]!.id;
   },
   set: (id: string) => {
-    void router.replace({ path: DEMO_PATH, query: { ...route.query, scenario: id } });
+    // The ticks are dropped, not carried: they belong to the scenario they were made on, and a
+    // walk-through of a different one must not start half done.
+    void router.replace({ path: DEMO_PATH, query: withoutDone({ scenario: id }) });
   },
 });
 
 const scenario = computed<DemoScenario>(() => scenarioById(selectedId.value) ?? DEMO_SCENARIOS[0]!);
 
-/**
- * Where a step's route link points. A step that says "come back here" has to carry the selection
- * with it, or it lands on §19.1 and undoes the whole point of the paragraph above.
- */
-const linkTo = (path: string): string | { path: string; query: Record<string, string> } =>
-  path === DEMO_PATH ? { path, query: { scenario: selectedId.value } } : path;
+/** This page's query minus the ticks, with `overrides` applied. Every writer below goes through it. */
+function withoutDone(overrides: LocationQueryRaw): LocationQueryRaw {
+  const next: LocationQueryRaw = { ...route.query, ...overrides };
+  delete next.done;
+  return next;
+}
 
-/** Ticked steps, in memory. A second walk-through should start empty, so this resets on switch. */
-const done = ref(new Set<number>());
-watch(selectedId, () => {
-  done.value = new Set();
-});
+/** `{ done: '1,3' }`, or nothing at all — so an empty set leaves no `?done=` behind. */
+function doneQuery(ticked: ReadonlySet<number>): LocationQueryRaw {
+  const encoded = formatDoneSteps(ticked);
+  return encoded === undefined ? {} : { done: encoded };
+}
+
+/**
+ * Ticked steps — **in the URL, beside the scenario**, and for the same reasons (`?done=1,3,4`).
+ *
+ * They were a `ref` until M23, which meant a reload mid-demo lost the place: the one thing an
+ * interviewer might actually do to this page while walking a scenario that tells them to reload a
+ * till. The parsing and the formatting are in `domain/demo-script.ts`, where they are tested; this
+ * is only the wiring, and switching scenario still clears them (see `selectedId`'s setter).
+ */
+const done = computed<Set<number>>(() =>
+  parseDoneSteps(route.query.done, scenario.value.steps.length),
+);
 
 function toggle(index: number): void {
   const next = new Set(done.value);
   if (!next.delete(index)) {
     next.add(index);
   }
-  done.value = next;
+  // `replace`, so ticking eight steps does not put eight entries between the operator and Back.
+  void router.replace({ path: DEMO_PATH, query: { ...withoutDone({}), ...doneQuery(next) } });
 }
+
+/**
+ * Where a step's route link points. A step that says "come back here" has to carry the selection
+ * with it, or it lands on §19.1 and undoes the whole point of the paragraph at the top.
+ */
+const linkTo = (path: string): string | { path: string; query: LocationQueryRaw } =>
+  path === DEMO_PATH
+    ? // The ticks travel with it, or a step saying "come back here" would undo the paragraph below.
+      { path, query: { ...withoutDone({ scenario: selectedId.value }), ...doneQuery(done.value) } }
+    : path;
 
 const controls = computed(() => controlsUsed(scenario.value));
 const tabs = computed(() => tabsUsed(scenario.value));

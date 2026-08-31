@@ -711,10 +711,50 @@ export function renderInline(text: string): string {
 }
 
 /**
- * How far through a scenario the operator is. The ticks are a demo aid and live in memory only:
- * persisting them would mean a second walk-through starting half done.
+ * How far through a scenario the operator is.
  */
 export function progressLabel(done: ReadonlySet<number>, total: number): string {
   const ticked = [...done].filter((index) => index >= 0 && index < total).length;
   return `${ticked} of ${total}`;
+}
+
+/**
+ * The ticked steps, as they travel in the query string: `?done=1,3,4`, **one-based**, because the
+ * numbers beside the steps on the page are.
+ *
+ * **Why the URL and not `localStorage`.** `?scenario=` is already there and `DemoView.vue` already
+ * argues the case: half the scenarios send the operator to a till and back, every one of those
+ * round trips unmounts the component, and a `ref` came back empty. Storage would survive that too,
+ * but the URL also survives the Back button, is what gets handed to somebody — "here, this one,
+ * from step four" — and keeps the rule the ticks were given for free before: a fresh link starts
+ * empty, so a second walk-through does not start half done. Nothing here is worth a migration.
+ *
+ * Total-aware, so a hand-edited or stale URL cannot tick a step that does not exist — which is also
+ * what stops `progressLabel` and the list disagreeing.
+ */
+export function parseDoneSteps(raw: unknown, total: number): Set<number> {
+  if (typeof raw !== 'string' || raw === '') return new Set();
+
+  const done = new Set<number>();
+  for (const part of raw.split(',')) {
+    // `Number` and not `parseInt`: `parseInt('3x')` is 3, and a query this page did not write
+    // should be discarded rather than half read.
+    const oneBased = Number(part.trim());
+    if (!Number.isInteger(oneBased)) continue;
+    const index = oneBased - 1;
+    if (index >= 0 && index < total) done.add(index);
+  }
+  return done;
+}
+
+/**
+ * The inverse. `undefined` for an empty set rather than `''`, so the caller deletes the key instead
+ * of leaving `?done=` on every URL the demo produces.
+ */
+export function formatDoneSteps(done: ReadonlySet<number>): string | undefined {
+  if (done.size === 0) return undefined;
+  return [...done]
+    .sort((a, b) => a - b)
+    .map((index) => index + 1)
+    .join(',');
 }

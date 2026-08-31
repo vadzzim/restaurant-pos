@@ -18,10 +18,10 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 > **Swept once in M20, and being swept again in M21–M24.** M20 closed fifteen of thirty entries in
 > one pass over unrelated surfaces, and paid for a fresh context per fix. What was left is grouped
 > **by the surface the fix lives on** — one milestone each, briefs in `MILESTONES.md`, _The second
-> sweep_. M21 took the four that live in the test harness; M22 took the five on the feature-flag
-> path, including the `[M13, P2]` cache race — **so the only P2 left is the service worker's.**
-> Ten lines remain from the seventeen, plus the two each pass opens on itself: M23 is the browser
-> surface, M24 the deployment one.
+> sweep_. M21 took the four in the test harness; M22 the five on the feature-flag path; M23 the five
+> on the browser surface, including the last `[M17, P2]` — **so there is no P2 left in this file.**
+> Five lines remain from the seventeen: M24's three, and M21's and M22's two leftovers. M24 is the
+> deployment surface, and after it the seventeen are closed.
 >
 > Two of M20's fifteen turned out to have been fixed by a later milestone without the line being
 > deleted, which is the argument for sweeping rather than accumulating. **Three of M22's five were
@@ -47,28 +47,21 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   elements are `FlagRow`s, so a hand-written Redis value with the right shape and wrong rows
   reaches `describeFlags`. Pre-existing — the old code cast the same way — and the table is the
   only writer. A zod parse of the payload is the fix; setting the key by hand proves it.
-- **[M17, P2]** `activate` deletes the previous build's cache while a page running the old bundle is
-  still open. Harmless today because `router.ts` imports all four views statically, so there are no
-  lazily fetched chunks — but the day code splitting is introduced, that page can ask for a chunk no
-  cache holds and no network serves. Proved by adding a dynamic `import()` to a view and reloading
-  offline after a rebuild. ADR 017 says this is the condition to revisit.
-- **[M17, P3]** A failed precache fails the whole installation: `install` does
-  `waitUntil(cache.add('/index.html'))`, so a worker installing at the moment the network drops
-  never activates and the next load has no shell. Retried on the next visit, so it self-heals.
-  Proved by registering with `/index.html` returning 503 and watching the registration stay
-  `installing`.
-- **[M17, P3]** The update path force-reloads the tab on `controllerchange` with no prompt (ADR 017).
-  Nothing is lost today — the queue is in Dexie and the order pointer on disk — but a half-typed
-  table name in the POS header would be. Proved by deploying a new build with the "Another table"
-  field filled in.
-- **[M16, P3]** No UI path puts a second terminal on an existing order. `focusOrder` exists in the
-  order store but is wired only to the "Go to it" button for a stranded halted order, so §19.3's
-  literal two-terminal form (POS-2 cancels behind POS-1's back) needs `curl`. `/demo` uses the
-  `Create Version Conflict` arm instead, which produces the same halt from one window. Fix: an
-  order-id field beside the cover pad. Proved by trying to open POS-1's order from POS-2.
-- **[M16, P3]** `/demo`'s step ticks are in-memory only: switching scenario or reloading clears
-  them. Deliberate — a second walk-through should not start half done — but it also means a
-  reload mid-demo loses the place. Proved by ticking a step and pressing F5.
+- **[M23, P3]** Deferring the reload to the operator means a page can run the old bundle for as long
+  as the banner is ignored, and `activate` keeps only **two** generations — so a tab left open across
+  _two_ deploys can still ask for a chunk no cache holds. Bounded by the banner being on screen the
+  whole time, and by the app having no lazy chunks today. A third generation is not the fix; reading
+  `GENERATIONS_KEPT` against how long a banner is realistically ignored is. Proved by building three
+  times without reloading. Found by M23's own review pass.
+- **[M23, P3]** `shellPrecached` is set _before_ `precacheAssets` runs, so an installation that could
+  not reach the network followed by a navigation whose assets also fail is never retried again. Not a
+  P2 because runtime caching picks the assets up on the next load — the worker controls the page by
+  then, which is the whole reason the precache only mattered for the first visit. Proved by failing
+  the assets on both passes and reloading offline.
+- **[M23, P3]** "Open an existing order by id" accepts any string and only reports a failed read, so
+  nothing stops a terminal being pointed at an order of another restaurant if the id were known. Moot
+  in a one-restaurant seed, and the API scopes what it _writes_ by terminal; a restaurant check in
+  `focusOrder` is the fix. Proved by opening an id seeded under a second restaurant.
 - **[M14, P3]** nginx resolves `api-1` and `api-2` once, when it loads its config, so a replica that
   restarts with a new address is proxied to the old one until nginx is reloaded. `apps/web/nginx.conf`.
   A `resolver` plus a variable `proxy_pass` is the fix; recreating one replica under

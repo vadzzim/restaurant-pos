@@ -25,7 +25,24 @@ declare const __SW_BUILD__: string;
 // cast in the file.
 const sw = self as unknown as ServiceWorkerGlobalScope;
 
-const CACHE_NAME = `pos-shell-${__SW_BUILD__}`;
+const CACHE_PREFIX = 'pos-shell-';
+const CACHE_NAME = `${CACHE_PREFIX}${__SW_BUILD__}`;
+
+/**
+ * How many build caches survive `activate`: this build's, and the one before it.
+ *
+ * **Two, not one, and that is the whole of M23's P2.** `skipWaiting` + `clientsClaim` means the new
+ * worker takes over pages that are still *running the old bundle* — and since M23 those pages are
+ * no longer reloaded out from under the operator, they are offered a banner and may sit there for as
+ * long as the operator likes (`pwa/update.ts`). Deleting the old build's cache under one of them
+ * used to be harmless only because `router.ts` imports all four views statically, so there was no
+ * chunk left to ask for; ADR 017 named code splitting as the condition to revisit and this is that
+ * revisit, done before the condition rather than after it.
+ *
+ * One generation of slack is enough because a page can only be one build behind: the build after
+ * next cannot be installed without a reload, and a reload is what leaves the old bundle behind.
+ */
+const GENERATIONS_KEPT = 2;
 
 /**
  * Every navigation resolves to the same document — nginx does `try_files $uri $uri/ /index.html`
@@ -55,27 +72,45 @@ const openCache = (): Promise<Cache> => caches.open(CACHE_NAME);
 const MATCH: CacheQueryOptions = { ignoreVary: true };
 
 sw.addEventListener('install', (event) => {
-  event.waitUntil(precacheShell());
+  event.waitUntil(tryPrecacheShell());
 
   // Take over as soon as installed rather than waiting for every tab to close. Deliberate, and
   // recorded in ADR 017: the demo's failure mode is an interviewer reloading and being served last
-  // week's bundle. It is safe here because the app has no lazily imported chunks — `router.ts`
-  // imports all four views statically — so a page running the old bundle cannot ask for a chunk
-  // this build's cache no longer holds.
+  // week's bundle. What makes it safe is no longer that the app has no lazily imported chunks: since
+  // M23 a claimed page may ask for one, and `GENERATIONS_KEPT` plus `cacheFirst`'s cross-cache
+  // fallback are what answer it.
   void sw.skipWaiting();
 });
 
 sw.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
-      const names = await caches.keys();
-      await Promise.all(
-        names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name)),
-      );
+      await Promise.all(staleCaches(await caches.keys()).map((name) => caches.delete(name)));
       await sw.clients.claim();
     })(),
   );
 });
+
+/**
+ * Which caches `activate` drops: anything that is not ours at all, plus every build of ours older
+ * than the newest one we are not.
+ *
+ * Ordering by name is sound rather than lucky: `__SW_BUILD__` is `Date.now()` stringified (see
+ * `vite/service-worker-plugin.ts`), so the names are fixed-width decimals and lexical order *is*
+ * chronological order.
+ *
+ * Not exported: the build is a classic `iife` with no exports (ADR 017), so this is asserted
+ * through `activate` — which is the behaviour that matters anyway.
+ */
+function staleCaches(names: readonly string[]): string[] {
+  const foreign = names.filter((name) => !name.startsWith(CACHE_PREFIX));
+  const ours = names.filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME).sort();
+  // Counted from the front rather than written as `slice(0, -(GENERATIONS_KEPT - 1))`, which reads
+  // the same and is a trap: at `GENERATIONS_KEPT === 1` that is `slice(0, -0)`, which is `slice(0,
+  // 0)`, which deletes *nothing at all*. This form makes 1 mean "keep only this build".
+  const older = ours.slice(0, Math.max(0, ours.length - (GENERATIONS_KEPT - 1)));
+  return [...foreign, ...older];
+}
 
 sw.addEventListener('fetch', (event) => {
   const route = classifyRequest(event.request, sw.location.origin);
@@ -86,7 +121,7 @@ sw.addEventListener('fetch', (event) => {
   if (route === 'passthrough') return;
 
   if (route === 'shell') {
-    event.respondWith(networkFirstShell(event.request));
+    event.respondWith(networkFirstShell(event));
     return;
   }
 
@@ -114,9 +149,13 @@ sw.addEventListener('fetch', (event) => {
  * list rather than anything a terminal owns, and without it an offline reload draws an order with
  * no product grid to add to. It is *not* the order — that is Dexie's, and stays Dexie's.
  *
- * Everything but the document is best-effort. Only a missing document may fail the installation,
- * because without it there is no shell at all; one asset that 404s, or an API that is down while
- * the static server is up, must not leave the worker stuck `installing` forever.
+ * **Nothing here may fail the installation, the document included.** It used to: `install` waited
+ * on this promise and a document fetch that threw left the worker stuck `installing` forever, so a
+ * registration that happened to land in the second the network dropped produced *no* worker and
+ * therefore no shell at all — strictly worse than a worker with an empty cache, which fills itself
+ * on the first navigation that reaches the network (`networkFirstShell`). That recovery is why the
+ * asset list is re-read there too: runtime caching alone never sees the bundle, because the page
+ * that installed the worker fetched it before the worker existed.
  */
 async function precacheShell(): Promise<void> {
   const cache = await openCache();
@@ -129,21 +168,55 @@ async function precacheShell(): Promise<void> {
   const html = await document.clone().text();
   await cache.put(SHELL_KEY, document);
 
+  await precacheAssets(cache, html);
+}
+
+/**
+ * The same-origin assets a document names, plus the menu. Best-effort, one `allSettled`: an asset
+ * that 404s, or an API that is down while the static server is up, is not a failed shell.
+ */
+async function precacheAssets(cache: Cache, html: string): Promise<void> {
   await Promise.allSettled([
     ...shellAssetUrls(html, sw.location.origin).map((url) => cache.add(url)),
     cache.add(MENU_PATH),
   ]);
 }
 
-/** Navigations: the network's answer when there is one, the last good document when there is not. */
-async function networkFirstShell(request: Request): Promise<Response> {
+/**
+ * Whether the shell and its assets are in the cache. False after an installation that could not
+ * reach the network, and the flag the first successful navigation reads to make good on it.
+ */
+let shellPrecached = false;
+
+async function tryPrecacheShell(): Promise<void> {
   try {
-    const response = await fetch(request);
+    await precacheShell();
+    shellPrecached = true;
+  } catch {
+    // Swallowed on purpose: see `precacheShell`. Recovered by the first navigation that answers.
+  }
+}
+
+/** Navigations: the network's answer when there is one, the last good document when there is not. */
+async function networkFirstShell(event: FetchEvent): Promise<Response> {
+  try {
+    const response = await fetch(event.request);
     // A redirected response cannot be replayed for a navigation later — the browser rejects it —
     // so it is served but never stored.
     if (response.ok && !response.redirected) {
       const cache = await openCache();
       await cache.put(SHELL_KEY, response.clone());
+
+      if (!shellPrecached) {
+        // Set before the work, not after: a second navigation arriving while this one is still
+        // fetching assets must not start a duplicate pass.
+        shellPrecached = true;
+        const html = await response.clone().text();
+        // On the event's lifetime rather than the response's, so the operator's page is not held
+        // waiting for assets it already has. Rejection is impossible — `precacheAssets` settles —
+        // but the `catch` is what says that is not being relied on.
+        event.waitUntil(precacheAssets(cache, html).catch(() => undefined));
+      }
     }
     return response;
   } catch (error) {
@@ -153,10 +226,17 @@ async function networkFirstShell(request: Request): Promise<Response> {
   }
 }
 
-/** Content-hashed build output: the name pins the bytes, so a hit needs no revalidation. */
+/**
+ * Content-hashed build output: the name pins the bytes, so a hit needs no revalidation.
+ *
+ * **The fallback across every cache is load-bearing.** A page still running the previous build asks
+ * for that build's chunks, and this build's cache has never held them. `caches.match` reaches the
+ * one generation `activate` kept, which is the other half of the same fix; without it, keeping the
+ * cache would buy nothing.
+ */
 async function cacheFirst(request: Request): Promise<Response> {
   const cache = await openCache();
-  const cached = await cache.match(request, MATCH);
+  const cached = (await cache.match(request, MATCH)) ?? (await caches.match(request, MATCH));
   if (cached) return cached;
 
   const response = await fetch(request);
