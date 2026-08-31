@@ -68,7 +68,7 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
-          :disabled="outbox === undefined || simulator.busy === 'outbox-pause'"
+          :disabled="outbox === undefined || simulator.isBusy('outbox-pause')"
           @click="simulator.pauseOutbox(!(outbox?.paused ?? false))"
         >
           {{ outbox?.paused ? 'Resume Outbox Publisher' : CONTROL_LABELS['outbox-pause'] }}
@@ -90,7 +90,7 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
           <button
             type="button"
             class="flex-1 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
-            :disabled="simulator.busy === 'outbox-delay'"
+            :disabled="simulator.isBusy('outbox-delay')"
             @click="simulator.delayOutbox(delayInput)"
           >
             {{ CONTROL_LABELS['outbox-delay'] }}
@@ -120,7 +120,7 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
-          :disabled="printer === undefined || simulator.busy === 'printer-fail'"
+          :disabled="printer === undefined || simulator.isBusy('printer-fail')"
           @click="simulator.failPrinter(!(printer?.failing ?? false))"
         >
           {{ printer?.failing ? 'Fix Printer' : CONTROL_LABELS['printer-fail'] }}
@@ -141,7 +141,7 @@ const armed = (name: ArmName): boolean => simulator.arms[name];
         <button
           type="button"
           class="w-64 rounded bg-stone-800 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
-          :disabled="simulator.busy === 'replay-last-event'"
+          :disabled="simulator.isBusy('replay-last-event')"
           @click="simulator.replayLastEvent()"
         >
           {{ CONTROL_LABELS['replay-last-event'] }}

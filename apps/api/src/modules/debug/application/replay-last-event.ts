@@ -24,6 +24,11 @@ interface ReplayRow extends Record<string, unknown> {
  * and the new value is the `null` this statement just wrote. The publisher's `claimBatch` says the
  * same thing about the same trap.
  *
+ * `attempt_count` goes back to zero with the rest. A row that needed two retries to publish the
+ * first time would otherwise start its replay two attempts into `OUTBOX_MAX_ATTEMPTS` and
+ * dead-letter sooner than a fresh event — the button would then be demonstrating the retry budget
+ * of the original send rather than of the replay.
+ *
  * `FOR UPDATE SKIP LOCKED` rather than a plain lock: two clicks racing take two *different* rows,
  * the newest and the one behind it, instead of one waiting to replay a row the other has already
  * unpublished. Each click therefore replays one event, which is what the button says it does.
@@ -49,6 +54,7 @@ export async function replayLastEvent(db: Db): Promise<ReplayedEventView | null>
           claimed_by = null,
           claim_until = null,
           last_error = null,
+          attempt_count = 0,
           next_attempt_at = now()
       from target
       where outbox_events.id = target.id

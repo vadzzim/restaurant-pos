@@ -19,7 +19,21 @@ import { createRunner } from './lib/compose-run.mjs';
 /** Only the infrastructure; the `app` profile in Compose is the *dev* stack and is not used. */
 const SERVICES = ['postgres', 'redis', 'redpanda'];
 
-const API_READY_URL = 'http://localhost:3000/api/health/ready';
+/**
+ * The port the API actually binds, not the one this script used to assume. `API_PORT` is a real
+ * knob — `@pos/config` reads it and defaults it to 3000 — so a `.env` that moves the API used to
+ * leave this probe asking about whatever else was on :3000, reusing a stranger's process or timing
+ * out against nothing.
+ *
+ * `API_PROXY_TARGET` is set from the same number when it is not already set, because the browser
+ * reaches the API through the preview server's proxy and the two must agree; `vite.config.ts` reads
+ * it and falls back to :3000 as well.
+ */
+const API_PORT = process.env.API_PORT ?? '3000';
+const API_ORIGIN = `http://localhost:${API_PORT}`;
+const API_READY_URL = `${API_ORIGIN}/api/health/ready`;
+
+process.env.API_PROXY_TARGET ??= API_ORIGIN;
 
 /**
  * How long a Kafka consumer group is given to hand out its assignment. Generous, because it is a
@@ -64,9 +78,9 @@ async function main() {
   // The same courtesy `snapshot()` extends to the containers, and for the same reason: the user
   // keeps a stack up for the demo, and an API this script started would lose the bind and take the
   // run down with it — which it did, the first time this ran. A short probe, so a machine with
-  // nothing on :3000 is not taxed for it.
+  // nothing on that port is not taxed for it.
   runner.banner('API');
-  runner.write('probing :3000 for an API already up\n');
+  runner.write(`probing :${API_PORT} for an API already up\n`);
   const apiAlreadyUp = await runner.waitForHttp(API_READY_URL, {
     timeoutMs: 2_000,
     intervalMs: 250,
@@ -74,7 +88,7 @@ async function main() {
   });
 
   if (apiAlreadyUp) {
-    runner.write('an API is already ready on :3000 — reusing it, not starting a second\n');
+    runner.write(`an API is already ready on :${API_PORT} — reusing it, not starting a second\n`);
   } else {
     // `node dist/index.js` and not `pnpm start`: `startService` spawns without a shell so that a
     // kill is a kill, which rules out a `.cmd` wrapper. The arguments mirror the `start` script.

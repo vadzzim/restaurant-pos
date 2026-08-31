@@ -13,6 +13,7 @@ vi.mock('../src/api/client', () => ({
   fetchOrder: vi.fn(),
   fetchTickets: vi.fn(),
   postKitchenCommand: vi.fn(),
+  postConflictResolution: vi.fn(() => Promise.resolve({ resolved: 1 })),
 }));
 
 const postMutationMock = vi.mocked(postMutation);

@@ -45,7 +45,9 @@ async function openPos(page: Page): Promise<void> {
   //
   // Waiting here also makes the transport an assertion rather than an assumption: on §15's polling
   // fallback `socketState` stays DISCONNECTED and this badge never appears.
-  await expect(page.getByText('WS CONNECTED')).toBeVisible({ timeout: LOCAL_TIMEOUT_MS });
+  await expect(page.getByText('WS CONNECTED', { exact: true })).toBeVisible({
+    timeout: LOCAL_TIMEOUT_MS,
+  });
 }
 
 test.beforeEach(async ({ request }) => {
@@ -101,7 +103,9 @@ test('POS-1 sends an order, the kitchen ticket appears, and PREPARING comes back
   await expect(kitchen.getByRole('heading', { name: 'Kitchen' })).toBeVisible();
   // Its own socket, before it is asked to command anything — same argument as the POS's, from the
   // other end: a display whose socket is still opening reads the rail from `load()` alone.
-  await expect(kitchen.getByText('WS CONNECTED')).toBeVisible({ timeout: LOCAL_TIMEOUT_MS });
+  await expect(kitchen.getByText('WS CONNECTED', { exact: true })).toBeVisible({
+    timeout: LOCAL_TIMEOUT_MS,
+  });
 
   // The rail accumulates across runs, so the card is found by this run's cover and every
   // assertion below is scoped to it. The item rows inside a card carry no table number, so this

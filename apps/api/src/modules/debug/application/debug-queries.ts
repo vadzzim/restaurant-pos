@@ -1,4 +1,10 @@
-import type { ConflictView, DebugEventView, OutboxRowView, PrintJobRowView } from '@pos/contracts';
+import type {
+  ConflictResolution,
+  ConflictView,
+  DebugEventView,
+  OutboxRowView,
+  PrintJobRowView,
+} from '@pos/contracts';
 import type { Db } from '@pos/db';
 import { sql } from 'drizzle-orm';
 
@@ -66,6 +72,9 @@ interface CounterRow extends Record<string, unknown> {
  *
  * One query, not eleven, because `/debug` polls: eleven round trips every two seconds against the
  * database that is also serving the POS is a debug page that changes the thing it is measuring.
+ *
+ * **Only `/api/debug/metrics` calls this.** The conflicts and outbox endpoints have their own
+ * narrower counters below — see `readConflictCounters` for why.
  */
 export async function readDatabaseCounters(db: Db): Promise<DatabaseCounters> {
   const result = await db.execute<CounterRow>(sql`
@@ -94,6 +103,71 @@ export async function readDatabaseCounters(db: Db): Promise<DatabaseCounters> {
     outboxPublished: count(row?.outbox_published),
     outboxDeadLettered: count(row?.outbox_dead_lettered),
     kafkaEventsConsumed: count(row?.kafka_events_consumed),
+    printJobsPending: count(row?.print_pending),
+    printJobsPrinted: count(row?.print_printed),
+    printJobsFailed: count(row?.print_failed),
+    printJobsDeadLettered: count(row?.print_dead_lettered),
+  };
+}
+
+/**
+ * The two numbers `/api/debug/conflicts` puts above its page, and nothing else.
+ *
+ * `/debug` polls three endpoints every two seconds, and until M20 all three answered by running the
+ * eleven-subselect query above — thirty-three `count(*)` scans a cycle against tables that grow
+ * without bound, two thirds of them thrown away by the caller. Each endpoint now counts what it
+ * shows. `readDatabaseCounters` stays for `/api/debug/metrics`, which genuinely reports all eleven.
+ */
+export async function readConflictCounters(
+  db: Db,
+): Promise<Pick<DatabaseCounters, 'conflictsDetected' | 'blockedMutations'>> {
+  const result = await db.execute<Pick<CounterRow, 'conflicts_detected' | 'blocked_mutations'>>(sql`
+    select
+      (select count(*) from conflict_log) as conflicts_detected,
+      (select count(*) from conflict_log where resolution is null) as blocked_mutations
+  `);
+
+  const row = result.rows[0];
+
+  return {
+    conflictsDetected: count(row?.conflicts_detected),
+    blockedMutations: count(row?.blocked_mutations),
+  };
+}
+
+/** The seven numbers `/api/debug/outbox` puts above its two tables. See above. */
+export async function readOutboxCounters(
+  db: Db,
+): Promise<
+  Pick<
+    DatabaseCounters,
+    | 'outboxPending'
+    | 'outboxPublished'
+    | 'outboxDeadLettered'
+    | 'printJobsPending'
+    | 'printJobsPrinted'
+    | 'printJobsFailed'
+    | 'printJobsDeadLettered'
+  >
+> {
+  const result = await db.execute<CounterRow>(sql`
+    select
+      (select count(*) from outbox_events
+        where published_at is null and dead_lettered_at is null) as outbox_pending,
+      (select count(*) from outbox_events where published_at is not null) as outbox_published,
+      (select count(*) from outbox_events where dead_lettered_at is not null) as outbox_dead_lettered,
+      (select count(*) from print_jobs where state = 'PENDING') as print_pending,
+      (select count(*) from print_jobs where state = 'PRINTED') as print_printed,
+      (select count(*) from print_jobs where state = 'FAILED') as print_failed,
+      (select count(*) from print_jobs where state = 'DEAD_LETTER') as print_dead_lettered
+  `);
+
+  const row = result.rows[0];
+
+  return {
+    outboxPending: count(row?.outbox_pending),
+    outboxPublished: count(row?.outbox_published),
+    outboxDeadLettered: count(row?.outbox_dead_lettered),
     printJobsPending: count(row?.print_pending),
     printJobsPrinted: count(row?.print_printed),
     printJobsFailed: count(row?.print_failed),
@@ -172,7 +246,7 @@ interface ConflictRow extends Record<string, unknown> {
   client_base_version: number;
   server_version: number;
   server_status: ConflictView['serverStatus'];
-  resolution: string | null;
+  resolution: ConflictResolution | null;
   created_at: Date;
 }
 

@@ -3,6 +3,7 @@ import type {
   CancelPayload,
   ChangeQuantityPayload,
   ConflictReason,
+  ConflictResolution,
   CreateOrderPayload,
   MutationRequest,
   MutationType,
@@ -14,7 +15,7 @@ import type {
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 
-import { fetchOrder, postMutation } from '../api/client';
+import { fetchOrder, postConflictResolution, postMutation } from '../api/client';
 import { acceptsSnapshot } from '../domain/order-snapshot';
 import { menuLookup, nextBaseVersion, projectQueue } from '../domain/project-queue';
 import type { PendingMutationRecord } from '../persistence/db';
@@ -315,22 +316,42 @@ export const useOrderStore = defineStore('order', () => {
   }
 
   /**
-   * Attempt what `stage` recorded.
+   * The tail of every serialized link: record the intent, and — on a device that cannot record it —
+   * send it here, still inside the chain.
    *
-   * There is no online fast path: online, the engine is kicked immediately and the row lives for a
-   * few hundred milliseconds; offline it lives until the toggle flips. One code path means the
-   * offline demo exercises the same machinery the normal flow does.
+   * Returns the identity when a queue row exists and the caller should kick the engine, and
+   * `undefined` when there is nothing further to do: the mutation was refused, or it has already
+   * been sent by `sendUnstored`.
    */
-  async function settle(identity: MutationIdentity, stored: boolean): Promise<void> {
-    if (stored) {
-      await sync();
-      return;
+  async function stageOrSend(identity: MutationIdentity): Promise<MutationIdentity | undefined> {
+    const stored = await stage(identity);
+    if (stored === undefined) {
+      return undefined;
     }
 
-    // This device cannot store anything (private browsing, or quota) and the badge already says
-    // so. The queue is the only path to the server, so a command with no row would simply
-    // vanish — and M7's rule is that a storage failure never breaks a command. It is sent
-    // directly, through the same code that a pass would have used.
+    if (stored) {
+      return identity;
+    }
+
+    await sendUnstored(identity);
+    return undefined;
+  }
+
+  /**
+   * The storage-less path. This device cannot store anything (private browsing, or quota) and the
+   * badge already says so. The queue is the only path to the server, so a command with no row would
+   * simply vanish — and M7's rule is that a storage failure never breaks a command. It is sent
+   * directly, through the same code a pass would have used.
+   *
+   * **It runs inside the serialized link, unlike the queued path's `sync()`.** `identityFor` stamps
+   * `baseVersion` from the projection, and the projection over a device with no queue is the cached
+   * order alone: nothing advances it until an answer comes back. Attempt this outside the chain and
+   * two rapid taps both carry the same version — one applies, the rest conflict, on a device whose
+   * whole problem is that it has no queue to halt. So here the network round trip is the ordering,
+   * and the till is as slow as the server for as long as storage is refusing writes. That is the
+   * trade M7 already made; this only makes it correct.
+   */
+  async function sendUnstored(identity: MutationIdentity): Promise<void> {
     inFlight.value += 1;
     try {
       await engine.attemptOnce({
@@ -489,12 +510,11 @@ export const useOrderStore = defineStore('order', () => {
         payload,
       };
 
-      const stored = await stage(identity);
-      return stored === undefined ? undefined : { identity, stored };
+      return stageOrSend(identity);
     });
 
     if (staged !== undefined) {
-      await settle(staged.identity, staged.stored);
+      await sync();
     }
   }
 
@@ -549,12 +569,11 @@ export const useOrderStore = defineStore('order', () => {
         return undefined;
       }
 
-      const stored = await stage(identity);
-      return stored === undefined ? undefined : { identity, stored };
+      return stageOrSend(identity);
     });
 
     if (staged !== undefined) {
-      await settle(staged.identity, staged.stored);
+      await sync();
     }
   }
 
@@ -669,6 +688,7 @@ export const useOrderStore = defineStore('order', () => {
     await refreshQueue();
     conflict.value = undefined;
     lastError.value = undefined;
+    reportResolution(terminalId, orderId, 'DISCARDED');
   }
 
   /**
@@ -684,12 +704,39 @@ export const useOrderStore = defineStore('order', () => {
     }
 
     conflict.value = undefined;
+
+    // Reported **before** the rebase, not after. A rebase onto a state that moved again halts on a
+    // fresh `conflict_log` row, and a report sent afterwards would close that one too — marking a
+    // queue resolved at the moment it stopped being.
+    reportResolution(terminalId, orderId, 'REBASED');
+
     inFlight.value += 1;
     try {
       await engine.rebase(terminalId, orderId);
     } finally {
       inFlight.value -= 1;
     }
+  }
+
+  /**
+   * Tell the server that §14.1 was answered here. Deliberately not awaited and deliberately
+   * swallowed: the queue is already unblocked on this device, and `conflict_log.resolution` feeds
+   * `/debug` and nothing else (ADR-free by design — see the API's `record-conflict-resolution.ts`).
+   * Making the operator wait on it, or showing them an error for it, would put an observability
+   * field in front of a till.
+   */
+  function reportResolution(
+    terminalId: string,
+    orderId: string,
+    resolution: ConflictResolution,
+  ): void {
+    // `void fn().catch()` would not be enough: `postConflictResolution` calls `assertOnline`, which
+    // throws **synchronously** on a terminal holding §18's offline switch — before there is a
+    // promise to attach a handler to. Offline is exactly when §19.3 discards a halted queue, so
+    // that throw would come out of the resolution the operator just chose.
+    void (async () => postConflictResolution(orderId, terminalId, resolution))().catch(
+      () => undefined,
+    );
   }
 
   /**

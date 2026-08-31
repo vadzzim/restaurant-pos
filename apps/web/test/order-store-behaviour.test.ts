@@ -2,13 +2,14 @@ import type { MutationResponse, OrderSnapshot } from '@pos/contracts';
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { fetchOrder, postMutation } from '../src/api/client';
+import { fetchOrder, postConflictResolution, postMutation } from '../src/api/client';
 import { localStore } from '../src/persistence/local-store';
 import { useOrderStore } from '../src/stores/order';
 
 vi.mock('../src/api/client', () => ({
   postMutation: vi.fn(),
   fetchOrder: vi.fn(),
+  postConflictResolution: vi.fn(() => Promise.resolve({ resolved: 1 })),
 }));
 
 const postMutationMock = vi.mocked(postMutation);
@@ -31,6 +32,107 @@ function snapshot(id: string, version: number): OrderSnapshot {
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.resetAllMocks();
+});
+
+describe('reporting how a halt was resolved', () => {
+  /**
+   * `postConflictResolution` goes through `assertOnline`, which throws **synchronously** on a
+   * terminal holding §18's offline switch. Offline is precisely when §19.3 discards a halted queue,
+   * so a report that threw at the call site would come out of the resolution the operator chose —
+   * an observability field breaking a till.
+   */
+  it('does not let a failed report break the resolution', async () => {
+    vi.mocked(postConflictResolution).mockImplementation(() => {
+      throw new Error('this terminal is offline');
+    });
+
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockRejectedValue(new Error('network down'));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+
+    await expect(orders.discardHalted()).resolves.toBeUndefined();
+    expect(orders.pendingCount).toBe(0);
+  });
+});
+
+describe('two taps inside one millisecond', () => {
+  /**
+   * The queue is read in `createdAt` order and `createdAt` is a millisecond. Until M20 two taps
+   * inside one millisecond were therefore ordered by the index's tiebreak — the primary key, which
+   * is a random UUID — so the mutation stamped at `baseVersion` 4 could be sent in front of the one
+   * stamped at 3 and halt the aggregate on a race the operator never caused. M15's large touch
+   * targets made that ordinary rather than exotic.
+   *
+   * Both halves are forced here: the clock does not move, and the ids are chosen so that a
+   * tiebreak on the key would put the *second* tap first.
+   */
+  it('keeps the operator order when the clock does not move and the ids sort backwards', async () => {
+    const frozen = Date.parse('2026-08-28T10:00:00.000Z');
+    vi.spyOn(Date, 'now').mockReturnValue(frozen);
+    vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValueOnce('ffffffff-ffff-4fff-8fff-ffffffffffff')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000000');
+
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockRejectedValue(new Error('network down'));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    await orders.sendToKitchen('pos-1', 'demo-restaurant');
+
+    expect(orders.queue.map((row) => row.type)).toEqual(['ADD_ITEM', 'SEND_TO_KITCHEN']);
+    expect(orders.queue.map((row) => row.baseVersion)).toEqual([3, 4]);
+
+    // The stamps are distinct and increasing even though the wall clock never advanced: the queue
+    // clock is one millisecond past the newest row on disk, not `Date.now()`.
+    const [first, second] = orders.queue;
+    expect(first?.createdAt).toBe('2026-08-28T10:00:00.000Z');
+    expect(second?.createdAt).toBe('2026-08-28T10:00:00.001Z');
+  });
+});
+
+describe('a device that cannot store anything', () => {
+  /**
+   * M7's rule is that a storage failure never breaks a command: with no queue row to carry it, the
+   * mutation is sent straight through the engine. Until M20 that send sat *outside* the serialized
+   * local phase, and the projection over a device with no queue is the cached order alone — so two
+   * rapid taps both stamped the same `baseVersion`, one applied and the rest conflicted, on the one
+   * device that has no queue to halt.
+   */
+  it('sends rapid taps one at a time, each stamped at the version the last one produced', async () => {
+    vi.spyOn(localStore, 'savePending').mockResolvedValue(false);
+
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock
+      .mockResolvedValueOnce({
+        status: 'APPLIED',
+        order: snapshot('order-a', 4),
+        serverVersion: 4,
+      } satisfies MutationResponse)
+      .mockResolvedValueOnce({
+        status: 'APPLIED',
+        order: snapshot('order-a', 5),
+        serverVersion: 5,
+      } satisfies MutationResponse);
+
+    // Both taps are issued before either answer arrives — the operator did not wait, and neither
+    // does the screen.
+    const first = orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    const second = orders.addItem('pos-1', 'demo-restaurant', 'fries');
+    await Promise.all([first, second]);
+
+    const sent = postMutationMock.mock.calls.map(([, request]) => request?.baseVersion);
+    expect(sent).toEqual([3, 4]);
+    expect(orders.version).toBe(5);
+    expect(orders.halted).toBe(false);
+  });
 });
 
 describe('the queue is a queue, not a slot', () => {

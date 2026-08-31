@@ -19,6 +19,7 @@ import type { DependencyProbe } from './modules/health/application/dependency-pr
 import { registerKitchenCommandRoutes } from './modules/kitchen/api/kitchen-command-routes.js';
 import { registerKitchenReadRoutes } from './modules/kitchen/api/kitchen-read-routes.js';
 import { registerMenuRoutes } from './modules/menu/api/menu-routes.js';
+import { registerConflictRoutes } from './modules/orders/api/conflict-routes.js';
 import { registerMutationRoutes } from './modules/orders/api/mutation-routes.js';
 import { registerOrderReadRoutes } from './modules/orders/api/order-read-routes.js';
 import { registerPrinterRoutes } from './modules/printer/api/printer-routes.js';
@@ -168,6 +169,7 @@ export function buildApp({
   registerOrderReadRoutes(app, db);
   registerKitchenReadRoutes(app, db);
   registerMutationRoutes(app, db);
+  registerConflictRoutes(app, db);
   registerKitchenCommandRoutes(app, db);
   registerPrinterRoutes(app, db, printer);
   registerPresenceRoutes(app, { presence });

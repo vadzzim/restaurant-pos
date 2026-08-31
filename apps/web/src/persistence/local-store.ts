@@ -66,6 +66,35 @@ async function guarded<T>(what: string, run: () => Promise<T>, fallback: T): Pro
 const now = (): string => new Date().toISOString();
 
 /**
+ * The queue's own clock, and the reason it is not `now()`.
+ *
+ * The queue is read in `createdAt` order with `mutationId` as the tiebreak, and `mutationId` is a
+ * random UUID — so two intents stamped inside the same millisecond are ordered arbitrarily, and the
+ * one that stamped `baseVersion` 4 can be sent in front of the one that stamped 3. The server
+ * refuses it and the aggregate halts on a race the operator never caused. M15's large touch targets
+ * made same-millisecond taps ordinary rather than exotic.
+ *
+ * So the stamp is **strictly greater than every stamp already on disk**: never behind the wall
+ * clock, never equal to a row that exists. A burst drifts a few milliseconds into the future, which
+ * no reader minds — the field orders the queue, it does not date it, and §14 only ever asks it for
+ * "local creation order".
+ *
+ * The high-water mark is read from the store on every call rather than held in a variable. One
+ * indexed `last()` per queued mutation is cheaper than the alternative is subtle: a remembered mark
+ * has to be seeded at load, would drift across a reload, and would be process state that no test
+ * and no second tab could reset. Reading it makes the rule a property of the data.
+ *
+ * Not a per-terminal sequence, which is what `known-problems.md` proposed: a sequence needs a
+ * column, an index and a Dexie upgrade to backfill, and buys nothing. Two terminals share a
+ * database only in the simulator, and each queue is read — and ordered — on its own.
+ */
+async function queueStamp(): Promise<string> {
+  const newest = await db.pendingMutations.orderBy('createdAt').last();
+  const floor = newest === undefined ? 0 : Date.parse(newest.createdAt) + 1;
+  return new Date(Math.max(Date.now(), floor)).toISOString();
+}
+
+/**
  * The monotonic half of a cache write, shared by `saveOrder` and `cacheOrder` so the rule has one
  * home here as well as one home in `acceptsSnapshot`. **Must be called inside a transaction that
  * holds `orders`** — the read and the compare are only sound under the same lock as the write.
@@ -214,7 +243,7 @@ export const localStore = {
           // The row keeps the moment the intent was formed, not the moment of the latest retry:
           // §14 syncs in local creation order, and a retry does not move a mutation to the back
           // of its own queue.
-          createdAt: existing?.createdAt ?? now(),
+          createdAt: existing?.createdAt ?? (await queueStamp()),
         });
         return true;
       },

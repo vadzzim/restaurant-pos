@@ -2149,3 +2149,91 @@ bounded by reconnect-and-refetch either way, and this is the last milestone — 
 The lesson is M18's, arriving from the other direction. There, two of Codex's three findings were
 right and the third collapsed under one command. Here all five were right and one carried a wrong
 detail inside a correct point. Read the argument, then check the mechanism — in both directions.
+
+## M20 — The backlog sweep
+
+Not a milestone from `MILESTONES.md`. `CLAUDE.md`'s _Review discipline_ promised a dedicated sweep
+every three or four milestones and it was deferred at every one of them, so the backlog reached
+**thirty** entries without ever being read as a whole. This is the pass it was written for, and the
+brief is `docs/milestones/M20.md`.
+
+**Two of the thirteen chosen entries were already fixed.** Both M15 `P1-in-M12` lines — the
+`applyVersionConflictArm` tamper below v2, and the arm that stayed armed after a 4xx — describe code
+that has a `LOWEST_TAMPERABLE_VERSION` guard and an `ApiRequestError` branch in `postMutation`
+today. M15 fixed them and left the lines. That is the argument for sweeping rather than
+accumulating: a backlog nobody re-reads decays into fiction, and the cost of checking is the same
+whether the entry is live or stale.
+
+### The four structural ones
+
+**Same-millisecond queue order.** `savePending` stamped `createdAt` from the wall clock and the
+queue is read in `createdAt` order with the primary key — a random UUID — as the tiebreak. Two taps
+inside one millisecond were therefore ordered arbitrarily, and the tap stamped `baseVersion` 4 could
+be sent in front of the one stamped 3, halting the aggregate on a race the operator never caused.
+
+`known-problems.md` proposed a monotonic per-terminal sequence: a column, an index and a Dexie
+upgrade to backfill. The fix is smaller and needs none of them — `queueStamp()` reads the newest row
+on disk and returns `max(Date.now(), newest + 1 ms)`, so a stamp is strictly greater than every
+stamp already stored. A burst drifts a few milliseconds into the future, which no reader minds: the
+field orders the queue, it does not date it.
+
+The first attempt held the high-water mark in a module variable seeded once per page load. It broke
+a `sync-engine` test that sets the system clock back, and correctly so — a remembered mark is
+process state no test and no second tab can reset. Reading it from the store on every write makes
+the rule a property of the data instead. One indexed `last()` per queued mutation is the price.
+
+**The storage-less `settle()` path.** On a device whose IndexedDB refuses writes, M7's rule is that
+the command still goes: with no queue row it is sent straight through the engine. That send sat
+_outside_ the serialized local phase, and the projection over a device with no queue is the cached
+order alone — nothing advances the version until an answer returns. Two rapid taps therefore both
+stamped the same `baseVersion`: one applied, the rest conflicted, on the one device with no queue to
+halt.
+
+Moving the call into the same `serialize` link as the staging fixes it, and _only_ that placement
+does. Appending a second link — `settle` calling `serialize` again — interleaves under rapid taps:
+tap 2's staging is queued behind tap 1's staging, not behind tap 1's send. So `stageOrSend` returns
+the identity when there is a row to settle afterwards and sends inline when there is not. The till
+is then as slow as the server for as long as storage is refusing writes, which is the trade M7
+already made; this only makes it correct.
+
+**`conflict_log.resolution`.** Written `null` at insert and never updated, because §14.1's two ways
+out both happen in the browser. `/debug`'s conflict history could only grow and `blockedMutations` —
+labelled "a client queue still halted" — was a monotonic counter of every conflict that ever
+happened. Now `POST /api/orders/:orderId/conflicts/resolution` closes the open rows for one order on
+one terminal, and the two store actions report into it.
+
+Scoped to order and terminal, not to the `:mutationId` the backlog proposed, because the client's
+action is not per mutation: Discard drops the order's whole queue and Rebase re-issues all of it. A
+halt also outlives the banner that named the mutation — reload the tab and the queue is still
+blocked while the in-memory banner is gone.
+
+Rebase reports **before** it rebases. A rebase onto a state that moved again halts on a fresh row,
+and a report sent afterwards would close that one too — marking a queue resolved at the moment it
+stopped being.
+
+**`readDatabaseCounters` three times a poll.** All three `/debug` panels ran the eleven-subselect
+query, so one poll cost thirty-three `count(*)` scans against unbounded tables and two thirds of the
+answers were discarded by the caller. Each panel now counts what it shows; `readDatabaseCounters`
+stays for `/api/debug/metrics`, which genuinely reports all eleven. The guard is a test asserting
+the three endpoints still agree number for number.
+
+### The review pass found one P1, in this session's own diff
+
+`postConflictResolution` calls `assertOnline`, which throws **synchronously** on a terminal holding
+§18's offline switch — before there is a promise for `.catch()` to attach to. Offline is precisely
+when §19.3 discards a halted queue, so the report would have thrown out of the resolution the
+operator had just chosen: an observability field breaking a till. Wrapped in an async IIFE, and
+covered by a test that makes the report throw at the call site.
+
+### What the fixes falsified elsewhere
+
+Three documents claimed the resolution is never written: `/demo`'s §19.3 step 7, weakness 7 in the
+interview guide, and the backlog entry itself. The demo step now reads the row as `REBASED` and
+names the honest limit that replaces it — an offline resolution is still never recorded. Weakness 7
+is replaced by the M13 cache-aside race, drawn from `known-problems.md` like the other nine rather
+than invented. Weakness 10's "eleven scans every two seconds" is now twenty, and says so.
+
+Fifteen entries closed, two opened: `flags.busy` carries the same single-slot defect the simulator
+store had, and the offline resolution report. Seventeen remain.
+
+**Green:** lint, typecheck, `pnpm test` **469 passed** (+6), build, `pnpm verify:integration` PASS.

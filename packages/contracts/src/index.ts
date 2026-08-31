@@ -633,6 +633,19 @@ export interface EventsDebugResponse {
   events: DebugEventView[];
 }
 
+/**
+ * How a halted queue was unblocked, as §14.1 names the two choices. Written by the client after it
+ * has actually unblocked, so a `null` still means "this queue is halted right now".
+ */
+export const CONFLICT_RESOLUTIONS = ['DISCARDED', 'REBASED'] as const;
+
+export type ConflictResolution = (typeof CONFLICT_RESOLUTIONS)[number];
+
+/** What the resolution endpoint answers: how many rows this call actually closed. */
+export interface ConflictResolutionResponse {
+  resolved: number;
+}
+
 /** One `conflict_log` row: versions, `mutationId`, resolution (§8, §16). */
 export interface ConflictView {
   id: string;
@@ -643,7 +656,7 @@ export interface ConflictView {
   clientBaseVersion: number;
   serverVersion: number;
   serverStatus: OrderStatus;
-  resolution: string | null;
+  resolution: ConflictResolution | null;
   createdAt: string;
 }
 

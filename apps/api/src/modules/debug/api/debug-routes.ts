@@ -11,7 +11,8 @@ import { z } from 'zod';
 import { validationFailed } from '../../../shared/errors.js';
 import {
   readConflicts,
-  readDatabaseCounters,
+  readConflictCounters,
+  readOutboxCounters,
   readOutboxRows,
   readPrintJobs,
   readRecentEvents,
@@ -75,7 +76,7 @@ export function registerDebugRoutes(app: FastifyInstance, options: DebugRouteOpt
   app.get('/api/debug/conflicts', async (request): Promise<ConflictsDebugResponse> => {
     const [conflicts, counters] = await Promise.all([
       readConflicts(db, limitOf(request.query)),
-      readDatabaseCounters(db),
+      readConflictCounters(db),
     ]);
 
     // The totals come from the counter query rather than from `conflicts.length`: the list is a
@@ -93,7 +94,7 @@ export function registerDebugRoutes(app: FastifyInstance, options: DebugRouteOpt
     const [rows, jobs, counters] = await Promise.all([
       readOutboxRows(db, limit),
       readPrintJobs(db, limit),
-      readDatabaseCounters(db),
+      readOutboxCounters(db),
     ]);
 
     return {

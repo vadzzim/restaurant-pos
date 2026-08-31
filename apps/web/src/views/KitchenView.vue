@@ -89,13 +89,18 @@ onMounted(async () => {
         event === undefined ? undefined : expectationFor(event, kitchen.tickets),
       ),
     // The kitchen display belongs to a room, not to a till, so it reports the constant §5 uses for
-    // its mutations. It has no queue of its own — it issues commands through the POS write path
-    // and waits for the answer — so its pending count is zero by construction, not by omission.
+    // its mutations.
+    //
+    // It reports a real count. It has no §14 queue — it issues commands through the POS write path
+    // and waits for the answer — but `pendingByOrder` holds every command whose answer was lost,
+    // on screen and in IndexedDB, waiting for Retry or Discard. Until M20 this said zero
+    // unconditionally, so `/debug` claimed the kitchen was idle in exactly the situation where its
+    // pending work is the thing worth seeing.
     presence: () => ({
       terminalId: KITCHEN_TERMINAL_ID,
       restaurantId: restaurantId.value,
       role: 'kitchen',
-      pendingCount: 0,
+      pendingCount: kitchen.pendingByOrder.size,
       offline: false,
     }),
   });

@@ -112,14 +112,19 @@ export function createRealtimeServer(
 
   io.on('connection', (socket: Socket) => {
     /**
-     * The terminal this socket last claimed, so a disconnect can delete its entry eagerly.
+     * Every terminal this socket has claimed, so a disconnect can delete their entries eagerly.
+     *
+     * A set rather than the latest name: a socket that reported for one terminal and then another
+     * used to leave the first behind until its TTL expired, because the eager delete only ever knew
+     * about one. No screen does that today — a POS tab that changes terminal reconnects — but the
+     * cost of being right is a `Set`.
      *
      * The TTL is what makes presence correct; this only makes it *prompt*. Everything the eager
      * delete cannot cover — a browser killed, a lid closed, this very API instance dying while
      * holding the socket — is covered by the entry expiring, which is why the TTL is the mechanism
      * and this is the courtesy.
      */
-    let claimed: string | undefined;
+    const claimed = new Set<string>();
 
     socket.on(PRESENCE_EVENT_NAME, (payload: unknown) => {
       const parsed = presenceReportSchema.safeParse(payload);
@@ -128,18 +133,16 @@ export function createRealtimeServer(
         return;
       }
 
-      claimed = parsed.data.terminalId;
+      claimed.add(parsed.data.terminalId);
       recordPresence(parsed.data, socket.id);
     });
 
     socket.on('disconnect', () => {
-      if (claimed === undefined) {
-        return;
+      for (const terminalId of claimed) {
+        void presence?.forget(terminalId).catch((error: unknown) => {
+          logger.debug({ err: error, terminalId }, 'could not clear presence');
+        });
       }
-      const terminalId = claimed;
-      void presence?.forget(terminalId).catch((error: unknown) => {
-        logger.debug({ err: error, terminalId }, 'could not clear presence');
-      });
     });
 
     socket.on(SUBSCRIBE_EVENT_NAME, (payload: unknown) => {

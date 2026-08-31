@@ -311,15 +311,15 @@ export const DEMO_SCENARIOS: readonly DemoScenario[] = [
       },
       {
         tab: 'B',
-        do: 'Look at **Conflict history** once more, and say what it does **not** show.',
+        do: 'Look at **Conflict history** once more, and at `blockedMutations`.',
         watch:
-          'The row is still there and still unresolved. The queue moved on; the log did not — ' +
-          '`conflict_log.resolution` is written `null` by the handler and nothing ever updates it, ' +
-          'because the resolution happens in the browser and is never reported back. So read ' +
-          '`blockedMutations` as **conflicts that have halted a queue**, not as queues halted right ' +
-          'now: it only climbs. The live answer is the `BLOCKED` badge on the till, and that has ' +
-          'gone. A counter and a gauge are different things, and this one is named like the wrong ' +
-          'one.',
+          'The row is still there and now reads `REBASED`, and `blockedMutations` has fallen back. ' +
+          'The handler writes `resolution` as `null`, because at that moment nobody knows which ' +
+          'answer the operator will choose; the browser reports it afterwards, on the one endpoint ' +
+          'that exists for it. So the history is a history — every conflict that ever happened — ' +
+          'while `blockedMutations` is a **gauge** of the queues halted right now, matching the ' +
+          '`BLOCKED` badge on the till. It is best-effort: resolve while the terminal is offline ' +
+          'and the row stays open until the next one is reported.',
       },
     ],
   },

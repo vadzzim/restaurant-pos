@@ -335,10 +335,6 @@ export function createSyncEngine(deps: SyncEngineDeps) {
         // intent. Sending a replacement that was never stored would let a later reload rebase the
         // same intent again under yet another fresh id — one intent, applied twice. The group is
         // untouched and still halted; the operator can press Rebase again.
-        // The swap did not commit, so the old `CONFLICT` row is still the durable record of this
-        // intent. Sending a replacement that was never stored would let a later reload rebase the
-        // same intent again under yet another fresh id — one intent, applied twice. The group is
-        // untouched and still halted; the operator can press Rebase again.
         if (reissued === undefined) {
           outcome = 'failed';
           break;

@@ -15,6 +15,11 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
+> **Swept once, in M20.** Fifteen of the thirty entries here were closed in a single pass — the
+> dedicated sweep `CLAUDE.md` promised every three or four milestones and that was deferred at every
+> one of them. Two of the fifteen turned out to have been fixed by a later milestone without the line
+> being deleted, which is the argument for sweeping rather than accumulating. See `build-log.md`.
+
 - **[M19, P3]** The realtime consumer marks `processed_events` and _then_ emits, so a crash between
   them loses the broadcast permanently — redelivery finds the marker and emits nothing. §12.2 chose
   that order, and in the same breath says duplicate emits are harmless because the client filters by
@@ -29,10 +34,6 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   `settleWithin`'s two callers both pass configured constants. It comes from a dependency in the
   Kafka or BullMQ path. Harmless — the run is PASS — and noted so it is not re-discovered. Proved by
   `--trace-warnings` on `pnpm --filter @pos/worker run test:integration`.
-- **[M18, P3]** The two `getByText('WS CONNECTED')` socket assertions match by substring, which is a
-  looser contract than they mean: `WS DISCONNECTED` does not match (checked), but a future label such
-  as `WS CONNECTED (degraded)` would. `{ exact: true }` or `/^WS CONNECTED$/`. Raised by Codex as a
-  P1 on the wrong mechanism and demoted after measuring it; see `build-log.md`.
 - **[M18, P2]** `pnpm test:e2e` reuses an API already answering on `:3000` rather than starting one,
   so a local run can report PASS for API code it did not build. The bundle is always this run's
   (`preview` serves the `dist/` it just built) and the worker is always started fresh, so the gap is
@@ -45,9 +46,6 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   shutdown channel the worker does not have (stdin, or a control endpoint). Harmless on Linux and in
   CI, where `kill` is a real SIGTERM. Proved by the escalating `duration` on `Consumer has joined the
 group` across consecutive runs in `.verify-output/e2e.log`.
-- **[M18, P3]** `API_READY_URL` in `verify-e2e.mjs` hard-codes `localhost:3000`, the same default
-  `vite.config.ts` hard-codes for its proxy. An `API_PORT` set to anything else makes the probe
-  answer about the wrong process. Proved by putting `API_PORT=3100` in `.env` and running it.
 - **[M18, P3]** The spec asserts no money. Both totals are on screen and ignored, so a server that
   accepted every mutation and computed `totalCents` wrongly would pass. Proved by changing a seeded
   price and asserting the order total and the ticket total against it.
@@ -65,13 +63,6 @@ group` across consecutive runs in `.verify-output/e2e.log`.
   Nothing is lost today — the queue is in Dexie and the order pointer on disk — but a half-typed
   table name in the POS header would be. Proved by deploying a new build with the "Another table"
   field filled in.
-- **[M16, P2]** `conflict_log.resolution` is only ever written `null` — `mutation-handler.ts:391`
-  writes it and nothing anywhere updates it, because Discard and Rebase happen in the browser and
-  are never reported back. So `blockedMutations` is a monotonic counter under a note that calls it
-  "a client queue still halted", and `/debug`'s **Conflict history** never shows a resolved row.
-  `/demo`'s §19.3 step 7 now says this out loud rather than claiming otherwise. Fix: a
-  `POST /api/orders/:id/conflicts/:mutationId/resolution` the two store actions call. Proved by
-  rebasing a halted queue and re-reading `/api/debug/conflicts` — `unresolved` does not fall.
 - **[M16, P3]** No UI path puts a second terminal on an existing order. `focusOrder` exists in the
   order store but is wired only to the "Go to it" button for a stranded halted order, so §19.3's
   literal two-terminal form (POS-2 cancels behind POS-1's back) needs `curl`. `/demo` uses the
@@ -80,30 +71,6 @@ group` across consecutive runs in `.verify-output/e2e.log`.
 - **[M16, P3]** `/demo`'s step ticks are in-memory only: switching scenario or reloading clears
   them. Deliberate — a second walk-through should not start half done — but it also means a
   reload mid-demo loses the place. Proved by ticking a step and pressing F5.
-- **[M15, P2]** Rows written in the same millisecond have no deterministic order: `savePending()`
-  stamps `createdAt` to the millisecond and `readQueue()` sorts by it alone, so IndexedDB falls back
-  to the random `mutationId` key and a queue can send base v4 before v3 and halt. Pre-existing and
-  already noted at `apps/web/test/sync-engine.test.ts:53-55`, but M15 made same-millisecond taps far
-  likelier. Fix: a monotonic per-terminal sequence in the row, sorted on. Proved by stubbing
-  `Date.now()` to a constant across two taps and asserting send order.
-- **[M15, P2]** The storage-less fallback in `settle()` is outside the serialized chain, so on a
-  device whose IndexedDB refuses the queue (private browsing, quota) rapid taps call `attemptOnce()`
-  concurrently with no queue row to advance the projected version — every one carries the same
-  `baseVersion`, so one applies and the rest conflict. Fix: keep that path sequential, or give it an
-  in-memory projection. Proved by forcing `savePending()` to return false and issuing two taps.
-- **[M15, P1-in-M12]** `applyVersionConflictArm` tampers `baseVersion - 1`, so on an order at v1 it
-  sends 0 — which zod refuses with `VALIDATION_FAILED` instead of producing the version conflict the
-  switch promises. Guard on `baseVersion < 2`. Seen in the browser this session; proved by the 400
-  body in `apps/web/src/api/simulator-arms.ts:129`.
-- **[M15, P1-in-M12]** `spend()` in `postMutation` runs only if `postMutationTo` _returns_; a 4xx
-  throws, so a tamper that fails validation leaves the arm armed and **every** later mutation from
-  that tab is tampered too. The tab is wedged until it is reloaded. Proved by three consecutive 400s
-  after one arming. Both of these are one pass together — the arm is one control.
-- **[M15, P3]** `commit()` in `PosView.vue` has no `catch`, so a rejecting commit action surfaces as
-  an unhandled rejection rather than in the error banner. Inherited from M8's `run()`; the item path
-  (`tap`) does catch. Proved by making `orders.pay` reject and watching the console, not the banner.
-- **[M15, P3]** `engine.rebase` carries the same six-line comment twice
-  (`apps/web/src/sync/engine.ts`, above `if (reissued === undefined)`). Cosmetic.
 - **[M14, P2]** `pnpm verify:multi` migrates, seeds and then writes to the **demo** database, not to
   `pos_test`, so every smoke run leaves two throwaway orders on table 19 in `demo-restaurant`.
   Harmless data, but a demo opened straight after a verification run shows them.
@@ -127,35 +94,18 @@ group` across consecutive runs in `.verify-output/e2e.log`.
   `/api/config` keeps its old transport for one more interval.
   `apps/api/src/modules/config/application/resolve-flags.ts`. A versioned or conditional fill is
   the fix. Found by the Codex review of M13; a fill paused across a concurrent write would prove it.
-- **[M12, P3]** `replayLastEvent` does not reset `attempt_count`, so a row that needed retries to
-  publish the first time starts its replay part-way to `OUTBOX_MAX_ATTEMPTS` and can dead-letter
-  sooner than a fresh event would. `apps/api/src/modules/debug/application/replay-last-event.ts`.
-  A row published on attempt 3, replayed against a broken transport, dead-lettering early proves it.
-- **[M12, P3]** `busy` in `apps/web/src/stores/simulator.ts` holds one control name, so two
-  overlapping presses leave the first button enabled while its request is still out. Harmless — the
-  endpoint is idempotent per switch — but the disabled state is not telling the truth. Pressing two
-  server controls within the same tick and watching both stay enabled proves it.
-- **[M11, P2]** The kitchen heartbeat reports `pendingCount: 0` unconditionally
-  (`apps/web/src/views/KitchenView.vue`), but `useKitchenStore` deliberately keeps a command in
-  `pendingByOrder` and in IndexedDB when its response is lost, for Retry / Discard. So the one
-  situation where the kitchen's pending count matters is the one where `/debug` says it is zero.
-  Found by the Codex review of M11; the comment claiming the kitchen has no queue "by
-  construction" is wrong and goes with the fix. Losing a kitchen response and reading the panel
-  would prove it.
-- **[M11, P2]** `readDatabaseCounters` runs three times per `/debug` poll cycle — once each for
-  `conflicts`, `outbox` and `metrics` — so eleven `count(*)` scans every two seconds against tables
-  that grow without bound. `apps/api/src/modules/debug/api/debug-routes.ts`. A request-scoped
-  memo, or one endpoint owning the counts, would fix it; a seeded table of ~10^5 outbox rows and a
-  timing on `/api/debug/metrics` would prove it matters.
-- **[M11, P3]** A presence `terminalId` is validated only as 1–64 characters, not against
-  `TERMINALS`, so any browser can claim any name and appear on the active-terminals panel.
-  `apps/api/src/modules/realtime/socket-server.ts`. Harmless while the socket has no
-  authentication at all (see below), and bounded by the TTL; a whitelist against `TERMINALS` plus
-  `KITCHEN_TERMINAL_ID` is the fix.
-- **[M11, P3]** A socket that reports presence for one terminal and then another leaves the first
-  entry behind until its TTL: `claimed` in the connection handler tracks only the latest, so the
-  eager delete on disconnect covers one terminal per socket. No screen does this today — a POS tab
-  that changes terminal reconnects — and fifteen seconds of a stale row is the whole cost.
+- **[M20, P3]** `flags.busy` in `apps/web/src/stores/flags.ts` holds one key, which is the defect
+  M20 fixed in the simulator store and did not fix here: two overlapping flag toggles leave the first
+  switch enabled while its request is still out. `FlagPanel.vue:71,99` read it. The fix is the same
+  three lines — a `Set` and an `isBusy(key)`. Pressing two flags within one tick and watching both
+  stay enabled proves it.
+- **[M20, P3]** A resolution reported while the terminal is offline is never recorded:
+  `postConflictResolution` goes through `assertOnline` and the report is best-effort, so a queue
+  discarded offline leaves its `conflict_log` row open until the _next_ resolution on that order and
+  terminal closes it. Deliberate — the panel it feeds is unreachable offline too, and a durable
+  outbox for an observability field is the wrong trade — but it means `blockedMutations` is a gauge
+  that can read high. Discarding under §18's offline switch and re-reading `/api/debug/conflicts`
+  proves it.
 
 ## Accepted limits and open questions
 

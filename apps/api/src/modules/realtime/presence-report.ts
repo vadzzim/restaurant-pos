@@ -1,5 +1,17 @@
-import type { PresenceReport } from '@pos/contracts';
+import { KITCHEN_TERMINAL_ID, TERMINALS, type PresenceReport } from '@pos/contracts';
 import { z } from 'zod';
+
+/**
+ * The only ids that may appear on the active-terminals panel: the four seeded tills and the
+ * kitchen display. It was `z.string().min(1).max(64)` until M20, so any browser could claim any
+ * name and take a row on `/debug` — bounded by the TTL, but still a screen showing something that
+ * does not exist. The socket has no authentication (see `known-problems.md`), so this is a bound on
+ * what a forged report can *say*, not on who may send one.
+ */
+const KNOWN_TERMINAL_IDS: [string, ...string[]] = [
+  KITCHEN_TERMINAL_ID,
+  ...TERMINALS.map((terminal) => terminal.id),
+];
 
 /**
  * The presence heartbeat (§16: active terminals with their pending counts).
@@ -18,7 +30,7 @@ import { z } from 'zod';
  * number on a screen.
  */
 export const presenceReportSchema: z.ZodType<PresenceReport> = z.object({
-  terminalId: z.string().min(1).max(64),
+  terminalId: z.enum(KNOWN_TERMINAL_IDS),
   restaurantId: z.string().min(1).max(64),
   role: z.enum(['pos', 'kitchen']),
   pendingCount: z.number().int().min(0).max(100_000),

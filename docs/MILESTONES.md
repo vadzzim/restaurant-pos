@@ -218,3 +218,9 @@ The whole of `docs/interview-guide.md`, including the weaknesses section and the
 §23. The scale section. The README. Final run of `pnpm lint typecheck test build` plus
 `pnpm verify:integration` and a manual smoke of the main flow.
 Verification: walk the Definition of done in §26 point by point, honestly.
+
+### M20 — Backlog sweep
+Not planned here; added after M19. The dedicated pass `CLAUDE.md` promised every three or four
+milestones and that was deferred at every one of them, taken once over all thirty `known-problems.md`
+entries. Brief: `docs/milestones/M20.md`. Verification: the three test suites, lint, typecheck,
+build and `pnpm verify:integration`, plus one new test per structural fix.

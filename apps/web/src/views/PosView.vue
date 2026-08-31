@@ -125,11 +125,20 @@ async function start(): Promise<void> {
   });
 }
 
-/** A commit action: blocks the other commit actions until it settles. */
+/**
+ * A commit action — send to kitchen, pay, cancel: blocks the other commit actions until it settles.
+ *
+ * It routes a rejection to the banner for the same reason `tap` below does, and it did not until
+ * M20: an action that threw surfaced as an unhandled rejection in the console while the screen
+ * showed nothing at all. The difference from `tap` is only that this one is awaited, so the caller
+ * knows when the button is free again.
+ */
 async function commit(action: () => Promise<unknown>): Promise<void> {
   committing.value = true;
   try {
     await action();
+  } catch (error: unknown) {
+    orders.lastError = error instanceof Error ? error.message : String(error);
   } finally {
     committing.value = false;
   }

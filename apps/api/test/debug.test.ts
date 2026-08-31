@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type {
+  ConflictResolutionResponse,
   ConflictsDebugResponse,
   EventsDebugResponse,
   MetricsResponse,
@@ -117,8 +118,122 @@ describe('GET /api/debug/conflicts', () => {
     const body = response.json<ConflictsDebugResponse>();
     expect(body.conflicts).toHaveLength(1);
     expect(body.total).toBe(2);
-    // Nothing writes `resolution` yet, so every conflict counts as a halted client queue.
+    // Both rows are still `resolution is null`: the client has not said how it unblocked.
     expect(body.unresolved).toBe(2);
+
+    await app.close();
+  });
+
+  it('stops counting a queue as halted once the client reports how it unblocked', async () => {
+    const app = testApp();
+    const orderId = randomUUID();
+    await createOrder(orderId);
+
+    await applyMutation(db(), {
+      orderId,
+      mutationId: randomUUID(),
+      terminalId: 'pos-2',
+      restaurantId: DEMO_RESTAURANT,
+      baseVersion: 99,
+      type: 'SEND_TO_KITCHEN',
+      payload: {},
+    });
+
+    const resolution = await app.inject({
+      method: 'POST',
+      url: `/api/orders/${orderId}/conflicts/resolution`,
+      payload: { terminalId: 'pos-2', resolution: 'DISCARDED' },
+    });
+
+    expect(resolution.statusCode).toBe(200);
+    expect(resolution.json<ConflictResolutionResponse>().resolved).toBe(1);
+
+    const after = (
+      await app.inject({ method: 'GET', url: '/api/debug/conflicts' })
+    ).json<ConflictsDebugResponse>();
+
+    // The row stays — the history is the point — but it is no longer a halted queue.
+    expect(after.total).toBe(1);
+    expect(after.unresolved).toBe(0);
+    expect(after.conflicts[0]?.resolution).toBe('DISCARDED');
+
+    // Reporting twice closes nothing the second time: the update only touches open rows.
+    const again = await app.inject({
+      method: 'POST',
+      url: `/api/orders/${orderId}/conflicts/resolution`,
+      payload: { terminalId: 'pos-2', resolution: 'REBASED' },
+    });
+    expect(again.json<ConflictResolutionResponse>().resolved).toBe(0);
+
+    await app.close();
+  });
+
+  it('refuses a resolution that is not one of the two §14.1 answers', async () => {
+    const app = testApp();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/orders/${randomUUID()}/conflicts/resolution`,
+      payload: { terminalId: 'pos-2', resolution: 'IGNORED' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json<{ code: string }>().code).toBe('VALIDATION_FAILED');
+
+    await app.close();
+  });
+});
+
+describe('the three panels count the same database', () => {
+  /**
+   * M20 gave `/api/debug/conflicts` and `/api/debug/outbox` their own narrow counter queries: all
+   * three panels used to run the eleven-subselect `readDatabaseCounters`, so one `/debug` poll cost
+   * thirty-three `count(*)` scans against tables that grow without bound, two thirds of them
+   * discarded by the caller. This is the guard on that refactor — the numbers must not have moved.
+   */
+  it('reports the same numbers from the narrow queries as from the full one', async () => {
+    const app = testApp();
+    const orderId = randomUUID();
+    await createOrder(orderId);
+
+    await applyMutation(db(), {
+      orderId,
+      mutationId: randomUUID(),
+      terminalId: 'pos-2',
+      restaurantId: DEMO_RESTAURANT,
+      baseVersion: 99,
+      type: 'SEND_TO_KITCHEN',
+      payload: {},
+    });
+    await insertOutboxRow({ publishedAt: new Date() });
+    await insertOutboxRow({ deadLetteredAt: new Date() });
+    await db().insert(printJobs).values({
+      id: randomUUID(),
+      orderId,
+      restaurantId: DEMO_RESTAURANT,
+      ticketHash: 'hash-agreement',
+      state: 'PENDING',
+    });
+
+    const conflicts = (
+      await app.inject({ method: 'GET', url: '/api/debug/conflicts' })
+    ).json<ConflictsDebugResponse>();
+    const outbox = (
+      await app.inject({ method: 'GET', url: '/api/debug/outbox' })
+    ).json<OutboxDebugResponse>();
+    const metrics = (
+      await app.inject({ method: 'GET', url: '/api/debug/metrics' })
+    ).json<MetricsResponse>();
+
+    const reading = (name: string): number | null =>
+      metrics.counters.find((counter) => counter.name === name)?.value ?? null;
+
+    expect(conflicts.total).toBe(reading('conflictsDetected'));
+    expect(conflicts.unresolved).toBe(reading('blockedMutations'));
+    expect(outbox.outbox.published).toBe(reading('outboxEventsPublished'));
+    expect(outbox.outbox.deadLettered).toBe(reading('outboxEventsDeadLettered'));
+    expect(outbox.outbox.pending).toBe(reading('outboxEventsPending'));
+    expect(outbox.printJobs.pending).toBe(reading('printJobsPending'));
 
     await app.close();
   });

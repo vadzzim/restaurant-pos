@@ -29,7 +29,15 @@ import { DEBUG_POLL_MS } from './debug';
 export const useSimulatorStore = defineStore('simulator', () => {
   const state = ref<SimulatorState | undefined>();
   const error = ref<string | undefined>();
-  const busy = ref<SimulatorControl | undefined>();
+  /**
+   * Which controls have a request out — a set, not one name. It held a single control until M20,
+   * so two overlapping presses left the first button enabled while its own request was still in
+   * flight: harmless, because every switch is idempotent, but the disabled state was not telling
+   * the truth about the one thing it exists to say.
+   */
+  const busy = ref(new Set<SimulatorControl>());
+
+  const isBusy = (control: SimulatorControl): boolean => busy.value.has(control);
 
   let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -64,7 +72,7 @@ export const useSimulatorStore = defineStore('simulator', () => {
     label: string,
     body: Record<string, unknown> = {},
   ): Promise<void> {
-    busy.value = control;
+    busy.value = new Set(busy.value).add(control);
     try {
       const response = await postSimulatorControl(control, body);
       state.value = response.state;
@@ -75,7 +83,9 @@ export const useSimulatorStore = defineStore('simulator', () => {
       error.value = message;
       recordSimulatorEffect(label, message);
     } finally {
-      busy.value = undefined;
+      const next = new Set(busy.value);
+      next.delete(control);
+      busy.value = next;
     }
   }
 
@@ -115,6 +125,7 @@ export const useSimulatorStore = defineStore('simulator', () => {
     state,
     error,
     busy,
+    isBusy,
     arms: computed(() => armStates.value),
     latches: computed(() => latchStates.value),
     effects: computed(() => simulatorEffects.value),

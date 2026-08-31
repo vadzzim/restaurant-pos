@@ -1,5 +1,7 @@
 import type {
   ApiErrorResponse,
+  ConflictResolution,
+  ConflictResolutionResponse,
   ConflictsDebugResponse,
   ConfigResponse,
   DependenciesResponse,
@@ -119,6 +121,26 @@ export async function postPresence(report: PresenceReport): Promise<void> {
     body: JSON.stringify(report),
   });
 }
+
+/**
+ * Tell the server how a halted queue was unblocked, so `/debug`'s conflict history can show a
+ * resolved row (§14.1, §16). Best-effort by design: the caller has already unblocked locally, and
+ * this only reports it. See `record-conflict-resolution.ts` on the API side.
+ *
+ * It goes through `assertOnline` like every other write, which means an offline resolution is never
+ * recorded — and that is the right answer, because the panel it feeds is unreachable offline too.
+ */
+export const postConflictResolution = (
+  orderId: string,
+  terminalId: string,
+  resolution: ConflictResolution,
+): Promise<ConflictResolutionResponse> => {
+  assertOnline(terminalId);
+  return postJson<ConflictResolutionResponse>(`/api/orders/${orderId}/conflicts/resolution`, {
+    terminalId,
+    resolution,
+  });
+};
 
 /**
  * §18's four server-side controls, through the one endpoint pair M12 added (ADR 015). The response
