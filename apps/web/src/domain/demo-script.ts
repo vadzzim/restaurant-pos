@@ -318,8 +318,9 @@ export const DEMO_SCENARIOS: readonly DemoScenario[] = [
           'answer the operator will choose; the browser reports it afterwards, on the one endpoint ' +
           'that exists for it. So the history is a history — every conflict that ever happened — ' +
           'while `blockedMutations` is a **gauge** of the queues halted right now, matching the ' +
-          '`BLOCKED` badge on the till. It is best-effort: resolve while the terminal is offline ' +
-          'and the row stays open until the next one is reported.',
+          '`BLOCKED` badge on the till. It is best-effort and it names the exact mutations it ' +
+          'closes, so a rebase that conflicts again leaves the new row open — and a resolution ' +
+          'made while the terminal is offline is never reported at all.',
       },
     ],
   },

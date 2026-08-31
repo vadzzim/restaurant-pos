@@ -11,6 +11,9 @@ const paramsSchema = z.object({ orderId: z.uuid() });
 const bodySchema = z.object({
   terminalId: z.string().min(1),
   resolution: z.enum(CONFLICT_RESOLUTIONS),
+  // Bounded because it becomes an `in (...)` list: a client's queue for one order is a handful of
+  // mutations, and an unbounded list here is an unbounded statement.
+  mutationIds: z.array(z.uuid()).min(1).max(100),
 });
 
 /**
@@ -34,6 +37,7 @@ export function registerConflictRoutes(app: FastifyInstance, db: Db): void {
       orderId: params.data.orderId,
       terminalId: body.data.terminalId,
       resolution: body.data.resolution,
+      mutationIds: body.data.mutationIds,
     });
 
     request.log.info(

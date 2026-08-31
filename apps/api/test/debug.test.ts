@@ -124,25 +124,30 @@ describe('GET /api/debug/conflicts', () => {
     await app.close();
   });
 
-  it('stops counting a queue as halted once the client reports how it unblocked', async () => {
-    const app = testApp();
-    const orderId = randomUUID();
-    await createOrder(orderId);
-
+  async function conflictOn(orderId: string, terminalId = 'pos-2'): Promise<string> {
+    const mutationId = randomUUID();
     await applyMutation(db(), {
       orderId,
-      mutationId: randomUUID(),
-      terminalId: 'pos-2',
+      mutationId,
+      terminalId,
       restaurantId: DEMO_RESTAURANT,
       baseVersion: 99,
       type: 'SEND_TO_KITCHEN',
       payload: {},
     });
+    return mutationId;
+  }
+
+  it('stops counting a queue as halted once the client reports how it unblocked', async () => {
+    const app = testApp();
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    const mutationId = await conflictOn(orderId);
 
     const resolution = await app.inject({
       method: 'POST',
       url: `/api/orders/${orderId}/conflicts/resolution`,
-      payload: { terminalId: 'pos-2', resolution: 'DISCARDED' },
+      payload: { terminalId: 'pos-2', resolution: 'DISCARDED', mutationIds: [mutationId] },
     });
 
     expect(resolution.statusCode).toBe(200);
@@ -161,9 +166,76 @@ describe('GET /api/debug/conflicts', () => {
     const again = await app.inject({
       method: 'POST',
       url: `/api/orders/${orderId}/conflicts/resolution`,
-      payload: { terminalId: 'pos-2', resolution: 'REBASED' },
+      payload: { terminalId: 'pos-2', resolution: 'REBASED', mutationIds: [mutationId] },
     });
     expect(again.json<ConflictResolutionResponse>().resolved).toBe(0);
+
+    await app.close();
+  });
+
+  /**
+   * The Codex review of M20's first cut, which scoped the update to the order and the terminal
+   * alone. The report is fire-and-forget, so a request still in flight can land *after* a rebase
+   * has conflicted again — and an order-wide update would close that fresh row too, reading
+   * `blockedMutations: 0` over a queue that is still halted.
+   */
+  it('leaves a conflict raised after the resolution was sent still open', async () => {
+    const app = testApp();
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    const halted = await conflictOn(orderId);
+
+    // The rebase conflicts again: a different mutation, under the new id §14.1 requires.
+    const rebased = await conflictOn(orderId);
+
+    const resolution = await app.inject({
+      method: 'POST',
+      url: `/api/orders/${orderId}/conflicts/resolution`,
+      payload: { terminalId: 'pos-2', resolution: 'REBASED', mutationIds: [halted] },
+    });
+
+    expect(resolution.json<ConflictResolutionResponse>().resolved).toBe(1);
+
+    const after = (
+      await app.inject({ method: 'GET', url: '/api/debug/conflicts' })
+    ).json<ConflictsDebugResponse>();
+
+    expect(after.total).toBe(2);
+    // The queue is still halted, and the gauge says so.
+    expect(after.unresolved).toBe(1);
+    expect(after.conflicts.find((row) => row.mutationId === rebased)?.resolution).toBeNull();
+    expect(after.conflicts.find((row) => row.mutationId === halted)?.resolution).toBe('REBASED');
+
+    await app.close();
+  });
+
+  it('refuses to close a row that belongs to another terminal', async () => {
+    const app = testApp();
+    const orderId = randomUUID();
+    await createOrder(orderId);
+    const mutationId = await conflictOn(orderId, 'pos-2');
+
+    const resolution = await app.inject({
+      method: 'POST',
+      url: `/api/orders/${orderId}/conflicts/resolution`,
+      payload: { terminalId: 'bar-1', resolution: 'DISCARDED', mutationIds: [mutationId] },
+    });
+
+    expect(resolution.json<ConflictResolutionResponse>().resolved).toBe(0);
+
+    await app.close();
+  });
+
+  it('refuses a resolution that names no mutations', async () => {
+    const app = testApp();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/orders/${randomUUID()}/conflicts/resolution`,
+      payload: { terminalId: 'pos-2', resolution: 'DISCARDED', mutationIds: [] },
+    });
+
+    expect(response.statusCode).toBe(400);
 
     await app.close();
   });
@@ -174,7 +246,7 @@ describe('GET /api/debug/conflicts', () => {
     const response = await app.inject({
       method: 'POST',
       url: `/api/orders/${randomUUID()}/conflicts/resolution`,
-      payload: { terminalId: 'pos-2', resolution: 'IGNORED' },
+      payload: { terminalId: 'pos-2', resolution: 'IGNORED', mutationIds: [randomUUID()] },
     });
 
     expect(response.statusCode).toBe(400);

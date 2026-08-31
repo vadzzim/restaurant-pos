@@ -101,8 +101,8 @@ group` across consecutive runs in `.verify-output/e2e.log`.
   stay enabled proves it.
 - **[M20, P3]** A resolution reported while the terminal is offline is never recorded:
   `postConflictResolution` goes through `assertOnline` and the report is best-effort, so a queue
-  discarded offline leaves its `conflict_log` row open until the _next_ resolution on that order and
-  terminal closes it. Deliberate — the panel it feeds is unreachable offline too, and a durable
+  discarded offline leaves its `conflict_log` row open for good — the report names the exact
+  mutations it closes, so no later resolution picks it up. Deliberate — the panel it feeds is unreachable offline too, and a durable
   outbox for an observability field is the wrong trade — but it means `blockedMutations` is a gauge
   that can read high. Discarding under §18's offline switch and re-reading `/api/debug/conflicts`
   proves it.

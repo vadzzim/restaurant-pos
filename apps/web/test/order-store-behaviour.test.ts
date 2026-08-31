@@ -41,6 +41,66 @@ describe('reporting how a halt was resolved', () => {
    * so a report that threw at the call site would come out of the resolution the operator chose —
    * an observability field breaking a till.
    */
+  it('reports the mutations that actually left the queue, and no others', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockRejectedValue(new Error('network down'));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+    await orders.sendToKitchen('pos-1', 'demo-restaurant');
+    const held = orders.queue.map((row) => row.mutationId);
+
+    await orders.discardHalted();
+
+    expect(vi.mocked(postConflictResolution)).toHaveBeenCalledWith(
+      'order-a',
+      'pos-1',
+      'DISCARDED',
+      held,
+    );
+  });
+
+  /**
+   * `discardOrderQueue` swallows a storage failure by design — M7's rule is that a storage failure
+   * never breaks a command. So a Discard on a device whose IndexedDB is refusing writes leaves the
+   * queue exactly where it was, and reporting it would close a `conflict_log` row over a queue that
+   * is still halted. Found by the Codex review of M20.
+   */
+  it('reports nothing when the discard did not actually empty the queue', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockRejectedValue(new Error('network down'));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+
+    vi.spyOn(localStore, 'discardOrderQueue').mockResolvedValue(undefined);
+    await orders.discardHalted();
+
+    expect(orders.pendingCount).toBe(1);
+    expect(vi.mocked(postConflictResolution)).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The same rule for the other resolution: if the first `reissue` cannot commit its replacement,
+   * `engine.rebase` leaves the original `CONFLICT` row alone and nothing has been resolved.
+   */
+  it('reports nothing when the rebase could not swap a single row', async () => {
+    const orders = useOrderStore();
+    orders.useTerminal('pos-1');
+    orders.adopt(snapshot('order-a', 3));
+
+    postMutationMock.mockRejectedValue(new Error('network down'));
+    await orders.addItem('pos-1', 'demo-restaurant', 'burger');
+
+    vi.spyOn(localStore, 'reissue').mockResolvedValue(undefined);
+    await orders.rebaseHalted();
+
+    expect(orders.pendingCount).toBe(1);
+    expect(vi.mocked(postConflictResolution)).not.toHaveBeenCalled();
+  });
+
   it('does not let a failed report break the resolution', async () => {
     vi.mocked(postConflictResolution).mockImplementation(() => {
       throw new Error('this terminal is offline');

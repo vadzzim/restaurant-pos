@@ -2237,3 +2237,42 @@ Fifteen entries closed, two opened: `flags.busy` carries the same single-slot de
 store had, and the offline resolution report. Seventeen remain.
 
 **Green:** lint, typecheck, `pnpm test` **469 passed** (+6), build, `pnpm verify:integration` PASS.
+
+### M20 review round 2 — Codex, and three findings on one new surface
+
+The commit was reviewed independently by Codex (`--commit`, since the tree was already clean). All
+three findings landed on the same thing: the §14.1 resolution report, the only new surface in the
+sweep. All three were P2 by the rubric, and all three were fixed anyway — because the first one
+falsified an argument written into the code, `build-log.md` and `PROGRESS.md` in the same commit.
+
+**The one that mattered.** The M20 comment said the rebase reports _before_ it rebases, "or it would
+close the fresh conflict its own rebase caused". Codex pointed out that the report is
+fire-and-forget: ordering it in the source orders nothing on the wire. A `POST` sent first can still
+arrive after the re-issued mutation has conflicted and inserted a new `conflict_log` row, and an
+update scoped to the order and the terminal closes that row too. `blockedMutations` would read zero
+over a queue that is still halted — the exact reading this endpoint was built to remove. The
+`resolution is null` guard does not help: the new row is `null` as well.
+
+The fix is not a narrower window but no window. The body now carries the `mutationIds` the client has
+actually unblocked, and the update matches on them. A rebase re-issues under a **new** `mutationId`
+by §14.1, so a conflict raised after the call cannot be one of the ids in it, whenever it arrives.
+`order_id` and `terminal_id` stay in the predicate — not for the race, but so a client cannot close a
+row belonging to another till.
+
+**The other two are one shape.** `discardOrderQueue` swallows a storage failure by design (M7: a
+storage failure never breaks a command) and returns `void`; `engine.rebase` leaves the original
+`CONFLICT` row untouched when the first `reissue` cannot commit. Either way the queue is still halted
+and the report was sent regardless. Rather than threading a success flag out of two different
+operations, the store reports the **difference**: it records what the queue held for that order
+before, and afterwards sends only the ids that are gone. An attempt that changed nothing sends
+nothing, and a rebase that stopped half-way reports only the half that moved.
+
+That also let the rebase report move to where it belongs — _after_ the rebase, where the evidence is.
+
+Four new tests, each checked against the pre-fix code: a conflict raised after the resolution stays
+open; a resolution for another terminal closes nothing; a discard that did not empty the queue
+reports nothing; a rebase that could not swap a row reports nothing. Two documents that described
+the old behaviour — `/demo`'s §19.3 step 7 and the backlog's offline entry — were corrected: an
+offline resolution is now open **for good**, because no later report names its ids.
+
+**Green:** lint, typecheck, `pnpm test` **475 passed**, build, `pnpm verify:integration` PASS.

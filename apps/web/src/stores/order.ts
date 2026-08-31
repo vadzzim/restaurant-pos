@@ -684,11 +684,12 @@ export const useOrderStore = defineStore('order', () => {
       return;
     }
 
+    const held = queuedIdsFor(orderId);
     await localStore.discardOrderQueue(terminalId, orderId);
     await refreshQueue();
     conflict.value = undefined;
     lastError.value = undefined;
-    reportResolution(terminalId, orderId, 'DISCARDED');
+    reportResolution(terminalId, orderId, 'DISCARDED', held);
   }
 
   /**
@@ -703,12 +704,8 @@ export const useOrderStore = defineStore('order', () => {
       return;
     }
 
+    const held = queuedIdsFor(orderId);
     conflict.value = undefined;
-
-    // Reported **before** the rebase, not after. A rebase onto a state that moved again halts on a
-    // fresh `conflict_log` row, and a report sent afterwards would close that one too — marking a
-    // queue resolved at the moment it stopped being.
-    reportResolution(terminalId, orderId, 'REBASED');
 
     inFlight.value += 1;
     try {
@@ -716,25 +713,50 @@ export const useOrderStore = defineStore('order', () => {
     } finally {
       inFlight.value -= 1;
     }
+
+    // Reported **after** the rebase, and only for the mutations that actually left the queue. The
+    // first `reissue` can fail to commit, in which case the original `CONFLICT` row is untouched and
+    // nothing has been resolved; and a step that conflicts again is a *new* mutation with a new id,
+    // so it cannot be closed by this report however late it arrives.
+    await refreshQueue();
+    reportResolution(terminalId, orderId, 'REBASED', held);
+  }
+
+  /** The mutations this device currently holds for one order, in queue order. */
+  function queuedIdsFor(orderId: string): string[] {
+    return queue.value.filter((row) => row.orderId === orderId).map((row) => row.mutationId);
   }
 
   /**
-   * Tell the server that §14.1 was answered here. Deliberately not awaited and deliberately
-   * swallowed: the queue is already unblocked on this device, and `conflict_log.resolution` feeds
-   * `/debug` and nothing else (ADR-free by design — see the API's `record-conflict-resolution.ts`).
-   * Making the operator wait on it, or showing them an error for it, would put an observability
-   * field in front of a till.
+   * Tell the server that §14.1 was answered here.
+   *
+   * `held` is what the queue held *before* the resolution; anything still in it afterwards was not
+   * resolved — `discardOrderQueue` swallows a storage failure by design (M7: a storage failure never
+   * breaks a command), and a rebase can stop part-way. So the report is the difference, and an
+   * attempt that changed nothing sends nothing rather than closing a row over a queue that is still
+   * halted.
+   *
+   * Deliberately not awaited and deliberately swallowed: the queue is already unblocked on this
+   * device, and `conflict_log.resolution` feeds `/debug` and nothing else. Making the operator wait
+   * on it, or showing them an error for it, would put an observability field in front of a till.
    */
   function reportResolution(
     terminalId: string,
     orderId: string,
     resolution: ConflictResolution,
+    held: readonly string[],
   ): void {
+    const stillQueued = new Set(queuedIdsFor(orderId));
+    const cleared = held.filter((mutationId) => !stillQueued.has(mutationId));
+    if (cleared.length === 0) {
+      return;
+    }
+
     // `void fn().catch()` would not be enough: `postConflictResolution` calls `assertOnline`, which
     // throws **synchronously** on a terminal holding §18's offline switch — before there is a
     // promise to attach a handler to. Offline is exactly when §19.3 discards a halted queue, so
     // that throw would come out of the resolution the operator just chose.
-    void (async () => postConflictResolution(orderId, terminalId, resolution))().catch(
+    void (async () => postConflictResolution(orderId, terminalId, resolution, cleared))().catch(
       () => undefined,
     );
   }

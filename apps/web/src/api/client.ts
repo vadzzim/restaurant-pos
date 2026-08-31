@@ -125,7 +125,8 @@ export async function postPresence(report: PresenceReport): Promise<void> {
 /**
  * Tell the server how a halted queue was unblocked, so `/debug`'s conflict history can show a
  * resolved row (§14.1, §16). Best-effort by design: the caller has already unblocked locally, and
- * this only reports it. See `record-conflict-resolution.ts` on the API side.
+ * this only reports it. `mutationIds` are the mutations that have actually left the local queue —
+ * see `record-conflict-resolution.ts` on the API side for why naming them is not optional.
  *
  * It goes through `assertOnline` like every other write, which means an offline resolution is never
  * recorded — and that is the right answer, because the panel it feeds is unreachable offline too.
@@ -134,11 +135,13 @@ export const postConflictResolution = (
   orderId: string,
   terminalId: string,
   resolution: ConflictResolution,
+  mutationIds: readonly string[],
 ): Promise<ConflictResolutionResponse> => {
   assertOnline(terminalId);
   return postJson<ConflictResolutionResponse>(`/api/orders/${orderId}/conflicts/resolution`, {
     terminalId,
     resolution,
+    mutationIds,
   });
 };
 

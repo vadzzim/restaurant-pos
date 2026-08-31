@@ -26,17 +26,20 @@ accumulating: an unread backlog decays into fiction, and checking costs the same
   inline when `savePending` returns false. **Appending a second `serialize` link does not work** —
   rapid taps interleave staging against staging, not staging against send.
 - **`conflict_log.resolution` is written.** `POST /api/orders/:orderId/conflicts/resolution` closes
-  the open rows for one order on one terminal; `discardHalted` and `rebaseHalted` report into it.
-  Rebase reports **before** it rebases, or it would close the fresh conflict its own rebase caused.
+  the rows the body **names by `mutationId`**. Not order-wide: the report is fire-and-forget, so an
+  order-wide update can close a conflict the rebase raised *after* the call. The store reports the
+  difference between what the queue held before and after, so an attempt that changed nothing sends
+  nothing. Rebase reports **after** it rebases.
 - **Each `/debug` panel counts what it shows.** `readConflictCounters` and `readOutboxCounters`;
   `readDatabaseCounters` is now `/api/debug/metrics` only. A test asserts the three still agree.
 
-**The review pass found one P1, in this session's own diff.** `postConflictResolution` calls
-`assertOnline`, which throws *synchronously* on an offline terminal — before there is a promise for
-`.catch()` to hold. Offline is exactly when §19.3 discards a halted queue, so an observability field
-would have broken a till. Wrapped in an async IIFE and covered.
+**Two review passes; the second was Codex's, and all three of its findings hit the one new
+surface.** Mine caught a P1: `postConflictResolution` calls `assertOnline`, which throws
+*synchronously* — and offline is exactly when §19.3 discards a halted queue. Codex's three were P2
+and were fixed anyway, because the first falsified an argument written into the code in the same
+commit. Detail in `build-log.md`, *M20 review round 2*.
 
-**Green:** lint, typecheck (three projects), `pnpm test` **469 passed**, build,
+**Green:** lint, typecheck (three projects), `pnpm test` **475 passed**, build,
 `pnpm verify:integration` **PASS**. The hand smoke of §19.1 is still the user's (CLAUDE.md rule 3).
 
 ## What exists
@@ -73,7 +76,8 @@ ADRs are canon; history in `progress-archive.md`. What is not in one:
 - **The documents link to the argument; they do not restate it.** Anything added to `docs/` should
   cite an ADR or a test rather than re-explaining a mechanism.
 - **`conflict_log.resolution` is observability, not domain state.** Best-effort, not idempotency-
-  keyed, not in the mutation transaction. An offline resolution is never recorded, on purpose.
+  keyed, not in the mutation transaction, and always scoped to named `mutationId`s. An offline
+  resolution is never recorded and its row stays open for good, on purpose.
 
 ## Known problems
 
