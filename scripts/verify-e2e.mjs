@@ -150,8 +150,8 @@ async function main() {
       env: { STDIN_SHUTDOWN: '1' },
       shutdownCommand: 'shutdown',
     });
-    // `/api/health/ready` answers 503 until PostgreSQL, Redis and the broker all respond
-    // (ADR 011), so this one poll covers the whole dependency set — no sleep anywhere below.
+    // `/api/health/ready` answers 503 until PostgreSQL responds (ADR 011), so this poll gates the
+    // API's only hard dependency without a sleep.
     if (!(await runner.waitForHttp(API_READY_URL, { timeoutMs: 90_000 }))) {
       return runner.finish(1, 'the API never became ready');
     }
