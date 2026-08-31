@@ -2276,3 +2276,97 @@ the old behaviour — `/demo`'s §19.3 step 7 and the backlog's offline entry �
 offline resolution is now open **for good**, because no later report names its ids.
 
 **Green:** lint, typecheck, `pnpm test` **475 passed**, build, `pnpm verify:integration` PASS.
+
+## M21 — Verification that can fail
+
+The first of four grouped sweeps over what M20 left. M20 took thirty unrelated entries in one pass
+and paid for a fresh context per fix; the seventeen that remained are grouped instead by **the
+surface the fix lives on**, one milestone each — `MILESTONES.md`, _The second sweep_. This one is
+the test harness, and it holds both of the backlog's remaining P2s. Brief:
+`docs/milestones/M21.md`.
+
+Both P2s have the same shape, which is why they are together: a run that reports PASS while proving
+less than it says.
+
+### The end-to-end run could pass for code it never executed
+
+`verify-e2e.mjs` probed `:3000` for two seconds and, if anything answered, ran the whole spec
+against it. Everything else in the run is this build — `preview` serves the `dist/` just built, the
+worker is a fresh child — so the API process was the entire gap, and editing a route handler with
+yesterday's API still up produced a green run.
+
+Reuse is now a flag. A foreign API on the port ends the run with the instruction instead:
+`stop it, or pass --reuse-api to test against it deliberately`. The escape hatch is kept because the
+reason it existed is real — the user keeps a demo stack up and a second API would lose the bind —
+but it is now named in the failure, in the log and in the summary line, which is the difference
+between a documented reuse and a silent false PASS.
+
+Proved by a stub HTTP server answering readiness on :3000: the run that used to pass now stops
+before it starts an API. The probe cannot tell a stub from a stale API, and that is the point — it
+refuses anything it did not start.
+
+### A terminated process holds its consumer group
+
+`child.kill()` on Windows is a terminate, so neither the API nor the worker ran `shutdown()`, and
+neither sent `LeaveGroup`. The dead member held its place until the session timed out and the
+_next_ run waited out the rebalance — the reason `GROUP_JOIN_TIMEOUT_MS` is 120 s.
+
+The entry said the fix needs a shutdown channel the worker does not have. It is six lines:
+`STDIN_SHUTDOWN` makes both processes read stdin and run the same `shutdown()` a signal runs, and
+`startService({ shutdownCommand })` writes the word, waits, and keeps the kill as its fallback. Off
+by default, because `pnpm dev` runs three processes on one terminal and a worker eating that stream
+is not something anybody asked for.
+
+The API gets it as well as the worker. It holds a place in `realtime` exactly as the worker does in
+`kitchen`, and since the fix above it is no longer usually a process the run borrowed.
+
+Two things this needed that the first draft did not have: `process.stdin.unref()`, or the resumed
+stream keeps the process alive after everything else has closed — the opposite of asking it to
+stop — and an `error` listener on the child's stdin in the runner, since writing to a child that
+has already died is an EPIPE that would otherwise take the harness down during teardown.
+
+Proved by two consecutive runs: `asking worker to stop` → `[worker] stopped` in the first, and a
+`Consumer has joined the group` of 16 ms and 18 ms in the second, where the old shape charged that
+run a session timeout.
+
+### The smoke run wrote into the demo
+
+`verify:multi` migrated, seeded and then applied §19.10's real mutation against `pos`, so every run
+left two throwaway orders on table 19 in the restaurant the demo shows. It now uses `pos_multi`,
+created by the script if it is absent — the `postgres` image runs its init once, against a volume
+the user has had since M1, so nothing else would create it. Not `pos_test`: the integration suite
+truncates that between tests and these replicas are containers that would be reading it at the
+time.
+
+The first attempt at creating it cost a run. `run()` in `compose-run.mjs` spawns with `shell: true`
+so that `docker` and `pnpm` resolve on Windows, which means the `psql -tAc "SELECT ..." | grep -q 1
+|| createdb` one-liner was read by **cmd.exe**, not by the container: a bare `psql` ran inside as
+`root` and the `|| createdb` half ran on the host. `createdb` alone, every argument a word, and
+`already exists` treated as the success it is.
+
+One visible consequence, and it is an improvement rather than a cost: `verify:multi --keep` now puts
+a _seeded but empty_ restaurant on :8081 rather than the demo's accumulated orders.
+
+Proved by running it twice: PASS both times, `createdb: ... already exists` taken as the success it
+is on the second, `pos_multi` going from two orders to four — and the demo database holding at
+forty-two throughout.
+
+### The spec asserted no money
+
+Both totals were on screen and ignored, so a server that accepted every mutation and computed
+`totalCents` wrongly would have passed. The spec now orders **two** of the first tile, reads that
+tile's price out of the DOM — the menu is seed data, the same reason product names are read rather
+than hard-coded — and asserts `2 × price` in two places.
+
+Where matters more than what. The POS total is asserted _after_ the pending badge is gone: until
+then the number on screen is the optimistic projection's, priced from the menu by a second
+implementation of the server's arithmetic (`known-problems.md`). The kitchen ticket's total is the
+same number arriving by a different route entirely — event payload, projection, socket — so the two
+assertions fail for different reasons.
+
+The backlog line proposed proving it by changing a seeded price. That would not prove anything
+here, and it should not: the price is read off the same screen the total is, so both numbers move
+together. What the assertion holds is the _arithmetic between them_. Proved by adding one cent to
+`recalculateTotal`'s `sum(quantity * unit_price_cents)` and running the spec: `Received string:
+"Total$24.01"` against an expected `$24.00`, which is a defect no other test in the repository
+would have noticed.

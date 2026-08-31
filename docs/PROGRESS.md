@@ -6,41 +6,42 @@
 
 ## Current state
 
-**The project was finished at M19; M20 is the backlog sweep it never got.** Twenty-one milestones,
-one commit each, nothing cut (ADR 001, 007). M20 closed **fifteen** of the thirty P2/P3 entries in
-`known-problems.md` and opened two, so **seventeen remain** — and the file now carries a note saying
-it has been swept once, so the next reader knows what they are looking at.
+**The project was finished at M19. M20 was the backlog sweep it never got, and M21 is the first of
+four that finish the job.** M20 took thirty unrelated entries in one pass and paid for a fresh
+context per fix; the seventeen it left are grouped by **the surface the fix lives on** — briefs in
+`MILESTONES.md`, _The second sweep_. M21 took the four that live in the **test harness**, including
+both of the backlog's remaining P2s. **Thirteen of the seventeen remain** — they are M22, M23 and
+M24 — and M21's own review pass opened two more, so the file holds fifteen lines.
 
-**Two of the fifteen were already fixed and nobody had deleted the line.** Both M15 `P1-in-M12`
-entries described code that M15 itself repaired. That is the argument for sweeping rather than
-accumulating: an unread backlog decays into fiction, and checking costs the same either way.
+Both P2s had the same shape, which is why they were done first: a run that reports PASS while
+proving less than it says.
 
-**The four structural fixes, each with a test that fails without it.** Detail in `build-log.md`,
-*M20*; the reasoning lives beside the code, as ADR 001's convention requires.
+- **`pnpm test:e2e` no longer borrows an API.** A foreign process on `:3000` ends the run with an
+  instruction; `--reuse-api` is the explicit escape hatch, and it says in the summary that nothing
+  proved anything about the API this run built. **Do not** restore the silent reuse — that is what
+  let a green run cover an edited route handler the run never executed.
+- **`verify:multi` has its own database, `pos_multi`.** Created by the script (`createdb`, with
+  `already exists` treated as success), migrated and seeded there. The container-side name is in
+  `docker-compose.multi.yml` and the host-side one in the script, and **the two must agree**. Not
+  `pos_test`: the integration suite truncates that between tests.
+- **Both long-lived processes stop when asked.** `STDIN_SHUTDOWN=1` makes the API and the worker
+  read `shutdown` on stdin and run the same `shutdown()` a signal runs; `startService({
+  shutdownCommand })` writes it and keeps the kill as its fallback. Windows has no signal to send a
+  child, and a terminated consumer holds its group until the session expires — which the *next* run
+  used to pay for.
+- **The spec asserts money.** Two of one tile, the price read from the DOM, `2 × price` asserted on
+  the POS **after** the queue has drained — before that the number is the optimistic projection's —
+  and again on the kitchen ticket, where it arrived by projection and socket instead.
 
-- **The queue has a clock.** `queueStamp()` in `local-store.ts` returns `max(Date.now(), newest row
-  on disk + 1 ms)`, so two taps inside one millisecond can no longer be ordered by the random-UUID
-  tiebreak and send `baseVersion` 4 before 3. **Do not** replace it with a remembered high-water
-  mark — that was tried, and it is process state no test and no second tab can reset.
-- **The storage-less send is inside the serialized link.** `stageOrSend` in `stores/order.ts` sends
-  inline when `savePending` returns false. **Appending a second `serialize` link does not work** —
-  rapid taps interleave staging against staging, not staging against send.
-- **`conflict_log.resolution` is written.** `POST /api/orders/:orderId/conflicts/resolution` closes
-  the rows the body **names by `mutationId`**. Not order-wide: the report is fire-and-forget, so an
-  order-wide update can close a conflict the rebase raised *after* the call. The store reports the
-  difference between what the queue held before and after, so an attempt that changed nothing sends
-  nothing. Rebase reports **after** it rebases.
-- **Each `/debug` panel counts what it shows.** `readConflictCounters` and `readOutboxCounters`;
-  `readDatabaseCounters` is now `/api/debug/metrics` only. A test asserts the three still agree.
+Detail and the two traps this hit — cmd.exe reading a `sh -c` pipeline that was meant for the
+container, and stdin keeping a process alive after its own shutdown — are in `build-log.md`, *M21*.
 
-**Two review passes; the second was Codex's, and all three of its findings hit the one new
-surface.** Mine caught a P1: `postConflictResolution` calls `assertOnline`, which throws
-*synchronously* — and offline is exactly when §19.3 discards a halted queue. Codex's three were P2
-and were fixed anyway, because the first falsified an argument written into the code in the same
-commit. Detail in `build-log.md`, *M20 review round 2*.
-
-**Green:** lint, typecheck (three projects), `pnpm test` **475 passed**, build,
-`pnpm verify:integration` **PASS**. The hand smoke of §19.1 is still the user's (CLAUDE.md rule 3).
+**Green:** lint, typecheck (three projects + `tsconfig.e2e.json`), `pnpm test` **475 passed**,
+build, `pnpm verify:integration` **PASS**, `pnpm test:e2e` **PASS three times**, `pnpm verify:multi`
+**PASS twice**. Each fix was also falsified: a stub on :3000 turns the e2e run red, a broken
+`recalculateTotal` turns the money assertion red, the second e2e run joins its consumer groups in
+under 20 ms where the old shape waited out a session timeout, and the demo database held at
+forty-two orders across two smoke runs.
 
 ## What exists
 
@@ -48,11 +49,11 @@ One line per unit; detail lives in the code and the ADRs.
 
 - **Docs** — `architecture.md`, `interview-guide.md`, `definition-of-done.md`, `spec.md`,
   `MILESTONES.md`, `known-problems.md`, `build-log.md`, `progress-archive.md`,
-  `milestones/M01…M20.md`. **ADRs 001–018**, indexed by `docs/adr/README.md` — the real index;
+  `milestones/M01…M21.md`. **ADRs 001–018**, indexed by `docs/adr/README.md` — the real index;
   `spec.md` §23 names filenames that drifted.
-- `packages/` — `config` zod env (all defaulted); `contracts` the §5 shapes plus `TERMINALS`,
-  `BAR_MENU` and `CONFLICT_RESOLUTIONS`; `domain` `decide()`, **the whole of §8**; `db` fifteen
-  tables, three migrations, seed (11 products), `@pos/db/testing`.
+- `packages/` — `config` zod env (all defaulted, `STDIN_SHUTDOWN` the one boolean); `contracts` the
+  §5 shapes plus `TERMINALS`, `BAR_MENU` and `CONFLICT_RESOLUTIONS`; `domain` `decide()`, **the
+  whole of §8**; `db` fifteen tables, three migrations, seed (11 products), `@pos/db/testing`.
 - `apps/api` — the nine-branch mutation endpoint, the §14.1 resolution report, the two §17 kitchen
   adapters, the four reads, `modules/{realtime,printer,debug,config}/`, health. Ten test files, plus
   `multi-instance.integration.test.ts` behind its own config, **excluded** by default.
@@ -75,31 +76,37 @@ ADRs are canon; history in `progress-archive.md`. What is not in one:
 - **The icons are generated** — `apps/web/scripts/make-icons.mjs`, by hand, not by the build.
 - **The documents link to the argument; they do not restate it.** Anything added to `docs/` should
   cite an ADR or a test rather than re-explaining a mechanism.
-- **`conflict_log.resolution` is observability, not domain state.** Best-effort, not idempotency-
-  keyed, not in the mutation transaction, and always scoped to named `mutationId`s. An offline
-  resolution is never recorded and its row stays open for good, on purpose.
+- **`conflict_log.resolution` is observability, not domain state.** Best-effort, never order-wide.
+- **A verification run owns its lifecycle and writes `.verify-output/*.log`** — read the tail, never
+  a live container log (CLAUDE.md rule 3). Since M21 a run also never borrows a process it did not
+  start, and never writes into the demo database.
 
 ## Known problems
 
-`docs/known-problems.md`: the accepted limits, then the backlog — **seventeen** entries after M20's
-sweep, two of them new. The next sweep is due in three or four milestones, if there are any.
+`docs/known-problems.md`: the accepted limits, then the backlog — **fifteen** entries. Thirteen are
+grouped into M22, M23 and M24 by the surface they live on; the two `[M21, P3]` lines are this
+milestone's own review pass and belong to whichever of those touches the scripts next. A milestone
+there is finished when its lines are gone from that file: deleted if fixed, moved up into *Accepted
+limits* if the honest answer is that the behaviour is right and the line was mis-filed.
 
-## If a session does follow
+## First command of the next session
 
-Three things are worth doing, in this order, and none is large:
+**M22 — The flag path, end to end.** Brief in `MILESTONES.md`; expand it into
+`docs/milestones/M22.md` first. Two fixes and three re-arguments:
 
-1. **Walk §19.1 by hand, and push to a remote and read the CI run.** The two unmet §26 clauses, 21
-   and 18. Neither needs code: nothing in `ci.yml` is known to be wrong, it is simply unexecuted,
-   and the smoke walk is `/demo`, scenario *Normal flow*.
-2. **Force a real interleaving in §21.1 and §21.10.** The honest gap named in
-   `definition-of-done.md` clause 17 and in the interview guide's weakness 2 — advisory-lock
-   choreography or a fault-injecting proxy. Closing it would upgrade the weakest claim in the
-   project. This is a milestone, not a sweep item.
-3. **Read `docs/definition-of-done.md` before claiming anything is done.** It is the map of what is
-   proved, what is argued, and what is neither.
+1. **`[M13, P2]`** a cache-aside fill can overwrite an invalidation in
+   `apps/api/src/modules/config/application/resolve-flags.ts`, so "fleet-wide and immediate" is
+   false for one `FLAG_CACHE_TTL_MS`. A versioned or conditional fill is the fix.
+2. **`[M20, P3]`** `flags.busy` in `apps/web/src/stores/flags.ts` holds one key — the same defect
+   M20 fixed in the simulator store. A `Set` and an `isBusy(key)`; `FlagPanel.vue:71,99` read it.
+3. Three entries whose answer is *not a fix*: the realtime consumer's mark-then-emit order (§12.2
+   chose it), the `TimeoutNegativeWarning` from a dependency, and a resolution reported offline
+   never being recorded. Re-argue each once, then move it into *Accepted limits* or delete it.
 
-**Do not** re-argue an ADR without a new one, do not run `docker compose` by hand (rule 3 — the
-three `verify:*` commands own their lifecycles and write `.verify-output/*.log`), and do not restate
-in a document what a test already says. Running it: `pnpm -F @pos/api start`,
-`pnpm -F @pos/worker dev`, and `pnpm dev` (:5173) or `pnpm -F @pos/web build && pnpm -F @pos/web
-preview` (:4173).
+Two things still outstanding from M19, neither large and neither part of a sweep: **walk §19.1 by
+hand and read a real CI run** (the two unmet §26 clauses), and **force a real interleaving in §21.1
+and §21.10** — that one is a milestone, not a sweep item. `docs/definition-of-done.md` is the map of
+what is proved, what is argued and what is neither; read it before claiming anything is done.
+
+Running it: `pnpm -F @pos/api start`, `pnpm -F @pos/worker dev`, and `pnpm dev` (:5173) or
+`pnpm -F @pos/web build && pnpm -F @pos/web preview` (:4173).

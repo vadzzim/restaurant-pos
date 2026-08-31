@@ -15,11 +15,23 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
-> **Swept once, in M20.** Fifteen of the thirty entries here were closed in a single pass — the
-> dedicated sweep `CLAUDE.md` promised every three or four milestones and that was deferred at every
-> one of them. Two of the fifteen turned out to have been fixed by a later milestone without the line
-> being deleted, which is the argument for sweeping rather than accumulating. See `build-log.md`.
+> **Swept once in M20, and being swept again in M21–M24.** M20 closed fifteen of thirty entries in
+> one pass over unrelated surfaces, and paid for a fresh context per fix. What was left is grouped
+> **by the surface the fix lives on** — one milestone each, briefs in `MILESTONES.md`, _The second
+> sweep_. M21 has taken the four that live in the test harness, including both remaining P2s.
+>
+> Two of M20's fifteen turned out to have been fixed by a later milestone without the line being
+> deleted, which is the argument for sweeping rather than accumulating. See `build-log.md`.
 
+- **[M21, P3]** `verify-e2e.mjs` probes `:3000` only after Chromium, the build, the migration and the
+  seed, so a user who left an API up waits out two minutes of setup to be told to stop it. The probe
+  needs nothing from those steps and could run first. Found by M21's own review pass; proved by
+  timing a refused run.
+- **[M21, P3]** `docker-compose.multi.yml` now names `pos_multi`, which only
+  `scripts/verify-multi-instance.mjs` creates — so bringing that overlay up **by hand** starts two
+  replicas against a database that does not exist and they fail readiness until the script has been
+  run once. The file says so in a comment; an init script under `postgres` would be the fix. Proved
+  by `docker compose -f docker-compose.yml -f docker-compose.multi.yml up api-1` on a fresh volume.
 - **[M19, P3]** The realtime consumer marks `processed_events` and _then_ emits, so a crash between
   them loses the broadcast permanently — redelivery finds the marker and emits nothing. §12.2 chose
   that order, and in the same breath says duplicate emits are harmless because the client filters by
@@ -34,21 +46,6 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   `settleWithin`'s two callers both pass configured constants. It comes from a dependency in the
   Kafka or BullMQ path. Harmless — the run is PASS — and noted so it is not re-discovered. Proved by
   `--trace-warnings` on `pnpm --filter @pos/worker run test:integration`.
-- **[M18, P2]** `pnpm test:e2e` reuses an API already answering on `:3000` rather than starting one,
-  so a local run can report PASS for API code it did not build. The bundle is always this run's
-  (`preview` serves the `dist/` it just built) and the worker is always started fresh, so the gap is
-  the API process alone; CI has nothing listening and is unaffected. Proved by editing a route
-  handler, leaving the old API up, and watching the run pass.
-- **[M18, P3]** `test:e2e` kills its worker with `child.kill()`, which on Windows is a terminate: no
-  shutdown runs and no `LeaveGroup` is sent, so the `kitchen` group holds a dead member until its
-  session expires and the _next_ run waits out the rebalance. Absorbed rather than fixed — the wait
-  moved into `GROUP_JOIN_TIMEOUT_MS`, out of the assertion budget — because a graceful stop needs a
-  shutdown channel the worker does not have (stdin, or a control endpoint). Harmless on Linux and in
-  CI, where `kill` is a real SIGTERM. Proved by the escalating `duration` on `Consumer has joined the
-group` across consecutive runs in `.verify-output/e2e.log`.
-- **[M18, P3]** The spec asserts no money. Both totals are on screen and ignored, so a server that
-  accepted every mutation and computed `totalCents` wrongly would pass. Proved by changing a seeded
-  price and asserting the order total and the ticket total against it.
 - **[M17, P2]** `activate` deletes the previous build's cache while a page running the old bundle is
   still open. Harmless today because `router.ts` imports all four views statically, so there are no
   lazily fetched chunks — but the day code splitting is introduced, that page can ask for a chunk no
@@ -71,11 +68,6 @@ group` across consecutive runs in `.verify-output/e2e.log`.
 - **[M16, P3]** `/demo`'s step ticks are in-memory only: switching scenario or reloading clears
   them. Deliberate — a second walk-through should not start half done — but it also means a
   reload mid-demo loses the place. Proved by ticking a step and pressing F5.
-- **[M14, P2]** `pnpm verify:multi` migrates, seeds and then writes to the **demo** database, not to
-  `pos_test`, so every smoke run leaves two throwaway orders on table 19 in `demo-restaurant`.
-  Harmless data, but a demo opened straight after a verification run shows them.
-  `scripts/verify-multi-instance.mjs`. A dedicated database, or a cleanup step, is the fix; running
-  it twice and counting orders proves it.
 - **[M14, P3]** nginx resolves `api-1` and `api-2` once, when it loads its config, so a replica that
   restarts with a new address is proxied to the old one until nginx is reloaded. `apps/web/nginx.conf`.
   A `resolver` plus a variable `proxy_pass` is the fix; recreating one replica under

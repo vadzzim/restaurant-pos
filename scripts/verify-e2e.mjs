@@ -8,9 +8,10 @@
 // and a worker as long-lived children. The bundle's server is Playwright's, not this script's —
 // `playwright.config.ts` says why.
 //
-//   pnpm test:e2e            bring up, run, tear down what was started
-//   pnpm test:e2e --keep     leave the containers running afterwards
-//   pnpm test:e2e:run        the spec alone, against a stack you already have up
+//   pnpm test:e2e              bring up, run, tear down what was started
+//   pnpm test:e2e --keep       leave the containers running afterwards
+//   pnpm test:e2e --reuse-api  run against an API that is already up, instead of refusing
+//   pnpm test:e2e:run          the spec alone, against a stack you already have up
 //
 // Not `--headed`-friendly by design: pass extra Playwright flags to `test:e2e:run` instead.
 
@@ -41,6 +42,17 @@ process.env.API_PROXY_TARGET ??= API_ORIGIN;
  * (30 s by default), and two runs in a row on Windows will hit that every time.
  */
 const GROUP_JOIN_TIMEOUT_MS = 120_000;
+
+/**
+ * Whether an API already answering on `API_PORT` may be used instead of one this run starts.
+ *
+ * It used to be the silent default, and that is what made the run able to report PASS for API code
+ * it had just built and never executed: the bundle is always this run's and the worker is always
+ * fresh, so the API process was the whole of the gap (`known-problems.md`, `[M18, P2]`). Now a
+ * foreign API ends the run with an instruction, and reuse is a flag — the same courtesy to the
+ * user who keeps a demo stack up, minus the part where nobody could tell afterwards which it was.
+ */
+const REUSE_API = process.argv.includes('--reuse-api');
 
 const runner = createRunner({
   logName: 'e2e.log',
@@ -75,10 +87,10 @@ async function main() {
     return runner.finish(prepared.code, `${prepared.failed} failed`);
   }
 
-  // The same courtesy `snapshot()` extends to the containers, and for the same reason: the user
-  // keeps a stack up for the demo, and an API this script started would lose the bind and take the
-  // run down with it — which it did, the first time this ran. A short probe, so a machine with
-  // nothing on that port is not taxed for it.
+  // A short probe, so a machine with nothing on that port is not taxed for it. What answers is
+  // never this run's build: an API this script started would have lost the bind — which it did,
+  // the first time this ran — and one silently borrowed would answer every assertion below on
+  // behalf of code nobody here compiled. So it is a reason to stop, unless the flag says otherwise.
   runner.banner('API');
   runner.write(`probing :${API_PORT} for an API already up\n`);
   const apiAlreadyUp = await runner.waitForHttp(API_READY_URL, {
@@ -87,8 +99,19 @@ async function main() {
     optional: true,
   });
 
+  if (apiAlreadyUp && !REUSE_API) {
+    return runner.finish(
+      1,
+      `an API is already answering on :${API_PORT} and it is not the one this run built — ` +
+        'stop it, or pass --reuse-api to test against it deliberately',
+    );
+  }
+
   if (apiAlreadyUp) {
-    runner.write(`an API is already ready on :${API_PORT} — reusing it, not starting a second\n`);
+    runner.write(
+      `--reuse-api: running against the API already on :${API_PORT}. ` +
+        'Nothing below proves anything about the API this run built.\n',
+    );
   } else {
     // `node dist/index.js` and not `pnpm start`: `startService` spawns without a shell so that a
     // kill is a kill, which rules out a `.cmd` wrapper. The arguments mirror the `start` script.
@@ -97,6 +120,10 @@ async function main() {
       command: process.execPath,
       args: ['--env-file-if-exists=../../.env', 'dist/index.js'],
       cwd: 'apps/api',
+      // Asked to stop rather than terminated, so it leaves the `realtime` group instead of holding
+      // a place in it until the session expires. See `STDIN_SHUTDOWN` in `@pos/config`.
+      env: { STDIN_SHUTDOWN: '1' },
+      shutdownCommand: 'shutdown',
     });
     // `/api/health/ready` answers 503 until PostgreSQL, Redis and the broker all respond
     // (ADR 011), so this one poll covers the whole dependency set — no sleep anywhere below.
@@ -120,6 +147,10 @@ async function main() {
     command: process.execPath,
     args: ['--env-file-if-exists=../../.env', 'dist/index.js'],
     cwd: 'apps/worker',
+    // The `kitchen` half of the same fix, and the one the backlog entry was written about: a
+    // terminated worker is why `GROUP_JOIN_TIMEOUT_MS` above has to be a minute and a half.
+    env: { STDIN_SHUTDOWN: '1' },
+    shutdownCommand: 'shutdown',
   });
   if (!(await worker.waitForOutput(/Worker started/, 60_000))) {
     return runner.finish(1, 'the worker never started');
@@ -146,7 +177,7 @@ async function main() {
     return runner.finish(1, `the spec passed but ${crashed.join(' and ')} exited during the run`);
   }
 
-  const reused = apiAlreadyUp ? ' (against the API already running)' : '';
+  const reused = apiAlreadyUp ? ' (against the API already running, --reuse-api)' : '';
   const summary =
     code === 0
       ? `the end-to-end flow passed${reused}`

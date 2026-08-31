@@ -186,7 +186,7 @@ const heartbeat = setInterval(() => {
   );
 }, config.WORKER_HEARTBEAT_MS);
 
-async function shutdown(signal: NodeJS.Signals): Promise<void> {
+async function shutdown(reason: NodeJS.Signals | 'stdin'): Promise<void> {
   running = false;
   clearInterval(heartbeat);
   controls.stop();
@@ -197,10 +197,10 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
     await stopPrinting();
     await closeDb();
   } catch (error) {
-    logger.error({ err: error, signal }, 'Failed to shut down worker cleanly');
+    logger.error({ err: error, reason }, 'Failed to shut down worker cleanly');
     process.exitCode = 1;
   }
-  logger.info({ signal }, 'Worker stopped');
+  logger.info({ reason }, 'Worker stopped');
 }
 
 /**
@@ -264,4 +264,36 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
     void shutdown(signal);
   });
+}
+
+/**
+ * The same stop, for a parent that cannot signal. Windows has no SIGTERM to send a child, so
+ * `verify-e2e.mjs` used to terminate this process — leaving the `kitchen` group holding a dead
+ * member and charging the next run a rebalance. `STDIN_SHUTDOWN` says why this is opt-in; the API
+ * carries the identical six lines, which is a duplication rather than a shared module because the
+ * two apps share no runtime package and this is smaller than one would be.
+ *
+ * `unref()` matters: a resumed stdin is a handle, and it would keep the process alive after
+ * everything else had closed — the opposite of what asking it to stop is for.
+ */
+if (config.STDIN_SHUTDOWN) {
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    // `setEncoding` above makes this a string; the handler's type does not know that.
+    if (
+      String(chunk)
+        .split(/\r?\n/)
+        .some((line) => line.trim() === 'shutdown')
+    ) {
+      process.stdin.pause();
+      void shutdown('stdin');
+    }
+  });
+  process.stdin.on('error', () => undefined);
+  // `process.stdin` is a socket when it is a pipe and a `fs.ReadStream` when it is a file, and only
+  // one of those has `unref`. This is set by a parent that pipes, so the guard is for the day it is
+  // not — a crash on boot would be a poor reward for setting a variable.
+  if (typeof process.stdin.unref === 'function') {
+    process.stdin.unref();
+  }
 }

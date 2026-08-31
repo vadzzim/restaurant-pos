@@ -40,6 +40,11 @@ The **Demo** column answers: after this session, can the project be shown to som
 | M17 | PWA + service worker | S | Sonnet | yes | done |
 | M18 | Playwright E2E | M | Sonnet | yes | done |
 | M19 | All documentation + final smoke | **L** | **Opus** | yes | done |
+| M20 | Backlog sweep | M | **Opus** | yes | done |
+| M21 | Verification that can fail | M | **Opus** | yes | done |
+| M22 | The flag path, end to end | S | **Opus** | yes | planned |
+| M23 | The cached client | M | Sonnet | yes | planned |
+| M24 | The deployment surface | M | Sonnet | yes | planned |
 
 **Twenty milestones, M0 through M19 — all run.** The scope grew from the review's
 additions and nothing was cut; that was a deliberate call, recorded in `docs/PROGRESS.md`.
@@ -224,3 +229,55 @@ Not planned here; added after M19. The dedicated pass `CLAUDE.md` promised every
 milestones and that was deferred at every one of them, taken once over all thirty `known-problems.md`
 entries. Brief: `docs/milestones/M20.md`. Verification: the three test suites, lint, typecheck,
 build and `pnpm verify:integration`, plus one new test per structural fix.
+
+---
+
+## The second sweep, M21–M24
+
+M20 swept the backlog in one pass over thirty unrelated entries, and the cost of that shape was
+that every fix needed its own context: a service worker, a `verify:*` script, a Pinia store and a
+Redis cache in the same session. The seventeen entries left are grouped instead **by the surface
+the fix lives on**, so each of the four below has one Verification block rather than four, and each
+can be dropped whole if the interview date closes in.
+
+Every entry named here is a line under *Review backlog* in `docs/known-problems.md`. A milestone is
+finished when its lines are gone from that file — deleted if fixed, moved up into *Accepted limits*
+if the answer is that the behaviour is right and the line was mis-filed as a defect.
+
+### M21 — Verification that can fail
+The two P2s that let a green run mean nothing, and the two E2E P3s beside them. `[M18, P2]` — the
+end-to-end run reuses whatever answers on `:3000` and can therefore report PASS for API code it did
+not build. `[M14, P2]` — `verify:multi` migrates, seeds and writes to the **demo** database, so a
+smoke run leaves orders in the demo. `[M18, P3]` — the worker is killed rather than stopped, so on
+Windows the `kitchen` group holds a dead member and the next run waits out the rebalance.
+`[M18, P3]` — the spec asserts no money, so a server computing `totalCents` wrongly would pass.
+Verification: `pnpm test:e2e` fails against a stale API instead of passing; `pnpm verify:multi`
+twice leaves the demo database untouched; the spec fails when a seeded price is changed.
+
+### M22 — The flag path, end to end
+`[M13, P2]` — a cache-aside fill can overwrite an invalidation, so a fleet-wide toggle is not
+immediate for one `FLAG_CACHE_TTL_MS`. `[M20, P3]` — `flags.busy` holds one key, so two overlapping
+toggles leave the first switch enabled while its request is out. Then the three entries whose
+answer is *not a fix*, each to be re-argued once and moved into *Accepted limits* or deleted:
+`[M19, P3]` the realtime consumer's mark-then-emit order (§12.2 chose it), `[M19, P3]` the
+`TimeoutNegativeWarning` from a dependency, `[M20, P3]` a resolution reported offline is never
+recorded. Verification: a fill paused across a concurrent write does not resurrect the old rows;
+two toggles inside one tick disable both switches.
+
+### M23 — The cached client
+The three service-worker entries and the two `/demo` ones — one file each, one browser to test them
+in. `[M17, P2]` `activate` deletes the previous build's cache under a page still running the old
+bundle (ADR 017 names code splitting as the condition to revisit). `[M17, P3]` a failed precache
+fails the whole installation. `[M17, P3]` the update path force-reloads the tab with no prompt, and
+a half-typed table name would be lost. `[M16, P3]` no UI path puts a second terminal on an existing
+order, so §19.3's literal two-terminal form needs `curl`. `[M16, P3]` `/demo`'s step ticks are
+in-memory, so a reload mid-demo loses the place. Verification: a dynamic `import()` still resolves
+after a rebuild-and-reload offline; POS-2 can open POS-1's order from the UI.
+
+### M24 — The deployment surface
+The three M14 P3s, all in files nothing outside `verify:multi` and CI touches. `[M14, P3]` nginx
+resolves `api-1` and `api-2` once at load, so a restarted replica is proxied to a dead address.
+`[M14, P3]` `worker-prod` declares no healthcheck, so `--wait` proves only that the container runs.
+`[M14, P3]` the CI `images` job builds three images and never starts one, and the base images float
+on tags rather than digests. Verification: recreating a replica under `verify:multi --keep` keeps
+:8081 serving; the `images` job fails when an image cannot start.

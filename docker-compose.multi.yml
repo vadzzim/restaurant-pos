@@ -11,9 +11,16 @@
 # add a mount, never remove one, so a "production" override would still run with the source tree
 # mounted over the image. Distinct names are the only way to get a clean container.
 #
-# The schema is not created here. `verify-multi-instance.mjs` migrates and seeds from the host
-# before starting these, because migrations are `tsx` scripts and the images carry built output
-# only — see the Dockerfiles.
+# The schema is not created here. `verify-multi-instance.mjs` creates the database, migrates and
+# seeds it from the host before starting these, because migrations are `tsx` scripts and the images
+# carry built output only — see the Dockerfiles.
+#
+# That database is `pos_multi`, not `pos`. A smoke run writes orders — §19.10 applies a real
+# mutation — and writing them into the demo database meant a demo opened afterwards showed two
+# throwaway covers on table 19 (`known-problems.md`, `[M14, P2]`). `TEST_DATABASE_URL` in
+# `@pos/config` established the convention; this stack is the one runner that never got it. The
+# name is spelled here as the containers see it and in the script as the host sees it, and the two
+# have to agree.
 
 name: restaurant-pos
 
@@ -30,7 +37,7 @@ services:
       NODE_ENV: production
       LOG_LEVEL: warn
       API_HOST: 0.0.0.0
-      DATABASE_URL: postgresql://pos:pos@postgres:5432/pos
+      DATABASE_URL: postgresql://pos:pos@postgres:5432/pos_multi
       REDIS_URL: redis://redis:6379
       KAFKA_BROKERS: redpanda:29092
     ports:
@@ -78,7 +85,7 @@ services:
     environment:
       NODE_ENV: production
       LOG_LEVEL: warn
-      DATABASE_URL: postgresql://pos:pos@postgres:5432/pos
+      DATABASE_URL: postgresql://pos:pos@postgres:5432/pos_multi
       REDIS_URL: redis://redis:6379
       KAFKA_BROKERS: redpanda:29092
       # The fake printer is an endpoint on the API (§12.3); `localhost` here would be the worker

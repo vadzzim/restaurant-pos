@@ -29,6 +29,21 @@ const environmentSchema = z.object({
    * and an outage long enough to exhaust it would dead-letter events that were never bad (ADR 011).
    */
   WORKER_BROKER_RETRY_MS: z.coerce.number().int().positive().default(5_000),
+  /**
+   * Read `shutdown` on stdin and stop as if a signal had arrived. Both long-lived processes honour
+   * it, and both default to off.
+   *
+   * It exists because a parent on Windows cannot signal a child: `child.kill()` there is a
+   * terminate, so no shutdown runs, no `LeaveGroup` is sent, and the `kitchen` and `realtime`
+   * groups hold a dead member until the session times out — which the *next* `pnpm test:e2e` pays
+   * for as a rebalance it cannot explain. `scripts/verify-e2e.mjs` sets this and writes the word;
+   * the kill stays as its fallback.
+   *
+   * Opt-in, because it consumes stdin: `pnpm dev` runs three processes on one terminal, and a
+   * worker eating that stream is not something a developer asked for. One word, no arguments —
+   * §18's switches are rows in PostgreSQL and buttons on `/debug` (ADR 015), and none moves here.
+   */
+  STDIN_SHUTDOWN: z.stringbool().default(false),
   /** One dependency being unreachable must not make the report that explains it hang (§17). */
   HEALTH_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
   OUTBOX_POLL_MS: z.coerce.number().int().positive().default(500),

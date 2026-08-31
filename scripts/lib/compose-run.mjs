@@ -18,6 +18,13 @@ import { fileURLToPath } from 'node:url';
 export const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
 /**
+ * How long a process asked to stop gets before it is killed anyway. Generous, because the worker's
+ * shutdown leaves two consumer groups and drains a print pipeline whose own steps are bounded by
+ * `PRINT_SHUTDOWN_TIMEOUT_MS`; a stop that is cut short here would defeat the point of asking.
+ */
+const SHUTDOWN_GRACE_MS = 20_000;
+
+/**
  * @param {object} options
  * @param {string} options.logName        file under `.verify-output/`
  * @param {string[]} options.services     the Compose services this run needs
@@ -197,13 +204,19 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
    * @param {string[]} options.args
    * @param {string} [options.cwd]       relative to the repository root
    * @param {Record<string,string>} [options.env]
+   * @param {string} [options.shutdownCommand] written to stdin to ask for a graceful stop
    */
-  function startService({ name, command, args, cwd = '.', env }) {
+  function startService({ name, command, args, cwd = '.', env, shutdownCommand }) {
     write(`\n$ [${name}] ${command} ${args.join(' ')}\n`);
     const child = spawn(command, args, {
       cwd: join(repoRoot, cwd),
       env: env === undefined ? process.env : { ...process.env, ...env },
     });
+
+    // A child that has died turns the next write into an EPIPE on this stream, and an unhandled
+    // `error` event would take the runner down with it — during teardown, where the diagnosis is
+    // worst. `stop()` is the only thing that writes here, and it has a kill to fall back on.
+    child.stdin.on('error', () => undefined);
 
     let output = '';
     const waiters = [];
@@ -241,6 +254,20 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
       write(`\n[${name}] ${stopping ? 'stopped' : `exited with code ${code ?? 1}`}\n`);
     });
 
+    /** Resolves `true` if the child is gone within `ms`, `false` if it outlived the wait. */
+    function closedWithin(ms) {
+      if (exited) {
+        return Promise.resolve(true);
+      }
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), ms);
+        child.on('close', () => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+      });
+    }
+
     const service = {
       name,
       get exited() {
@@ -274,17 +301,25 @@ export function createRunner({ logName, services, composeFiles = [], keep = fals
           return;
         }
         stopping = true;
+
+        // Ask first, where the process offers a way to be asked. On Windows `kill` is a terminate
+        // and no shutdown runs, so a consumer never sends `LeaveGroup` and the group holds a dead
+        // member until its session expires — which the *next* run pays for as a rebalance
+        // (`known-problems.md`, M18). A line on stdin is the channel a signal cannot be; the kill
+        // below stays as the fallback, so a process that ignores the word is still stopped.
+        if (shutdownCommand !== undefined && child.stdin.writable) {
+          write(`asking ${name} to stop\n`);
+          child.stdin.write(`${shutdownCommand}\n`);
+          if (await closedWithin(SHUTDOWN_GRACE_MS)) {
+            return;
+          }
+          write(`${name} did not stop when asked; killing it\n`);
+        }
+
         child.kill();
         // A grace period, then insist: the API and the worker both drain on a signal, and on
         // Windows `kill` is already a terminate, so this second call is only ever a no-op there.
-        const gaveUp = await new Promise((resolve) => {
-          const timer = setTimeout(() => resolve(true), 5_000);
-          child.on('close', () => {
-            clearTimeout(timer);
-            resolve(false);
-          });
-        });
-        if (gaveUp) {
+        if (!(await closedWithin(5_000))) {
           child.kill('SIGKILL');
         }
       },

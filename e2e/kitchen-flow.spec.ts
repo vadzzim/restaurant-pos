@@ -29,6 +29,9 @@ const RESTAURANT_ID = 'demo-restaurant';
 /** The tile aria-label is `Add {name}, {count} on the order` — see `PosView.vue`. */
 const TILE_LABEL = /^Add (.+), \d+ on the order$/;
 
+/** What `money()` renders in both views: `$12.34`. */
+const PRICE = /\$(\d+\.\d{2})/;
+
 async function openPos(page: Page): Promise<void> {
   await page.goto('/pos/pos-1');
   await expect(page.getByRole('heading', { name: 'POS-1' })).toBeVisible();
@@ -75,11 +78,18 @@ test('POS-1 sends an order, the kitchen ticket appears, and PREPARING comes back
     timeout: LOCAL_TIMEOUT_MS,
   });
 
-  // --- One item, whatever the seed's first tile happens to be -----------------------------------
+  // --- Two of one item, whatever the seed's first tile happens to be ----------------------------
   const firstTile = pos.getByRole('button', { name: TILE_LABEL }).first();
   const tileLabel = await firstTile.getAttribute('aria-label');
   const productName = TILE_LABEL.exec(tileLabel ?? '')?.[1];
   expect(productName, `the menu tile should name its product: ${tileLabel}`).toBeTruthy();
+
+  // Read, not hard-coded, for the same reason as the name: the menu is seed data. Both views
+  // render money as `$12.34` — `money()` in `PosView.vue` and in `KitchenView.vue`.
+  const tileText = (await firstTile.textContent()) ?? '';
+  const unitPrice = PRICE.exec(tileText)?.[1];
+  expect(unitPrice, `the menu tile should show a price: ${tileText}`).toBeTruthy();
+  const expectedTotal = `$${(Number(unitPrice) * 2).toFixed(2)}`;
 
   await firstTile.click();
   // The ± control's own label is the proof that a line exists for this product, and it says so
@@ -87,6 +97,14 @@ test('POS-1 sends an order, the kitchen ticket appears, and PREPARING comes back
   await expect(pos.getByRole('button', { name: `One more ${productName}` })).toBeVisible({
     timeout: LOCAL_TIMEOUT_MS,
   });
+
+  // A second tap, so every total below is arithmetic rather than a copy of the unit price. Two
+  // separate `ADD_ITEM` mutations, which is also what makes the quantity a claim about the server:
+  // one dropped on the floor changes the badge and both totals.
+  await firstTile.click();
+  await expect(pos.getByRole('button', { name: `Add ${productName}, 2 on the order` })).toBeVisible(
+    { timeout: LOCAL_TIMEOUT_MS },
+  );
 
   // --- Send ------------------------------------------------------------------------------------
   await pos.getByRole('button', { name: 'Send to kitchen' }).click();
@@ -97,6 +115,16 @@ test('POS-1 sends an order, the kitchen ticket appears, and PREPARING comes back
   // draining leaves the badge behind, and everything after here would time out for the wrong
   // reason — an offline client rather than a broken pipeline.
   await expect(pos.getByText(/^\d+ PENDING$/)).toHaveCount(0, { timeout: LOCAL_TIMEOUT_MS });
+
+  // And now the money, deliberately *after* the queue has drained. Until then this number is the
+  // optimistic projection's — priced from the menu, by a second implementation of the server's
+  // arithmetic (`known-problems.md`). Once nothing is pending the canonical snapshot has replaced
+  // it, so a server that accepted all three mutations and computed `totalCents` wrongly fails
+  // here. Unit tests assert `totalCents` in several places; this is the only one that reads a price
+  // off a screen and holds the whole pipeline to it.
+  await expect(pos.locator('p').filter({ hasText: 'Total' })).toContainText(expectedTotal, {
+    timeout: LOCAL_TIMEOUT_MS,
+  });
 
   // --- The kitchen display, on the far side of Kafka --------------------------------------------
   await kitchen.goto(`/kitchen?restaurantId=${RESTAURANT_ID}`);
@@ -114,8 +142,12 @@ test('POS-1 sends an order, the kitchen ticket appears, and PREPARING comes back
 
   await expect(ticket).toBeVisible({ timeout: PIPELINE_TIMEOUT_MS });
   await expect(ticket).toContainText('SENT_TO_KITCHEN');
-  // The projection carried the line through the event, not just the header.
-  await expect(ticket).toContainText(String(productName));
+  // The projection carried the line through the event, not just the header — and the quantity and
+  // the price with it. The kitchen's total is computed from `kitchen_tickets` rows written by the
+  // consumer, so this is the same number arriving by an entirely different route from the POS's:
+  // event payload → projection → socket, rather than mutation → snapshot → GET.
+  await expect(ticket).toContainText(`2 × ${String(productName)}`);
+  await expect(ticket).toContainText(expectedTotal);
 
   // --- Mark PREPARING, from the kitchen ---------------------------------------------------------
   await ticket.getByRole('button', { name: 'Start preparing' }).click();

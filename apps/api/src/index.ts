@@ -95,8 +95,8 @@ const consumer = superviseRealtimeConsumer(kafka, db, realtime.emitter, config, 
   incrementSharedCounter(debugRedis, 'duplicateKafkaEventsPrevented');
 });
 
-async function shutdown(signal: NodeJS.Signals): Promise<void> {
-  app.log.info({ signal }, 'Shutting down API');
+async function shutdown(reason: NodeJS.Signals | 'stdin'): Promise<void> {
+  app.log.info({ reason }, 'Shutting down API');
   try {
     await consumer.stop();
     await realtime.close();
@@ -108,7 +108,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
     await app.close();
     await closeDb();
   } catch (error) {
-    app.log.error({ error, signal }, 'Failed to shut down API cleanly');
+    app.log.error({ error, reason }, 'Failed to shut down API cleanly');
     process.exitCode = 1;
   }
 }
@@ -117,6 +117,33 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
     void shutdown(signal);
   });
+}
+
+/**
+ * The same stop for a parent that cannot signal — the `realtime` group's half of what the worker's
+ * copy of these lines does for `kitchen`. `STDIN_SHUTDOWN` in `@pos/config` carries the argument
+ * and the reason it is off by default.
+ */
+if (config.STDIN_SHUTDOWN) {
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    // `setEncoding` above makes this a string; the handler's type does not know that.
+    if (
+      String(chunk)
+        .split(/\r?\n/)
+        .some((line) => line.trim() === 'shutdown')
+    ) {
+      process.stdin.pause();
+      void shutdown('stdin');
+    }
+  });
+  process.stdin.on('error', () => undefined);
+  // `process.stdin` is a socket when it is a pipe and a `fs.ReadStream` when it is a file, and only
+  // one of those has `unref`. This is set by a parent that pipes, so the guard is for the day it is
+  // not — a crash on boot would be a poor reward for setting a variable.
+  if (typeof process.stdin.unref === 'function') {
+    process.stdin.unref();
+  }
 }
 
 try {
