@@ -15,6 +15,14 @@
 # seeds it from the host before starting these, because migrations are `tsx` scripts and the images
 # carry built output only — see the Dockerfiles.
 #
+# The *database* is created in two other places, both since M24 and neither of them here: the base
+# file mounts `scripts/postgres-init/` into PostgreSQL's init directory, which covers a **fresh**
+# volume brought up by hand, and the script keeps its `createdb` for every volume that already
+# exists. It is in the base file rather than added to `postgres` from this overlay because an
+# overlay that changes the base service's definition makes `docker compose up` **recreate the
+# container** — so `verify:multi` would replace the PostgreSQL the user started for the demo every
+# time it ran. Found by M24's review pass, after doing exactly that twice.
+#
 # That database is `pos_multi`, not `pos`. A smoke run writes orders — §19.10 applies a real
 # mutation — and writing them into the demo database meant a demo opened afterwards showed two
 # throwaway covers on table 19 (`known-problems.md`, `[M14, P2]`). `TEST_DATABASE_URL` in
@@ -108,6 +116,24 @@ services:
       # The fake printer is an endpoint on the API (§12.3); `localhost` here would be the worker
       # itself, and every ticket would dead-letter. Either replica serves it.
       PRINTER_URL: http://api-1:3000/api/printer/print
+      # The worker's own readiness surface, bound to 127.0.0.1 inside the container (§17, M24).
+      # `@pos/config` gives this knob no default, so nothing outside this file starts it: two
+      # workers on one machine is a supported case and the second must not fail to bind.
+      WORKER_HEALTH_PORT: '3100'
+    # Without this, `up --wait` proved only that the container was running, and what actually
+    # covered the worker was the smoke test's own round trip — so a worker that started and
+    # immediately failed to reach the broker was reported by `verify:multi` as a *broadcast*
+    # failure, the §19.10 assertion blaming the thing it tests (`[M14, P3]`, closed in M24).
+    #
+    # `/health/ready` is 503 until the broker session is up, the publisher loop has turned once and
+    # BullMQ is consuming. `retries` is high because the first pass waits on a Kafka group join,
+    # which on a cold Redpanda is tens of seconds.
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3100/health/ready']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
     depends_on:
       postgres:
         condition: service_healthy

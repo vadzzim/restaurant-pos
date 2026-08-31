@@ -106,6 +106,11 @@ jobs:
   # that the Dockerfiles stay buildable from a clean checkout. Deliberately *not* `verify:multi` —
   # that needs the whole stack plus a migrated database, and the `verify` job above already owns
   # one Compose lifecycle in this workflow. The smoke run is a local and pre-demo command.
+  #
+  # Since M24 each image is also **started**, because a green build was not a green start
+  # (the third `[M14, P3]`, closed in M24): a pruned `node_modules`, a config nginx refuses,
+  # a `CMD` that cannot find its entry point are all invisible to `docker build`. None of this needs
+  # infrastructure — what each app can prove without a database is spelled out per step below.
   images:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -126,6 +131,80 @@ jobs:
           context: .
           file: apps/${{ matrix.app }}/Dockerfile
           push: false
+          # Required by every step below, and easy to miss: with `push: false` and no `load`, the
+          # image exists only in the builder's cache and `docker run pos-api:ci` says "no such
+          # image". Buildx does not put it in the daemon unless it is told to.
+          load: true
           tags: pos-${{ matrix.app }}:ci
           cache-from: type=gha,scope=${{ matrix.app }}
           cache-to: type=gha,mode=max,scope=${{ matrix.app }}
+
+      # The api needs PostgreSQL to be *ready*, and nothing at all to be *alive* — ADR 011 split
+      # the two for exactly this kind of reason. So both halves are assertable with no
+      # infrastructure: liveness must answer, and readiness must refuse. A readiness probe that
+      # answered 200 here would be one that checks nothing.
+      #
+      # `API_HOST=0.0.0.0` only because the probe runs through `docker exec`; the default
+      # `127.0.0.1` would serve it too. `wget` is busybox's, and it exits non-zero on a 503.
+      - name: Start the api image
+        if: matrix.app == 'api'
+        run: |
+          docker run -d --name smoke -e API_HOST=0.0.0.0 pos-api:ci
+          for _ in $(seq 1 30); do
+            if docker exec smoke wget -q -O /dev/null http://127.0.0.1:3000/api/health/live; then
+              live=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "${live:-}" != 1 ]; then
+            docker logs smoke
+            echo '::error::the api image never served /api/health/live'
+            exit 1
+          fi
+          if docker exec smoke wget -q -O /dev/null http://127.0.0.1:3000/api/health/ready; then
+            echo '::error::readiness answered 200 with no database behind it'
+            exit 1
+          fi
+          docker rm -f smoke
+
+      # The worker has no HTTP surface without `WORKER_HEALTH_PORT` and no way past its first read
+      # without PostgreSQL, so what is provable here is the failure a build cannot catch: a pruned
+      # dependency tree that does not resolve. Its entry point constructs the Kafka client, both
+      # Redis connections and the print queue at import time and *then* reads `outbox_controls` —
+      # so reaching that query is the whole module graph having loaded. It exits by itself.
+      - name: Start the worker image
+        if: matrix.app == 'worker'
+        run: |
+          output=$(docker run --rm pos-worker:ci 2>&1 || true)
+          echo "$output" | tail -40
+          if echo "$output" | grep -qE 'ERR_MODULE_NOT_FOUND|Cannot find (module|package)'; then
+            echo '::error::the worker image cannot resolve something its entry point imports'
+            exit 1
+          fi
+          if ! echo "$output" | grep -q 'outbox_controls'; then
+            echo '::error::the worker image did not get as far as its first query'
+            exit 1
+          fi
+
+      # The one that made this whole step possible. Until M24 `nginx.conf` resolved `api-1` when it
+      # loaded, so nginx refused the config outside the Compose network and this image could not be
+      # started anywhere but the full stack. `resolve` defers it; the bundle is static and needs no
+      # replica to be served.
+      - name: Start the web image
+        if: matrix.app == 'web'
+        run: |
+          docker run -d --name smoke pos-web:ci
+          for _ in $(seq 1 20); do
+            if docker exec smoke wget -q -O /dev/null http://127.0.0.1:8080/; then
+              served=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "${served:-}" != 1 ]; then
+            docker logs smoke
+            echo '::error::the web image did not serve the bundle'
+            exit 1
+          fi
+          docker rm -f smoke

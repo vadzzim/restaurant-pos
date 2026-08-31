@@ -13,6 +13,11 @@ export interface PrintWorkerOptions {
 
 export interface PrintWorkerHandle {
   close: () => Promise<void>;
+  /**
+   * Whether BullMQ is still consuming. Read by the worker's readiness probe — a process that
+   * publishes but has stopped printing is not a healthy worker, and until M24 nothing asked.
+   */
+  isRunning: () => boolean;
 }
 
 /**
@@ -78,5 +83,6 @@ export function startPrintWorker(
     close: async () => {
       await worker.close();
     },
+    isRunning: () => worker.isRunning(),
   };
 }

@@ -1,0 +1,22 @@
+-- Creates the database `docker-compose.multi.yml`'s replicas are pointed at.
+--
+-- Mounted into `/docker-entrypoint-initdb.d/` by `docker-compose.yml`, beside PostgreSQL itself,
+-- and **not** added to that service from the overlay: an overlay that changes a base service's
+-- definition makes `docker compose up` recreate the container, so `verify:multi` would have
+-- replaced the PostgreSQL the user started for the demo on every run. The demo stack gains one
+-- empty database it does not use, which is the cheaper of the two.
+--
+-- The init directory is read **only when the data directory is empty**, which is what makes this
+-- safe against the volume the user has had since M1 — nothing happens to it.
+--
+-- That "only when empty" is also why it does not replace the `createdb` step in
+-- `scripts/verify-multi-instance.mjs`. This file covers the case the backlog line was about
+-- (`[M21, P3]`, closed in M24): bringing the overlay up **by hand** on a fresh volume, where
+-- two replicas used to start against a database nothing had created and fail readiness until the
+-- script had been run once. The script covers every existing volume. Both are idempotent, and
+-- neither is redundant.
+--
+-- `\gexec` rather than a bare `CREATE DATABASE`, which has no `IF NOT EXISTS`: the init directory
+-- will not run this twice, but a human pasting it into `psql` should not be punished for it.
+SELECT 'CREATE DATABASE pos_multi'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'pos_multi')\gexec

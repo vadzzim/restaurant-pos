@@ -121,7 +121,10 @@ older redelivery, and recording events it does not project so they are not re-re
 
 `apps/api/test/multi-instance.integration.test.ts` §19.10 — _"delivers a mutation applied through
 replica A to a client attached to replica B"_. It is excluded from the default suite and runs under
-`pnpm verify:multi`, against the **production images**, two addressable replicas and nginx.
+`pnpm verify:multi`, against the **production images**, two addressable replicas and nginx — and
+since M24 nginx is in the assertion rather than only in the stack: the run probes
+`:8081/api/health/ready` through the proxy, which is the only automated proof that it resolves an
+upstream at request time.
 
 ### 16. The polling fallback works and is percentage-rolled by feature flag — _proved_
 

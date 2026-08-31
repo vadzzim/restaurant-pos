@@ -7,6 +7,16 @@ const environmentSchema = z.object({
   API_PORT: z.coerce.number().int().positive().default(3000),
   WEB_PORT: z.coerce.number().int().positive().default(5173),
   WORKER_HEARTBEAT_MS: z.coerce.number().int().positive().default(10_000),
+  /**
+   * The port the worker answers `/health/live` and `/health/ready` on, bound to `127.0.0.1`.
+   *
+   * **No default, on purpose.** Every other knob here has one; this one is opt-in because two
+   * workers on one machine is a supported case — `verify-e2e.mjs` starts one beside the demo worker
+   * the user may already have up — and a second process failing to bind a port it was given by
+   * default would turn the healthcheck this exists for into a crash. `docker-compose.multi.yml`
+   * sets it; nothing else does.
+   */
+  WORKER_HEALTH_PORT: z.coerce.number().int().positive().optional(),
   DATABASE_URL: z.url().default('postgresql://pos:pos@localhost:5432/pos'),
   /** Tests own their own database so a test run never truncates the demo the user has on screen. */
   TEST_DATABASE_URL: z.url().default('postgresql://pos:pos@localhost:5432/pos_test'),

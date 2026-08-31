@@ -11,6 +11,14 @@ services:
       - '5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # `POSTGRES_DB` creates `pos` and nothing else, so `docker-compose.multi.yml`'s replicas —
+      # which run against `pos_multi` — used to start on a fresh volume against a database nothing
+      # had created and fail readiness until `pnpm verify:multi` had been run once
+      # (`[M21, P3]`, closed in M24). The init directory runs only when the data directory is
+      # empty, so this does nothing at all to a volume that already exists; the script still creates
+      # the database for those. Here and not in the overlay: an overlay that changes this service
+      # makes every `up` through it recreate the user's container.
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U pos -d pos']
       interval: 5s

@@ -15,28 +15,23 @@
 
 Format: `- **[MXX, PN]** one line — where, and what would prove it.`
 
-> **Swept once in M20, and being swept again in M21–M24.** M20 closed fifteen of thirty entries in
-> one pass over unrelated surfaces, and paid for a fresh context per fix. What was left is grouped
-> **by the surface the fix lives on** — one milestone each, briefs in `MILESTONES.md`, _The second
-> sweep_. M21 took the four in the test harness; M22 the five on the feature-flag path; M23 the five
-> on the browser surface, including the last `[M17, P2]` — **so there is no P2 left in this file.**
-> Five lines remain from the seventeen: M24's three, and M21's and M22's two leftovers. M24 is the
-> deployment surface, and after it the seventeen are closed.
+> **Swept twice, and the second sweep is finished.** M20 closed fifteen of thirty entries in one
+> pass over unrelated surfaces, and paid for a fresh context per fix. The seventeen that were left
+> were grouped **by the surface the fix lives on** — one milestone each, briefs in `MILESTONES.md`,
+> _The second sweep_. M21 took the four in the test harness; M22 the five on the feature-flag path;
+> M23 the five on the browser surface, including the last `[M17, P2]`; **M24 the three on the
+> deployment surface, plus M21's and M22's own two leftovers — so the seventeen are closed, and
+> there is no P2 in this file.**
+>
+> The five left below were found by the sweep itself: two by M22's review pass, three by M23's.
+> Every one is unreachable as deployed or bounded by an argument written into its own line, and the
+> last sentence of each says what would prove it.
 >
 > Two of M20's fifteen turned out to have been fixed by a later milestone without the line being
 > deleted, which is the argument for sweeping rather than accumulating. **Three of M22's five were
 > closed by an argument rather than a patch** and now sit under _Accepted limits_ — a line filed as
 > a defect is not thereby one. See `build-log.md`.
 
-- **[M21, P3]** `verify-e2e.mjs` probes `:3000` only after Chromium, the build, the migration and the
-  seed, so a user who left an API up waits out two minutes of setup to be told to stop it. The probe
-  needs nothing from those steps and could run first. Found by M21's own review pass; proved by
-  timing a refused run.
-- **[M21, P3]** `docker-compose.multi.yml` now names `pos_multi`, which only
-  `scripts/verify-multi-instance.mjs` creates — so bringing that overlay up **by hand** starts two
-  replicas against a database that does not exist and they fail readiness until the script has been
-  run once. The file says so in a comment; an init script under `postgres` would be the fix. Proved
-  by `docker compose -f docker-compose.yml -f docker-compose.multi.yml up api-1` on a fresh volume.
 - **[M22, P3]** The flag cache's version counter has no expiry and its payload does, so a Redis
   configured with a `maxmemory` policy could evict the counter while a payload outlives it: the
   counter restarts at 1 on the next `INCR`, and a payload stamped `1` from the process's first
@@ -62,20 +57,16 @@ Format: `- **[MXX, PN]** one line — where, and what would prove it.`
   nothing stops a terminal being pointed at an order of another restaurant if the id were known. Moot
   in a one-restaurant seed, and the API scopes what it _writes_ by terminal; a restaurant check in
   `focusOrder` is the fix. Proved by opening an id seeded under a second restaurant.
-- **[M14, P3]** nginx resolves `api-1` and `api-2` once, when it loads its config, so a replica that
-  restarts with a new address is proxied to the old one until nginx is reloaded. `apps/web/nginx.conf`.
-  A `resolver` plus a variable `proxy_pass` is the fix; recreating one replica under
-  `verify:multi --keep` and watching :8081 fail on half its requests proves it.
-- **[M14, P3]** `worker-prod` declares no healthcheck, so `--wait` only proves the container is
-  running, not that the publisher has claimed its lease. The smoke test's warm-up round trip is what
-  actually covers it, which means a worker that started and immediately failed would be reported as
-  a broadcast failure. `docker-compose.multi.yml`.
-- **[M14, P3]** The CI `images` job builds the three images and never runs one, and the base images
-  float on `node:24-alpine` / `nginx-unprivileged:1.29-alpine` rather than digests, so a green build
-  is not a green start. `.github/workflows/ci.yml`.
 
 ## Accepted limits and open questions
 
+- **The web image's `/api` and `/socket.io` paths assume Docker's embedded DNS.** `nginx.conf`
+  hard-codes `resolver 127.0.0.11`, which is the address on every user-defined Compose network and
+  on no other kind of host, so the bundle is served anywhere and the proxy only works there. The
+  base image can read the real resolver out of `/etc/resolv.conf` — `15-local-resolvers.envsh`
+  exports it for a `templates/*.template` file — and taking that route would move this config into
+  the entrypoint's substitution path to gain portability to an orchestrator this demo does not
+  deploy to (M24). Before M24 the container could not start outside that network at all.
 - **The realtime consumer marks `processed_events` and _then_ emits**, so a crash between the
   commit and the emit loses that broadcast permanently: redelivery finds the marker and emits
   nothing. §12.2 chose that order and in the same breath says duplicate emits are harmless, because

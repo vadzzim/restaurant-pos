@@ -7,6 +7,7 @@ import pino from 'pino';
 
 import { watchOutboxControls } from './modules/events/outbox-controls.js';
 import { publishOnce } from './modules/events/outbox-publisher.js';
+import { startWorkerHealthServer } from './modules/health/worker-health.js';
 import { createPrintQueue } from './modules/printing/print-queue.js';
 import { startPrintWorker } from './modules/printing/print-worker.js';
 import { httpPrinter } from './modules/printing/printer-client.js';
@@ -108,6 +109,12 @@ logger.info({ workerId, topic: config.KAFKA_ORDER_EVENTS_TOPIC }, 'Worker starte
 let running = true;
 
 /**
+ * Readiness, not liveness: the loop has turned at least once with a broker session in hand. The
+ * heartbeat below is what says it is still turning an hour later.
+ */
+let publisherPassCompleted = false;
+
+/**
  * Sequential passes: a slow publish must not overlap the next tick and double-publish a lease.
  *
  * The loop idles while the broker is unreachable rather than publishing into a void. A failed pass
@@ -121,6 +128,11 @@ const publisherLoop = (async () => {
     // Paused means paused before the claim, not just before the send: a pass that claimed a batch
     // and then released it would still have held every one of those rows for a round trip.
     if (connection === undefined || controls.current().paused) {
+      // A deliberate pause is not an unready worker — the loop is turning, it has been told to
+      // hold — but a missing broker session is, and `brokerConnected` reports that one separately.
+      if (connection !== undefined) {
+        publisherPassCompleted = true;
+      }
       await sleep(config.OUTBOX_POLL_MS);
       continue;
     }
@@ -136,6 +148,9 @@ const publisherLoop = (async () => {
         controls: controls.current,
         onLeaseOverrun: connection.endSession,
       });
+      // A pass that returned is a pass, whatever it found. A throw is not, so this sits after the
+      // await and not at the bottom of the loop body.
+      publisherPassCompleted = true;
       if (result.claimed > 0) {
         logger.info({ workerId, ...result }, 'outbox batch processed');
       }
@@ -175,6 +190,33 @@ const publisherLoop = (async () => {
   }
 })();
 
+/**
+ * Opt-in on `WORKER_HEALTH_PORT` (see `@pos/config` for why it has no default), and the reason
+ * `docker-compose.multi.yml` can gate `--wait` on this process at all: before M24 the overlay's
+ * only evidence about the worker was that its container had not exited.
+ *
+ * A bind failure is a warning and not an exit. The port is a probe, not the job — and the
+ * consequence is reported by the healthcheck failing, which is the signal it exists to give.
+ */
+const health =
+  config.WORKER_HEALTH_PORT === undefined
+    ? undefined
+    : await startWorkerHealthServer({
+        port: config.WORKER_HEALTH_PORT,
+        logger,
+        probe: () => ({
+          brokerConnected: broker.current()?.isAlive() === true,
+          publisherPassCompleted,
+          printWorkerRunning: printWorker.isRunning(),
+        }),
+      }).catch((error: unknown) => {
+        logger.warn(
+          { err: error, port: config.WORKER_HEALTH_PORT },
+          'the worker health server could not bind; the container will report unhealthy',
+        );
+        return undefined;
+      });
+
 const heartbeat = setInterval(() => {
   logger.info(
     {
@@ -192,6 +234,9 @@ async function shutdown(reason: NodeJS.Signals | 'stdin'): Promise<void> {
   controls.stop();
   printReconciler.stop();
   try {
+    // First, so a probe arriving mid-shutdown is refused rather than answered `ok` by a process
+    // that is closing its connections.
+    await health?.close();
     await publisherLoop;
     await broker.stop();
     await stopPrinting();

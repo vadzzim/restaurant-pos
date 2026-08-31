@@ -63,6 +63,36 @@ const runner = createRunner({
 async function main() {
   runner.write(`test:e2e — ${new Date().toISOString()}\n`);
 
+  // The port probe comes first, before Compose, Chromium, the build, the migration and the seed.
+  // It needs nothing from any of them, and a user who left a demo API up was spending two minutes
+  // of setup to be told to stop it (`[M21, P3]`, closed in M24).
+  //
+  // The snapshot has to come first in turn: `finish` tears down every service this run started,
+  // and it decides which those were by difference against what was already up. Reached before
+  // anything is running, it would treat the user's demo containers as this run's and remove
+  // them — the one thing the runner promises not to do.
+  await runner.snapshot();
+
+  // A short probe, so a machine with nothing on that port is not taxed for it. What answers is
+  // never this run's build: an API this script started would have lost the bind — which it did,
+  // the first time this ran — and one silently borrowed would answer every assertion below on
+  // behalf of code nobody here compiled. So it is a reason to stop, unless the flag says otherwise.
+  runner.banner('A foreign API?');
+  runner.write(`probing :${API_PORT} for an API already up\n`);
+  const apiAlreadyUp = await runner.waitForHttp(API_READY_URL, {
+    timeoutMs: 2_000,
+    intervalMs: 250,
+    optional: true,
+  });
+
+  if (apiAlreadyUp && !REUSE_API) {
+    return runner.finish(
+      1,
+      `an API is already answering on :${API_PORT} and it is not the one this run built — ` +
+        'stop it, or pass --reuse-api to test against it deliberately',
+    );
+  }
+
   runner.banner('Infrastructure');
   const up = await runner.up();
   if (up.code !== 0) {
@@ -87,26 +117,7 @@ async function main() {
     return runner.finish(prepared.code, `${prepared.failed} failed`);
   }
 
-  // A short probe, so a machine with nothing on that port is not taxed for it. What answers is
-  // never this run's build: an API this script started would have lost the bind — which it did,
-  // the first time this ran — and one silently borrowed would answer every assertion below on
-  // behalf of code nobody here compiled. So it is a reason to stop, unless the flag says otherwise.
   runner.banner('API');
-  runner.write(`probing :${API_PORT} for an API already up\n`);
-  const apiAlreadyUp = await runner.waitForHttp(API_READY_URL, {
-    timeoutMs: 2_000,
-    intervalMs: 250,
-    optional: true,
-  });
-
-  if (apiAlreadyUp && !REUSE_API) {
-    return runner.finish(
-      1,
-      `an API is already answering on :${API_PORT} and it is not the one this run built — ` +
-        'stop it, or pass --reuse-api to test against it deliberately',
-    );
-  }
-
   if (apiAlreadyUp) {
     runner.write(
       `--reuse-api: running against the API already on :${API_PORT}. ` +
@@ -138,7 +149,10 @@ async function main() {
     }
   }
 
-  // The worker gets no HTTP probe because it has no HTTP surface, and it is started unconditionally
+  // The worker gets no HTTP probe: it has one since M24, but `WORKER_HEALTH_PORT` is deliberately
+  // not set here — this run starts a worker beside whatever the user already has up, and two
+  // processes given the same port by default would make the second fail to bind. So the log line
+  // stays the signal, and the port belongs to the containers. It is started unconditionally
   // because a second publisher is a designed property rather than a hazard: the outbox is claimed
   // under a lease (§21.16) and the consumers share a group.
   runner.banner('Worker');

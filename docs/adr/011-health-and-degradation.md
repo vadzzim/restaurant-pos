@@ -98,7 +98,12 @@ other way costs an order's event.
   absent entirely — it needs a Kafka admin describing group offsets and belongs with M11's counters.
 - The worker no longer fails fast. A misconfigured broker address now produces a warning every five
   seconds instead of an immediate exit, which is quieter than a crash and easier to miss. The
-  heartbeat carries `brokerConnected` for exactly that reason.
+  heartbeat carries `brokerConnected` for exactly that reason — and **since M24 so does a readiness
+  probe**: the same three-way split, on `WORKER_HEALTH_PORT` when the environment sets it, so that
+  `docker compose up --wait worker-prod` gates on the publisher turning rather than on the container
+  existing. Liveness there touches nothing, for the reason this ADR gives for the API's. Readiness
+  is the conjunction the worker's two jobs need — broker session, one completed publisher pass,
+  BullMQ still consuming — and it is `apps/worker/src/modules/health/worker-health.ts`.
 - **One attempt is still spent at the moment the broker drops**, by the event whose send discovers
   it. That is the honest reading of "we tried and it did not work", and the outbox's own
   `next_attempt_at` backoff paces everything after it. The rows abandoned behind it keep their lease

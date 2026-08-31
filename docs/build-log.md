@@ -2568,3 +2568,88 @@ touchscreen rather than a polite test, with `settleLocal` draining the local pha
 
 **Green:** lint, typecheck, `pnpm test` **493 passed** (490 + three), build. No new backlog lines —
 both findings were fixed, and the review found nothing below P2.
+
+## M24 — The deployment surface
+
+The last pass of _The second sweep_: the three `[M14, P3]`s, plus M21's and M22's own two
+leftovers. Unlike M21–M23 nothing in `pnpm test` can reach any of it, so the Verification block is
+the whole proof and it runs on containers.
+
+**Two of the three were one defect.** nginx resolving `api-1` when it loads its config is why a
+recreated replica is proxied to a dead address _and_ why the web image cannot start outside the
+Compose network at all — which is why the CI `images` job could build three images and start none.
+The evidence, taken in the base image before a line was written:
+
+```
+nginx: [emerg] host not found in upstream "api-1:3000"   # the pre-M24 file, nginx -t
+nginx: configuration file /etc/nginx/nginx.conf test is successful   # with resolver + resolve
+```
+
+The fix is `resolver 127.0.0.11 valid=10s`, an upstream `zone`, and `resolve` on each `server` — and
+**not** the obvious variable `proxy_pass`, which is wrong twice here: a variable target drops the URI
+unless the path is written back by hand, and it takes one host, so `ip_hash` would go with it. That
+`ip_hash` is load-bearing for the Socket.IO polling handshake. `resolve` was nginx Plus-only until
+1.27.3; the image is 1.29.8 and the Dockerfile now says so beside the pin.
+
+**`verify:multi` was passing without ever using nginx.** `web-prod`'s healthcheck asks for `/`, a
+static file that reaches no replica, and §19.10 talks to :3001 and :3002 directly — so the one thing
+that container is in the stack for went unexercised by every automated run. There is now a step that
+probes `http://localhost:8081/api/health/ready`, through the proxy, and it is the only automated
+proof that upstream resolution works at _request_ time rather than at config load.
+
+**The worker's healthcheck needed the worker to have a surface.** `up --wait` proved the container
+was running, and what actually covered the publisher was the smoke test's own round trip — so a
+worker that died on boot was reported as a **broadcast** failure, the §19.10 assertion blaming the
+thing it tests. `modules/health/worker-health.ts` is two routes over `node:http`, and readiness is
+the conjunction the worker's two jobs need: broker session, one completed publisher pass, BullMQ
+still consuming. A deliberate `paused` still counts as a pass — the loop is turning, it has been
+told to hold — and that distinction is in the loop, not in the predicate.
+
+`WORKER_HEALTH_PORT` has **no default**, which is the one design decision here. `verify-e2e.mjs`
+starts a worker beside the demo worker the user may already have up, and a second process binding a
+port it was given by default would have turned this fix into a crash. The compose overlay sets it;
+nothing else does, and `verify-e2e.mjs` now says why in the comment that used to read "the worker has
+no HTTP surface".
+
+**The CI job starts each image, and each app can prove something different without infrastructure.**
+The api serves `/api/health/live` and **refuses** `/api/health/ready` — ADR 011 split them for
+exactly this kind of reason, and a readiness probe that answered 200 with no database would be one
+that checks nothing. The worker cannot get past its first query without PostgreSQL, so what is
+asserted is the failure a build cannot catch: it reaches `outbox_controls`, which is the whole module
+graph having resolved, and no `ERR_MODULE_NOT_FOUND`. The web image serves the bundle. All three were
+run by hand against `pos-*:local` first, since a workflow cannot be run locally.
+
+Two traps inside that job. `docker/build-push-action` with `push: false` and no `load: true` leaves
+the image in the builder's cache and not in the daemon, so `docker run` would have said "no such
+image". And an image started with an **empty environment does not fail at configuration**: every knob
+in `@pos/config` has a default, so the api listens on the default port and the worker gets as far as
+its first query. Both smoke steps are written around that fact rather than against it.
+
+**The review pass found one, in this milestone's own change.** The `pos_multi` init script was
+mounted into `postgres` **from the overlay**, and an overlay that changes a base service's definition
+makes `docker compose up` recreate the container — so `verify:multi` replaced the PostgreSQL the user
+had started for the demo, on every run. Seen in the log of the run that was meant to prove something
+else (`postgres-1 Recreate`), twice. The mount moved to `docker-compose.yml`, beside PostgreSQL
+itself: the demo stack gains one empty database it does not use, which is much the cheaper of the
+two. The volume was never at risk either way — recreation keeps it — but "leave the machine as it was
+found" is the runner's whole promise. One recreation is still owed to anyone whose PostgreSQL
+container predates this commit, because the definition genuinely changed; after that, never again.
+The third `verify:multi` run reports `postgres-1 Running`, not `Recreate`.
+
+**And the M21 leftover moved a `snapshot()` with it.** Probing `:3000` first — before Compose,
+Chromium, the build and the seed — means `finish` can now be reached before anything is running, and
+`finish` decides what to tear down by difference against what was already up. Without
+`await runner.snapshot()` above the probe it would have treated the user's demo containers as this
+run's and removed them: a two-minute courtesy that would have cost a demo stack.
+
+**Falsified:** dropping `printWorkerRunning` from the readiness conjunction reddens one test;
+letting liveness call the probe reddens another; capturing the probe once at startup instead of per
+request reddens the one that flips a broker flag between two requests. The nginx half is falsified by
+the `nginx -t` pair above, and the `load: true` half by what `docker run` says without it.
+
+**Green:** lint, typecheck, `pnpm test` **505 passed** (493 + twelve), build, and
+`pnpm verify:multi` PASS three times — the third after the postgres fix. **Not run:** `verify:e2e`
+(its Playwright path is untouched; the probe reorder is the change) and CI itself. **Two hand
+checks are left**, both needing a stack the user brings up: recreating a replica under
+`verify:multi --keep` and watching :8081 keep serving, and pointing `worker-prod`'s
+`KAFKA_BROKERS` at nothing to see `--wait` time out where it used to report success.

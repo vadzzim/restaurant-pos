@@ -41,8 +41,12 @@ const STACK_DATABASE = 'pos_multi';
 const STACK_DATABASE_URL = `postgresql://pos:pos@localhost:5432/${STACK_DATABASE}`;
 
 /**
- * Created here because nothing else will: the `postgres` image runs its `POSTGRES_DB` init once,
- * against a volume the user has had since M1.
+ * Created here because the volume the user has had since M1 will not create it: the `postgres`
+ * image runs its `POSTGRES_DB` init and the `/docker-entrypoint-initdb.d/` scripts **only when the
+ * data directory is empty**. Since M24 `docker-compose.yml` mounts
+ * `scripts/postgres-init/create-multi-database.sql` there, which covers a *fresh* volume brought up
+ * by hand without this script (`[M21, P3]`, closed in M24). The two halves do not overlap:
+ * neither volume is served by the other's mechanism.
  *
  * `createdb` and not a `psql -c`, and no shell plumbing around it: `run()` spawns with
  * `shell: true` so that `docker` resolves on Windows, which means a pipe or a quoted SQL string in
@@ -67,6 +71,17 @@ const ALREADY_EXISTS = 'already exists';
  *
  * The count is spelled here to match `KAFKA_ORDER_EVENTS_PARTITIONS` in `@pos/config`.
  */
+/**
+ * The entry point in front of both replicas, as the host sees it (`8081:8080` in the overlay).
+ *
+ * Probed since M24, and it is the *proxy* that is being probed, not the bundle: `web-prod`'s own
+ * healthcheck asks for `/`, which is a static file and reaches no replica, so until this step the
+ * one thing nginx is here for went unexercised by every automated run. `nginx.conf` now defers
+ * upstream resolution to request time (`resolver` + `resolve`), and request time is the only moment
+ * that can be wrong about it.
+ */
+const WEB_READY_URL = 'http://localhost:8081/api/health/ready';
+
 const STACK_TOPIC = 'restaurant.order.events.multi';
 const CREATE_TOPIC = ['exec', '-T', 'redpanda', 'rpk', 'topic', 'create', STACK_TOPIC, '-p', '3'];
 const TOPIC_EXISTS = 'ALREADY_EXISTS';
@@ -125,6 +140,12 @@ async function main() {
   const up = await runner.up({ timeoutSeconds: 240 });
   if (up.code !== 0) {
     return runner.finish(up.code, 'the two-replica stack did not become healthy');
+  }
+
+  // Through nginx, not to a replica: this is the URL a browser uses, and a proxy that resolved its
+  // upstream once at config load would answer it for exactly as long as the address stayed valid.
+  if (!(await runner.waitForHttp(WEB_READY_URL, { timeoutMs: 60_000 }))) {
+    return runner.finish(1, 'nginx did not proxy /api to a replica');
   }
 
   const { code, failed } = await runner.runSteps([
