@@ -1,5 +1,7 @@
 # Restaurant POS Distributed Systems Demo
 
+[![CI](https://github.com/vadzzim/restaurant-pos/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vadzzim/restaurant-pos/actions/workflows/ci.yml)
+
 A restaurant point-of-sale where several terminals edit the same order and the network is not
 reliable. It is an interview demo, not a commercial product, and it exists to show two things
 working properly rather than many things working shallowly:

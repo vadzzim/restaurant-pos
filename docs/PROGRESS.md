@@ -52,7 +52,14 @@ the part that needed reviewing.
 **Green:** lint, typecheck, `pnpm test` **506 passed**, build, **`verify:multi` PASS ×4**. The three
 CI smoke commands were run by hand against `pos-*:local`, the api one **verbatim** out of `ci.yml`
 under `bash -e -o pipefail`; `pnpm test:e2e` against a foreign API refuses in **one second**, tearing
-down nothing. **Not run:** the rest of `verify:e2e`, CI itself.
+down nothing.
+
+**CI has now actually run.** Pushed to `github.com/vadzzim/restaurant-pos`; `ci.yml` fired on
+`06b6a79` and all five jobs are green — [run
+33415271193](https://github.com/vadzzim/restaurant-pos/actions/runs/33415271193). Nothing needed
+configuring: no secrets, no service containers, no `.env` — `@pos/config` defaults every URL to the
+ports Compose publishes and every `--env-file` in the repo is `--env-file-if-exists`. Added after:
+a README badge and a PR-only `concurrency` group.
 
 ## What exists
 
@@ -111,8 +118,8 @@ because **a line filed as a defect is not thereby one**.
 2. **M23's three browser checks are still open**, cheap with `pnpm build` then `preview`: a dynamic
    `import()` resolving after a rebuild-and-reload offline; POS-2 opening POS-1's order by id; three
    ticks on `/demo`, F5, switch scenario.
-3. **Still from M19:** walk §19.1 by hand, read a real CI run (the two unmet §26 clauses), force a
-   real interleaving in §21.1 and §21.10. `definition-of-done.md` maps what is proved, what is
+3. **Still from M19:** walk §19.1 by hand, force a real interleaving in §21.1 and §21.10.
+   (Reading a real CI run is done — see above.) `definition-of-done.md` maps what is proved, what is
    argued and what is neither.
 
 **Housekeeping:** `docker rm -f infallible_bhabha` — an idle container left by M24's image probing;

@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# A push to `main` is one milestone commit, and the claim being made is that *that commit* is green
+# — so pushes are never cancelled, however fast they arrive. A pull request is a moving target and
+# only its last push is interesting, so a superseded run there is cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # There is deliberately no `services:` block. `pnpm verify:integration` owns the container
 # lifecycle — it runs `docker compose up --wait` against the same `docker-compose.yml` a developer
 # uses — and declaring the services here as well would bind the same ports twice and verify a
